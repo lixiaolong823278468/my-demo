@@ -11,6 +11,7 @@ node_modules/
 预测文件/
 
 output/
+models/*.json
 models/current/
 models/previous/
 models/history/
