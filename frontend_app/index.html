@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>日前电价预测平台</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero-card">
+        <div class="hero-badge">欢迎使用 · 山西电力现货日前价格预测</div>
+        <h1 class="hero-title">日前电价预测平台</h1>
+        <p class="hero-subtitle">真正前后端分离架构 · 独立 HTML / JS / CSS 前端 · Python API 后端 · 相似法基线 + XGBoost 残差修正</p>
+      </header>
+
+      <section class="top-status" id="top-status"></section>
+
+      <section class="card-grid metrics-grid">
+        <article class="info-card">
+          <div class="card-title">当前默认模型</div>
+          <div class="card-value" id="current-model-id">-</div>
+          <div class="card-desc" id="current-model-range">-</div>
+        </article>
+        <article class="info-card">
+          <div class="card-title">上一版模型</div>
+          <div class="card-value" id="previous-model-id">-</div>
+          <div class="card-desc" id="previous-model-range">-</div>
+        </article>
+        <article class="info-card">
+          <div class="card-title">业务约束</div>
+          <div class="card-value">0 ~ 1500 元/兆瓦时</div>
+          <div class="card-desc">预测结果统一执行上下限裁剪，网页、命令行和导出文件保持一致。</div>
+        </article>
+      </section>
+
+      <section class="glass-card">
+        <div class="tabs-bar">
+          <button class="tab-btn active" data-tab="train">训练中心</button>
+          <button class="tab-btn" data-tab="predict">预测中心</button>
+          <button class="tab-btn" data-tab="versions">模型版本</button>
+          <button class="tab-btn" data-tab="logs">训练日志</button>
+        </div>
+
+        <div class="tab-panel active" id="tab-train">
+          <div class="section-header">
+            <div>
+              <div class="section-title">训练参数设置</div>
+              <div class="hint-text">默认启用训练起止日期，可自定义历史时间范围，并支持手动重训与指标追踪。</div>
+            </div>
+            <div class="toolbar-chips">
+              <span class="toolbar-chip">正式版本留存</span>
+              <span class="toolbar-chip">可回退</span>
+              <span class="toolbar-chip">训练日志归档</span>
+            </div>
+          </div>
+
+          <div class="form-grid four-col">
+            <label class="field">
+              <span>训练起始日期</span>
+              <div class="date-picker" id="train-start-picker" data-input-id="train-start-date">
+                <input class="date-display" id="train-start-date" type="text" readonly />
+                <button type="button" class="date-picker-icon" aria-label="选择日期">📅</button>
+                <div class="date-panel"></div>
+              </div>
+            </label>
+            <label class="field">
+              <span>训练结束日期</span>
+              <div class="date-picker" id="train-end-picker" data-input-id="train-end-date">
+                <input class="date-display" id="train-end-date" type="text" readonly />
+                <button type="button" class="date-picker-icon" aria-label="选择日期">📅</button>
+                <div class="date-panel"></div>
+              </div>
+            </label>
+            <label class="field">
+              <span>验证集天数</span>
+              <input type="number" id="valid-days" min="1" max="90" value="14" />
+            </label>
+            <label class="field">
+              <span>XGBoost 轮数</span>
+              <input type="number" id="num-boost-round" min="50" max="3000" step="50" value="400" />
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <label class="switch-item">
+              <input type="checkbox" id="enable-start" checked />
+              <span>启用训练起始日期</span>
+            </label>
+            <label class="switch-item">
+              <input type="checkbox" id="enable-end" checked />
+              <span>启用训练结束日期</span>
+            </label>
+          </div>
+
+          <div class="path-box" id="config-paths"></div>
+
+          <div class="progress-grid">
+            <div class="progress-card progress-card-train" id="train-progress-card">
+              <div class="progress-header">
+                <span class="progress-title">训练进度</span>
+                <span class="progress-state-text" id="train-progress-text">未开始</span>
+              </div>
+              <div class="progress-status-line" id="train-progress-status">等待手动重训</div>
+              <div class="progress-track">
+                <div class="progress-fill" id="train-progress-fill"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions-row">
+            <button class="primary-btn" id="train-btn">手动重训模型</button>
+            <button class="ghost-btn" id="refresh-train-metrics-btn">刷新当前指标</button>
+          </div>
+
+          <div class="subsection-title">当前默认模型分时段指标</div>
+          <div class="table-shell table-frame table-frame-md">
+            <table class="data-table" id="metrics-table">
+              <thead>
+                <tr>
+                  <th>分时段</th>
+                  <th>相似法 MAE</th>
+                  <th>相似法 RMSE</th>
+                  <th>融合 MAE</th>
+                  <th>融合 RMSE</th>
+                  <th>训练样本数</th>
+                  <th>验证样本数</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="tab-predict">
+          <div class="section-header">
+            <div>
+              <div class="section-title">预测文件编辑与执行</div>
+              <div class="hint-text">直接在下表修改预测文件数据，保存后执行预测，系统会将 96 点结果写回“预测价格”列。</div>
+            </div>
+            <div class="toolbar-chips">
+              <span class="toolbar-chip">可编辑表格</span>
+              <span class="toolbar-chip">实时回填 Excel</span>
+              <span class="toolbar-chip">预测结果导出</span>
+            </div>
+          </div>
+
+          <div class="progress-grid">
+            <div class="progress-card progress-card-predict" id="predict-progress-card">
+              <div class="progress-header">
+                <span class="progress-title">预测进度</span>
+                <span class="progress-state-text" id="predict-progress-text">未开始</span>
+              </div>
+              <div class="progress-status-line" id="predict-progress-status">等待执行预测</div>
+              <div class="progress-track">
+                <div class="progress-fill" id="predict-progress-fill"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions-row">
+            <button class="ghost-btn" id="reload-template-btn">重新加载预测文件</button>
+            <button class="ghost-btn" id="save-template-btn">保存当前编辑</button>
+            <button class="primary-btn" id="predict-btn">执行预测</button>
+            <a class="ghost-btn link-btn" href="/download/output" target="_blank">下载最新结果</a>
+          </div>
+
+          <div class="table-toolbar">
+            <div class="toolbar-title">预测文件预览</div>
+            <div class="toolbar-meta" id="template-meta">-</div>
+          </div>
+          <div class="table-shell table-frame table-frame-xl">
+            <div class="table-scroll">
+              <table class="data-table editable-table" id="template-table"></table>
+            </div>
+          </div>
+
+          <div class="chart-card">
+            <div class="table-toolbar">
+              <div class="toolbar-title">96 点预测曲线</div>
+              <div class="toolbar-meta" id="prediction-meta">尚未执行预测</div>
+            </div>
+            <div class="chart-stats" id="prediction-stats">
+              <span class="chart-stat">预测最低价：-</span>
+              <span class="chart-stat">预测最高价：-</span>
+              <span class="chart-stat">预测均价：-</span>
+              <span class="chart-stat">参考日期：-</span>
+            </div>
+            <div id="prediction-chart" class="chart-stage"></div>
+          </div>
+
+          <div class="table-toolbar">
+            <div class="toolbar-title">预测结果明细</div>
+            <div class="toolbar-meta">支持左右滚动查看全部字段</div>
+          </div>
+          <div class="table-shell table-frame table-frame-lg">
+            <div class="table-scroll">
+              <table class="data-table" id="prediction-table"></table>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="tab-versions">
+          <div class="section-header">
+            <div>
+              <div class="section-title">模型版本管理</div>
+              <div class="hint-text">仅展示正式训练版本；当前默认模型和上一版模型受保护，不能直接删除。</div>
+            </div>
+            <div class="toolbar-chips">
+              <span class="toolbar-chip">默认最新模型</span>
+              <span class="toolbar-chip">多选删除</span>
+              <span class="toolbar-chip">可随时回退</span>
+            </div>
+          </div>
+
+          <div class="form-grid version-grid">
+            <label class="field version-select-field">
+              <span>历史模型下拉列表</span>
+              <select id="version-select"></select>
+            </label>
+            <div class="actions-row compact-actions">
+              <button class="primary-btn" id="activate-version-btn">设为默认模型</button>
+              <button class="ghost-btn" id="rollback-btn">回退到上一版</button>
+              <button class="danger-btn" id="delete-versions-btn">删除选中版本</button>
+            </div>
+          </div>
+
+          <div class="table-shell table-frame table-frame-lg">
+            <div class="table-scroll">
+              <table class="data-table" id="versions-table">
+                <thead>
+                  <tr>
+                    <th><input type="checkbox" id="select-all-versions" /></th>
+                    <th>版本号</th>
+                    <th>创建时间</th>
+                    <th>训练范围</th>
+                    <th>样本数</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="tab-logs">
+          <div class="section-header">
+            <div>
+              <div class="section-title">训练日志与运行记录</div>
+              <div class="hint-text">这里展示每次正式训练的归档记录，便于查看历史时间范围与指标表现。</div>
+            </div>
+            <div class="toolbar-chips">
+              <span class="toolbar-chip">JSONL 归档</span>
+              <span class="toolbar-chip">按时间倒序</span>
+            </div>
+          </div>
+
+          <div class="table-toolbar">
+            <div class="toolbar-title">训练日志列表</div>
+            <div class="toolbar-meta" id="training-logs-meta">正在加载训练日志...</div>
+          </div>
+
+          <div class="table-shell table-frame table-frame-lg">
+            <div class="table-scroll">
+              <table class="data-table" id="training-logs-table">
+                <thead>
+                  <tr>
+                    <th>运行编号</th>
+                    <th>创建时间</th>
+                    <th>训练起始</th>
+                    <th>训练结束</th>
+                    <th>样本数</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <aside class="status-panel hidden-panel" id="status-panel">
+      <div class="status-panel-header">
+        <button class="ghost-btn mini-btn" id="hide-status-btn">隐藏</button>
+        <div class="status-panel-title">运行状态窗口</div>
+      </div>
+      <div class="status-current" id="status-current">系统待命</div>
+      <div class="status-progress-track">
+        <div class="status-progress-fill" id="status-progress-fill"></div>
+      </div>
+      <div class="log-console" id="log-console">暂无运行日志</div>
+    </aside>
+
+    <button class="status-fab status-ticker" id="status-fab">
+      <span class="status-fab-title">运行状态</span>
+      <span class="status-fab-marquee">
+        <span class="status-fab-marquee-text" id="status-fab-text">系统待命，点击展开查看详细运行过程</span>
+      </span>
+    </button>
+    <div class="toast-stack" id="toast-stack"></div>
+
+    <script src="/assets/vendor/echarts.min.js"></script>
+    <script src="/assets/app.js"></script>
+  </body>
+  </html>
