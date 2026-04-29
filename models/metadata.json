@@ -1,0 +1,90 @@
+{
+  "target_column": "日前出清价格(元/MWh)",
+  "feature_columns": [
+    "net_load",
+    "thermal_on_capacity",
+    "hour",
+    "period",
+    "weekday",
+    "month",
+    "is_weekend",
+    "is_holiday",
+    "lag_96"
+  ],
+  "segments": [
+    {
+      "name": "night",
+      "start": 1,
+      "end": 24
+    },
+    {
+      "name": "morning_peak",
+      "start": 25,
+      "end": 40
+    },
+    {
+      "name": "midday",
+      "start": 41,
+      "end": 60
+    },
+    {
+      "name": "evening_peak",
+      "start": 61,
+      "end": 80
+    },
+    {
+      "name": "late_night",
+      "start": 81,
+      "end": 96
+    }
+  ],
+  "valid_days": 14,
+  "num_boost_round": 80,
+  "xgboost_params": {
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "eta": 0.05,
+    "max_depth": 5,
+    "min_child_weight": 3,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "seed": 42
+  },
+  "metrics": {
+    "night": {
+      "train_rows": 19944,
+      "valid_rows": 336,
+      "best_iteration": 8,
+      "mae": 39.4364,
+      "rmse": 46.6843
+    },
+    "morning_peak": {
+      "train_rows": 13296,
+      "valid_rows": 224,
+      "best_iteration": 39,
+      "mae": 62.0237,
+      "rmse": 84.7754
+    },
+    "midday": {
+      "train_rows": 16620,
+      "valid_rows": 280,
+      "best_iteration": 46,
+      "mae": 39.7289,
+      "rmse": 61.9195
+    },
+    "evening_peak": {
+      "train_rows": 16620,
+      "valid_rows": 280,
+      "best_iteration": 52,
+      "mae": 134.2504,
+      "rmse": 233.7931
+    },
+    "late_night": {
+      "train_rows": 13296,
+      "valid_rows": 224,
+      "best_iteration": 79,
+      "mae": 129.1632,
+      "rmse": 223.5426
+    }
+  }
+}
