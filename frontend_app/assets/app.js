@@ -9,6 +9,7 @@ const App = {
   tickerTimer: null,
   tickerMessages: [],
   tickerIndex: 0,
+  tickerLoop: false,
   activeJobIds: {
     train: null,
     predict: null,
@@ -210,16 +211,37 @@ function stopTickerLoop() {
   }
 }
 
+function setStatusTickerText(message, animate = false) {
+  const textNode = $("#status-fab-text");
+  textNode.textContent = message;
+  textNode.classList.remove("animate");
+  if (!animate) return;
+  void textNode.offsetWidth;
+  textNode.classList.add("animate");
+}
+
+function isSameTickerMessages(messages) {
+  return messages.length === App.tickerMessages.length && messages.every((item, index) => item === App.tickerMessages[index]);
+}
+
 function updateStatusTicker(messages, loop = false) {
   const safeMessages = messages?.filter(Boolean) || ["系统待命，点击展开查看详细运行过程"];
+  const sameMessages = isSameTickerMessages(safeMessages);
+  const sameLoop = App.tickerLoop === loop;
+  if (sameMessages && sameLoop) {
+    if (loop && safeMessages.length > 1) {
+      if (!App.tickerTimer) ensureTickerLoop();
+    } else {
+      stopTickerLoop();
+      setStatusTickerText(safeMessages[0], false);
+    }
+    return;
+  }
   stopTickerLoop();
   App.tickerMessages = safeMessages;
+  App.tickerLoop = loop;
   App.tickerIndex = 0;
-  const textNode = $("#status-fab-text");
-  textNode.textContent = safeMessages[0];
-  textNode.classList.remove("status-fab-marquee-text");
-  void textNode.offsetWidth;
-  textNode.classList.add("status-fab-marquee-text");
+  setStatusTickerText(safeMessages[0], loop && safeMessages.length > 1);
   if (loop && safeMessages.length > 1) {
     ensureTickerLoop();
   }
@@ -230,11 +252,7 @@ function ensureTickerLoop() {
   App.tickerTimer = setInterval(() => {
     if (!App.tickerMessages.length) return;
     App.tickerIndex = (App.tickerIndex + 1) % App.tickerMessages.length;
-    const textNode = $("#status-fab-text");
-    textNode.textContent = App.tickerMessages[App.tickerIndex];
-    textNode.classList.remove("status-fab-marquee-text");
-    void textNode.offsetWidth;
-    textNode.classList.add("status-fab-marquee-text");
+    setStatusTickerText(App.tickerMessages[App.tickerIndex], true);
   }, 1800);
 }
 

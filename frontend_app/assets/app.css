@@ -747,6 +747,9 @@ select {
   line-height: 24px;
   white-space: nowrap;
   text-align: left;
+}
+
+.status-fab-marquee-text.animate {
   animation: tickerRise 0.45s ease;
 }
 
