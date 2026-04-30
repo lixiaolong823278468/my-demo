@@ -666,6 +666,20 @@ function renderStatusPanel(statusData) {
   }
 }
 
+async function pollJobUntilDone(jobId) {
+  let job = null;
+  for (let i = 0; i < 600; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    try {
+      job = await request(`/api/jobs/${jobId}`);
+    } catch {
+      continue;
+    }
+    if (!job || !job.running) break;
+  }
+  return job;
+}
+
 async function refreshTrackedJobs() {
   const modes = ["train", "predict"];
   const requests = modes.map(async (mode) => {
@@ -747,7 +761,7 @@ async function saveTemplate() {
 
 async function startTrain() {
   const btn = $("#train-btn");
-  const originalText = btn.textContent;
+  const originalText = btn?.textContent || "手动重训模型";
   try {
     setButtonLoading(btn, true, originalText);
     setPendingState("train", "正在提交训练任务...");
@@ -771,18 +785,34 @@ async function startTrain() {
       logs: [`[本地] 训练任务已启动：${data.job_id}`],
       running: true,
     };
-    applyProgressCard("train", { progress: 5, label: "已启动", status: `训练任务已启动：${data.job_id}`, type: "running" });
-    showToast(`已启动训练任务：${data.job_id}`);
+    applyProgressCard("train", { progress: 5, label: "训练中", status: `训练任务已启动：${data.job_id}`, type: "running" });
+    showToast(`已启动训练任务：${data.job_id}，等待完成...`);
+    const job = await pollJobUntilDone(data.job_id);
+    if (!job) {
+      applyProgressCard("train", { progress: 0, label: "超时", status: "训练超时（等待超过 15 分钟）", type: "error" });
+      showToast("训练超时，请检查服务器状态", "error");
+      return;
+    }
+    if (job.error) {
+      applyProgressCard("train", { progress: job.progress || 0, label: "失败", status: job.error, type: "error" });
+      showToast(`训练失败：${job.error.split("\n")[0]}`, "error");
+    } else {
+      applyProgressCard("train", { progress: 100, label: "已完成", status: "训练完成", type: "success" });
+      showToast("训练已完成");
+    }
+    await refreshSummary();
   } catch (error) {
     showToast(error.message, "error");
+    applyProgressCard("train", { progress: 0, label: "错误", status: error.message, type: "error" });
   } finally {
-    setButtonLoading(btn, false, originalText);
+    const el = $("#train-btn");
+    if (el) setButtonLoading(el, false, originalText);
   }
 }
 
 async function startPredict() {
   const btn = $("#predict-btn");
-  const originalText = btn.textContent;
+  const originalText = btn?.textContent || "执行预测";
   try {
     setButtonLoading(btn, true, originalText);
     App.predictSessionStarted = true;
@@ -805,12 +835,28 @@ async function startPredict() {
       logs: [`[本地] 预测任务已启动：${data.job_id}`],
       running: true,
     };
-    applyProgressCard("predict", { progress: 5, label: "已启动", status: `预测任务已启动：${data.job_id}`, type: "running" });
-    showToast(`已启动预测任务：${data.job_id}`);
+    applyProgressCard("predict", { progress: 5, label: "预测中", status: `预测任务已启动：${data.job_id}`, type: "running" });
+    showToast(`已启动预测任务：${data.job_id}，等待完成...`);
+    const job = await pollJobUntilDone(data.job_id);
+    if (!job) {
+      applyProgressCard("predict", { progress: 0, label: "超时", status: "预测超时（等待超过 15 分钟）", type: "error" });
+      showToast("预测超时，请检查服务器状态", "error");
+      return;
+    }
+    if (job.error) {
+      applyProgressCard("predict", { progress: job.progress || 0, label: "失败", status: job.error, type: "error" });
+      showToast(`预测失败：${job.error.split("\n")[0]}`, "error");
+    } else {
+      applyProgressCard("predict", { progress: 100, label: "已完成", status: "预测完成", type: "success" });
+      showToast("预测已完成");
+    }
+    await refreshSummary();
   } catch (error) {
     showToast(error.message, "error");
+    applyProgressCard("predict", { progress: 0, label: "错误", status: error.message, type: "error" });
   } finally {
-    setButtonLoading(btn, false, originalText);
+    const el = $("#predict-btn");
+    if (el) setButtonLoading(el, false, originalText);
   }
 }
 
