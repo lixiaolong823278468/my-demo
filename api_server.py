@@ -32,7 +32,7 @@ from dayahead_core import (
     list_model_versions,
     load_current_metadata,
     load_training_log,
-    predict_prices,
+    predict_prices_compare,
     rollback_to_previous,
     train_and_register,
 )
@@ -289,18 +289,34 @@ def summarize_train_result(result: Any) -> dict[str, Any]:
     }
 
 
-def summarize_predict_result(result: Any) -> dict[str, Any]:
-    prediction = {
-        "forecast_date": result.forecast_date,
-        "output_file": str(result.output_file),
-        "template_updated": result.template_updated,
-        "columns": list(result.result_df.columns),
-        "rows": dataframe_to_records(result.result_df),
-    }
+def serialize_prediction_variant(result: Any) -> dict[str, Any]:
     return {
         "forecast_date": result.forecast_date,
         "output_file": str(result.output_file),
         "template_updated": result.template_updated,
+        "reference_strategy_key": result.reference_strategy_key,
+        "reference_strategy_label": result.reference_strategy_label,
+        "reference_days_requested": result.reference_days_requested,
+        "reference_dates": result.reference_dates,
+        "columns": list(result.result_df.columns),
+        "rows": dataframe_to_records(result.result_df),
+    }
+
+
+def summarize_predict_result(result: Any) -> dict[str, Any]:
+    prediction = serialize_prediction_variant(result.strategy_results[result.selected_strategy_key])
+    prediction["comparison_predictions"] = {
+        key: serialize_prediction_variant(value)
+        for key, value in result.strategy_results.items()
+    }
+    prediction["selected_strategy_key"] = result.selected_strategy_key
+    prediction["selected_strategy_label"] = result.selected_strategy_label
+    return {
+        "forecast_date": result.forecast_date,
+        "output_file": str(result.output_file),
+        "template_updated": result.template_updated,
+        "selected_strategy_key": result.selected_strategy_key,
+        "selected_strategy_label": result.selected_strategy_label,
         "prediction": prediction,
     }
 
@@ -327,11 +343,13 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
 def build_predict_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any]]:
     def worker(job_id: str) -> dict[str, Any]:
         STATE.append_log(job_id, "收到预测请求", 1)
-        result = predict_prices(
+        result = predict_prices_compare(
             history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
             forecast_file=Path(payload.get("forecast_file") or FORECAST_FILE),
             model_root=Path(payload.get("model_root") or MODEL_ROOT),
             output_file=Path(payload.get("output_file") or OUTPUT_FILE),
+            reference_days=int(payload.get("reference_days") or 1),
+            selected_strategy=str(payload.get("selected_strategy") or "recent_n_days"),
             progress_callback=build_progress_callback(job_id),
         )
         return summarize_predict_result(result)
@@ -436,6 +454,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             "frontend_dir": str(FRONTEND_APP_DIR),
             "price_floor": PRICE_FLOOR,
             "price_cap": PRICE_CAP,
+            "default_reference_days": 1,
+            "reference_strategy_options": [
+                {"key": "recent_n_days", "label": "最近 N 天"},
+                {"key": "recent_same_type_days", "label": "最近 N 个同类型日"},
+            ],
+            "default_reference_strategy": "recent_n_days",
             "server_time": now_text(),
         }
 

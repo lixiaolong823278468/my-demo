@@ -30,11 +30,13 @@ def parse_args() -> argparse.Namespace:
     predict_parser.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT), help="模型根目录")
     predict_parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE), help="预测结果输出文件")
     predict_parser.add_argument("--holiday-file", help="节假日文件")
+    predict_parser.add_argument("--reference-days", type=int, default=1, help="相似法参考最近天数")
 
     train_predict_parser = subparsers.add_parser("train_predict", help="先训练后预测")
     add_train_args(train_predict_parser)
     train_predict_parser.add_argument("--forecast-file", default=str(DEFAULT_FORECAST_FILE), help="预测文件路径")
     train_predict_parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE), help="预测结果输出文件")
+    train_predict_parser.add_argument("--reference-days", type=int, default=1, help="相似法参考最近天数")
 
     rollback_parser = subparsers.add_parser("rollback", help="回退到上一版模型")
     rollback_parser.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT), help="模型根目录")
@@ -76,7 +78,7 @@ def main() -> None:
         print(f"当前模型目录: {result.current_model_dir}")
         print(f"训练日期范围: {result.train_dates[0]} ~ {result.train_dates[-1]}")
         if result.valid_dates:
-            print(f"验证日期: {result.valid_dates[0]} ~ {result.valid_dates[-1]}")
+            print(f"验证日期范围: {result.valid_dates[0]} ~ {result.valid_dates[-1]}")
         return
 
     if args.command == "predict":
@@ -86,10 +88,12 @@ def main() -> None:
             model_root=args.model_root,
             output_file=args.output_file,
             holiday_file=args.holiday_file,
+            reference_days=args.reference_days,
         )
         print(f"预测完成，预测日: {result.forecast_date}")
         print(f"结果文件: {result.output_file}")
         print(f"已回填模板: {result.template_updated}")
+        print(f"参考日: {', '.join(result.reference_dates)}")
         return
 
     if args.command == "train_predict":
@@ -101,10 +105,12 @@ def main() -> None:
             model_root=args.model_root,
             output_file=args.output_file,
             holiday_file=args.holiday_file,
+            reference_days=args.reference_days,
         )
         print(f"预测完成，预测日: {predict_result.forecast_date}")
         print(f"结果文件: {predict_result.output_file}")
         print(f"已回填模板: {predict_result.template_updated}")
+        print(f"参考日: {', '.join(predict_result.reference_dates)}")
         return
 
     if args.command == "rollback":
@@ -118,9 +124,6 @@ def main() -> None:
             print("暂无训练日志")
             return
         print(log_df[["run_id", "created_at", "train_start_date", "train_end_date", "sample_rows"]].to_string(index=False))
-        return
-
-    raise ValueError(f"不支持的命令: {args.command}")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,9 @@ const App = {
   },
   statusFocus: null,
   predictSessionStarted: false,
+  lastPrediction: null,
+  predictionViewDirty: false,
+  predictionChartSignature: null,
 };
 
 const columnTitleMap = {
@@ -41,6 +44,11 @@ const segmentNameMap = {
   midday: "午间",
   evening_peak: "晚高峰",
   late_night: "深夜",
+};
+
+const referenceStrategyLabelMap = {
+  recent_n_days: "最近 N 天",
+  recent_same_type_days: "最近 N 个同类型日",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -100,10 +108,8 @@ function setActiveTab(name) {
 function renderTopStatus(statusData) {
   const activeJob = getFocusedJobState();
   const items = [
-    `当前状态：${activeJob?.status || "系统待命"}`,
     `当前模型：${statusData.current_model?.run_id || "-"}`,
-    `预测文件：${App.config?.forecast_file || "-"}`,
-    `结果文件：${App.config?.output_file || "-"}`,
+    `运行状态：${activeJob?.status || "系统待命"}`,
   ];
   $("#top-status").innerHTML = items
     .map((item) => `<div class="status-chip"><span class="status-chip-dot"></span>${htmlEscape(item)}</div>`)
@@ -111,20 +117,11 @@ function renderTopStatus(statusData) {
 }
 
 function renderConfigPaths() {
-  $("#config-paths").innerHTML = `
-    历史数据目录：<code>${htmlEscape(App.config?.history_dir || "-")}</code><br>
-    模型目录：<code>${htmlEscape(App.config?.model_root || "-")}</code><br>
-    预测文件：<code>${htmlEscape(App.config?.forecast_file || "-")}</code><br>
-    前端目录：<code>${htmlEscape(App.config?.frontend_dir || "-")}</code>
-  `;
 }
 
 function renderModelSummary(versions, metadata) {
   $("#current-model-id").textContent = metadata?.run_id || "-";
   $("#current-model-range").textContent = metadata?.train_start_date ? `${metadata.train_start_date} ~ ${metadata.train_end_date}` : "-";
-  const previous = versions.find((item) => item.is_previous);
-  $("#previous-model-id").textContent = previous?.version_key || "-";
-  $("#previous-model-range").textContent = previous ? `${previous.train_start_date || "-"} ~ ${previous.train_end_date || "-"}` : "-";
 }
 
 function renderMetrics(metrics = {}) {
@@ -151,15 +148,30 @@ function renderMetrics(metrics = {}) {
     .join("");
 }
 
+function syncSelectAllVersionsState() {
+  const selectAll = $("#select-all-versions");
+  if (!selectAll) return;
+  const checks = $$(".version-check");
+  const checkedCount = checks.filter((item) => item.checked).length;
+  selectAll.checked = checks.length > 0 && checkedCount === checks.length;
+  selectAll.indeterminate = checkedCount > 0 && checkedCount < checks.length;
+}
+
 function renderVersions(versions) {
+  const selectedKeys = new Set(selectedVersionKeys());
+  const currentVersionKey = $("#version-select")?.value || "";
   App.versions = versions;
   $("#version-select").innerHTML = versions.length
     ? versions.map((item) => `<option value="${htmlEscape(item.version_key)}">${htmlEscape(item.label || item.version_key)}</option>`).join("")
     : `<option value="">暂无历史模型</option>`;
+  if (versions.some((item) => String(item.version_key) === currentVersionKey)) {
+    $("#version-select").value = currentVersionKey;
+  }
 
   const tbody = $("#versions-table tbody");
   if (!versions.length) {
     tbody.innerHTML = `<tr><td colspan="6">暂无历史模型版本</td></tr>`;
+    syncSelectAllVersionsState();
     return;
   }
   tbody.innerHTML = versions
@@ -167,9 +179,10 @@ function renderVersions(versions) {
       const tags = [];
       if (item.is_default) tags.push(`<span class="status-tag default">默认模型</span>`);
       if (item.is_previous) tags.push(`<span class="status-tag previous">上一版</span>`);
+      const checked = selectedKeys.has(String(item.version_key)) ? " checked" : "";
       return `
         <tr>
-          <td><input type="checkbox" class="version-check" value="${htmlEscape(item.version_key)}"></td>
+          <td><input type="checkbox" class="version-check" value="${htmlEscape(item.version_key)}"${checked}></td>
           <td>${htmlEscape(item.version_key)}</td>
           <td>${htmlEscape(item.created_at || "-")}</td>
           <td>${htmlEscape(item.train_start_date || "-")} ~ ${htmlEscape(item.train_end_date || "-")}</td>
@@ -179,6 +192,7 @@ function renderVersions(versions) {
       `;
     })
     .join("");
+  syncSelectAllVersionsState();
 }
 
 function renderTrainingLogs(logs) {
@@ -282,15 +296,117 @@ function collectTemplateRows() {
   });
 }
 
-function renderPredictionTable(prediction) {
-  const table = $("#prediction-table");
-  if (!prediction || !prediction.rows?.length) {
-    table.innerHTML = `<thead><tr><th>提示</th></tr></thead><tbody><tr><td>暂无预测结果</td></tr></tbody>`;
+function comparisonPredictions(prediction) {
+  if (!prediction) return {};
+  return prediction.comparison_predictions || {
+    [prediction.reference_strategy_key || "recent_n_days"]: prediction,
+  };
+}
+
+function currentReferenceDays() {
+  const value = Number($("#reference-days")?.value || App.config?.default_reference_days || 1);
+  return Number.isFinite(value) && value >= 1 ? value : 1;
+}
+
+function formatReferenceStrategyLabel(strategyKey, label, referenceDays = currentReferenceDays()) {
+  const baseLabel = label || referenceStrategyLabelMap[strategyKey] || strategyKey || "-";
+  return String(baseLabel).replace(/\s*N\s*/g, ` ${referenceDays} `).replace(/\s+/g, " ").trim();
+}
+
+function syncReferenceStrategyLabels(referenceDays = currentReferenceDays()) {
+  const options = App.config?.reference_strategy_options || [];
+  ["#prediction-output-strategy", "#prediction-view-strategy"].forEach((selector) => {
+    const select = $(selector);
+    if (!select) return;
+    Array.from(select.options).forEach((option) => {
+      const configOption = options.find((item) => item.key === option.value);
+      option.textContent = formatReferenceStrategyLabel(option.value, configOption?.label || referenceStrategyLabelMap[option.value], referenceDays);
+    });
+  });
+}
+
+function activePredictionVariant(prediction) {
+  if (!prediction) return null;
+  const comparisons = comparisonPredictions(prediction);
+  const viewKey = $("#prediction-view-strategy")?.value || prediction.selected_strategy_key || prediction.reference_strategy_key;
+  return comparisons[viewKey] || comparisons[prediction.selected_strategy_key] || Object.values(comparisons)[0] || prediction;
+}
+
+function syncPredictionStrategySelectors(prediction) {
+  const outputSelect = $("#prediction-output-strategy");
+  const viewSelect = $("#prediction-view-strategy");
+  if (!outputSelect || !viewSelect || !prediction) return;
+  const selectedKey = prediction.selected_strategy_key || prediction.reference_strategy_key || "recent_n_days";
+  syncReferenceStrategyLabels();
+  if (prediction.selected_strategy_key) {
+    outputSelect.value = selectedKey;
+  }
+  const comparisons = comparisonPredictions(prediction);
+  const keys = Object.keys(comparisons);
+  if (keys.length && (!App.predictionViewDirty || !keys.includes(viewSelect.value))) {
+    viewSelect.value = selectedKey || keys[0];
+  }
+}
+
+function renderComparisonCards(prediction) {
+  const container = $("#comparison-cards");
+  if (!container) return;
+  const comparisons = comparisonPredictions(prediction);
+  const keys = Object.keys(comparisons);
+  if (!keys.length) {
+    container.innerHTML = "";
     return;
   }
-  const columns = prediction.columns || Object.keys(prediction.rows[0]);
+  container.innerHTML = keys
+    .map((key) => {
+      const item = comparisons[key];
+      const values = item.rows.map((row) => Number(row.predicted_price || 0));
+      const avgValue = values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+      const minValue = Math.min(...values);
+      const maxValue = Math.max(...values);
+      const activeClass = ($("#prediction-view-strategy")?.value || prediction.selected_strategy_key) === key ? " active-strategy-card" : "";
+      const strategyLabel = formatReferenceStrategyLabel(key, item.reference_strategy_label, item.reference_days_requested || prediction.reference_days_requested);
+      return `
+        <article class="info-card${activeClass}">
+          <div class="card-title">${htmlEscape(strategyLabel)}</div>
+          <div class="card-value">${avgValue.toFixed(2)}</div>
+          <div class="card-desc">最低 ${minValue.toFixed(2)} | 最高 ${maxValue.toFixed(2)}</div>
+          <div class="card-desc">参考日期：${htmlEscape((item.reference_dates || []).join(" / ") || "-")}</div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function renderPredictionBundle(prediction) {
+  App.lastPrediction = prediction;
+  syncPredictionStrategySelectors(prediction);
+  renderComparisonCards(prediction);
+  renderPredictionTable(prediction);
+  renderPredictionChart(prediction);
+}
+
+function predictionVariantSignature(variant) {
+  if (!variant) return "";
+  return JSON.stringify({
+    strategy: variant.reference_strategy_key || "",
+    forecastDate: variant.forecast_date || "",
+    referenceDays: variant.reference_days_requested || "",
+    referenceDates: variant.reference_dates || [],
+    rows: variant.rows || [],
+  });
+}
+
+function renderPredictionTable(prediction) {
+  const table = $("#prediction-table");
+  const variant = activePredictionVariant(prediction);
+  if (!variant || !variant.rows?.length) {
+    table.innerHTML = `<thead><tr><th>字段</th></tr></thead><tbody><tr><td>暂无预测数据</td></tr></tbody>`;
+    return;
+  }
+  const columns = variant.columns || Object.keys(variant.rows[0]);
   const head = `<thead><tr>${columns.map((col) => `<th>${htmlEscape(columnTitleMap[col] || col)}</th>`).join("")}</tr></thead>`;
-  const body = prediction.rows
+  const body = variant.rows
     .map(
       (row) => `
         <tr>
@@ -315,26 +431,23 @@ function ensureChart() {
 
 function renderPredictionStats(prediction) {
   const target = $("#prediction-stats");
-  if (!prediction || !prediction.rows?.length) {
-    target.innerHTML = [
-      "预测最低价：-",
-      "预测最高价：-",
-      "预测均价：-",
-      "参考日期：-",
-    ].map((text) => `<span class="chart-stat">${text}</span>`).join("");
+  const variant = activePredictionVariant(prediction);
+  if (!variant || !variant.rows?.length) {
+    target.innerHTML = "";
     return;
   }
 
-  const values = prediction.rows.map((row) => Number(row.predicted_price || 0));
+  const values = variant.rows.map((row) => Number(row.predicted_price || 0));
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
   const avgValue = values.reduce((sum, item) => sum + item, 0) / Math.max(1, values.length);
-  const refDate = prediction.rows[0]?.date || prediction.forecast_date || "-";
+  const referenceDates = variant.reference_dates || [];
+  const referenceLabel = referenceDates.length ? referenceDates.join(" / ") : "-";
   target.innerHTML = [
-    `预测最低价：${minValue.toFixed(2)}`,
-    `预测最高价：${maxValue.toFixed(2)}`,
-    `预测均价：${avgValue.toFixed(2)}`,
-    `预测日期：${refDate}`,
+    `最低价：${minValue.toFixed(2)}`,
+    `最高价：${maxValue.toFixed(2)}`,
+    `均价：${avgValue.toFixed(2)}`,
+    `参考日：${referenceLabel}`,
   ].map((text) => `<span class="chart-stat">${text}</span>`).join("");
 }
 
@@ -343,122 +456,135 @@ function renderPredictionChart(prediction) {
   const chart = ensureChart();
   if (!chart) return;
 
-  if (!prediction || !prediction.rows?.length) {
-    chart.clear();
-    $("#prediction-meta").textContent = "尚未执行预测";
+  const variant = activePredictionVariant(prediction);
+  if (!variant || !variant.rows?.length) {
+    if (App.predictionChartSignature !== "") {
+      chart.clear();
+      App.predictionChartSignature = "";
+    }
+    $("#prediction-meta").textContent = "暂无预测数据";
     return;
   }
 
-  const rows = prediction.rows;
+  const rows = variant.rows;
   const periods = rows.map((row) => row.period);
   const predicted = rows.map((row) => Number(row.predicted_price || 0));
   const similar = rows.map((row) => Number(row.similar_price || 0));
   const lag96 = rows.map((row) => Number(row.lag_96 || 0));
   const residual = rows.map((row) => Number(row.residual_pred || 0));
-  const forecastDate = prediction.forecast_date || rows[0]?.date || "-";
+  const forecastDate = variant.forecast_date || rows[0]?.date || "-";
+  const referenceDays = variant.reference_days_requested || (variant.reference_dates || []).length || 1;
+  const strategyLabel = formatReferenceStrategyLabel(variant.reference_strategy_key, variant.reference_strategy_label, referenceDays);
+  const chartSignature = predictionVariantSignature(variant);
 
-  chart.setOption(
-    {
-      backgroundColor: "transparent",
-      animationDuration: 500,
-      color: ["#1677ff", "#52c41a", "#722ed1", "#faad14"],
-      tooltip: {
-        trigger: "axis",
-        axisPointer: { type: "cross" },
-        backgroundColor: "rgba(17,24,39,0.92)",
-        borderWidth: 0,
-        textStyle: { color: "#ffffff" },
+  if (App.predictionChartSignature !== chartSignature) {
+    chart.setOption(
+      {
+        backgroundColor: "transparent",
+        animationDuration: 500,
+        color: ["#1677ff", "#52c41a", "#722ed1", "#faad14"],
+        tooltip: {
+          trigger: "axis",
+          triggerOn: "mousemove|click",
+          axisPointer: { type: "cross" },
+          backgroundColor: "rgba(17,24,39,0.92)",
+          borderWidth: 0,
+          confine: true,
+          hideDelay: 120,
+          textStyle: { color: "#ffffff" },
+        },
+        legend: {
+          top: 12,
+          textStyle: { color: "#4e5969" },
+          data: ["最终预测价格", "相似法基线", "lag_96 前日价格", "残差修正值"],
+        },
+        grid: [
+          { left: 54, right: 36, top: 54, height: 230 },
+          { left: 54, right: 36, top: 308, height: 72 },
+        ],
+        xAxis: [
+          {
+            type: "category",
+            boundaryGap: false,
+            data: periods,
+            axisLabel: { color: "#86909c" },
+            axisLine: { lineStyle: { color: "#d9d9d9" } },
+          },
+          {
+            type: "category",
+            gridIndex: 1,
+            boundaryGap: false,
+            data: periods,
+            axisLabel: { color: "#86909c" },
+            axisLine: { lineStyle: { color: "#d9d9d9" } },
+          },
+        ],
+        yAxis: [
+          {
+            type: "value",
+            name: "Price",
+            min: 0,
+            max: 1500,
+            axisLabel: { color: "#86909c" },
+            splitLine: { lineStyle: { color: "rgba(5,5,5,0.06)" } },
+          },
+          {
+            type: "value",
+            gridIndex: 1,
+            name: "Residual",
+            axisLabel: { color: "#86909c" },
+            splitLine: { show: false },
+          },
+        ],
+        dataZoom: [
+          { type: "inside", xAxisIndex: [0, 1], start: 0, end: 100 },
+          { type: "slider", xAxisIndex: [0, 1], bottom: 0, height: 18, borderColor: "transparent" },
+        ],
+        series: [
+          {
+            name: "最终预测价格",
+            type: "line",
+            smooth: true,
+            symbol: "circle",
+            symbolSize: 6,
+            areaStyle: { color: "rgba(22,119,255,0.10)" },
+            data: predicted,
+          },
+          {
+            name: "相似法基线",
+            type: "line",
+            smooth: true,
+            symbol: "none",
+            lineStyle: { width: 2, type: "dashed" },
+            data: similar,
+          },
+          {
+            name: "lag_96 前日价格",
+            type: "line",
+            smooth: true,
+            symbol: "none",
+            lineStyle: { width: 2 },
+            data: lag96,
+          },
+          {
+            name: "残差修正值",
+            type: "bar",
+            xAxisIndex: 1,
+            yAxisIndex: 1,
+            barMaxWidth: 10,
+            data: residual,
+          },
+        ],
       },
-      legend: {
-        top: 12,
-        textStyle: { color: "#4e5969" },
-        data: ["预测价格", "相似法基线", "昨日同点价格", "残差修正"],
-      },
-      grid: [
-        { left: 54, right: 36, top: 54, height: 230 },
-        { left: 54, right: 36, top: 308, height: 72 },
-      ],
-      xAxis: [
-        {
-          type: "category",
-          boundaryGap: false,
-          data: periods,
-          axisLabel: { color: "#86909c" },
-          axisLine: { lineStyle: { color: "#d9d9d9" } },
-        },
-        {
-          type: "category",
-          gridIndex: 1,
-          boundaryGap: false,
-          data: periods,
-          axisLabel: { color: "#86909c" },
-          axisLine: { lineStyle: { color: "#d9d9d9" } },
-        },
-      ],
-      yAxis: [
-        {
-          type: "value",
-          name: "价格(元/MWh)",
-          min: 0,
-          max: 1500,
-          axisLabel: { color: "#86909c" },
-          splitLine: { lineStyle: { color: "rgba(5,5,5,0.06)" } },
-        },
-        {
-          type: "value",
-          gridIndex: 1,
-          name: "残差",
-          axisLabel: { color: "#86909c" },
-          splitLine: { show: false },
-        },
-      ],
-      dataZoom: [
-        { type: "inside", xAxisIndex: [0, 1], start: 0, end: 100 },
-        { type: "slider", xAxisIndex: [0, 1], bottom: 0, height: 18, borderColor: "transparent" },
-      ],
-      series: [
-        {
-          name: "预测价格",
-          type: "line",
-          smooth: true,
-          symbol: "circle",
-          symbolSize: 6,
-          areaStyle: { color: "rgba(22,119,255,0.10)" },
-          data: predicted,
-        },
-        {
-          name: "相似法基线",
-          type: "line",
-          smooth: true,
-          symbol: "none",
-          lineStyle: { width: 2, type: "dashed" },
-          data: similar,
-        },
-        {
-          name: "昨日同点价格",
-          type: "line",
-          smooth: true,
-          symbol: "none",
-          lineStyle: { width: 2 },
-          data: lag96,
-        },
-        {
-          name: "残差修正",
-          type: "bar",
-          xAxisIndex: 1,
-          yAxisIndex: 1,
-          barMaxWidth: 10,
-          data: residual,
-        },
-      ],
-    },
-    true,
-  );
-  requestAnimationFrame(() => {
-    chart.resize();
-  });
+      true,
+    );
+    App.predictionChartSignature = chartSignature;
+    requestAnimationFrame(() => {
+      chart.resize();
+    });
+  }
 
-  $("#prediction-meta").textContent = `预测日期：${forecastDate} · 共 ${rows.length} 点 · 价格范围已限制在 0~1500`;
+  $("#prediction-meta").textContent = `策略：${strategyLabel} | 预测日期：${forecastDate} | 参考天数：${referenceDays} 天`;
 }
 
 function applyProgressCard(key, state) {
@@ -568,14 +694,18 @@ function resetSessionProgress() {
   App.jobStates = { train: null, predict: null };
   App.statusFocus = null;
   App.predictSessionStarted = false;
+  App.predictionViewDirty = false;
   renderProgressSections();
   renderStatusPanel({});
-  renderPredictionTable(null);
-  renderPredictionChart(null);
+  renderPredictionBundle(null);
 }
 
 async function loadConfig() {
   App.config = await request("/api/config");
+  if ($("#reference-days") && App.config?.default_reference_days && !$("#reference-days").value) {
+    $("#reference-days").value = App.config.default_reference_days;
+  }
+  syncReferenceStrategyLabels();
   renderConfigPaths();
 }
 
@@ -593,8 +723,7 @@ async function refreshSummary() {
   renderModelSummary(versionsData.versions || [], currentModel.metadata || {});
   renderMetrics(currentModel.metadata?.metrics || {});
   if (App.predictSessionStarted && statusData.last_prediction?.rows?.length) {
-    renderPredictionTable(statusData.last_prediction);
-    renderPredictionChart(statusData.last_prediction);
+    renderPredictionBundle(statusData.last_prediction);
   }
 }
 
@@ -644,11 +773,15 @@ async function startTrain() {
 
 async function startPredict() {
   App.predictSessionStarted = true;
+  App.predictionViewDirty = false;
   setPendingState("predict", "正在保存并提交预测任务...");
   await saveTemplate();
   const data = await request("/api/predict", {
     method: "POST",
-    body: JSON.stringify({}),
+    body: JSON.stringify({
+      reference_days: Number($("#reference-days").value || App.config?.default_reference_days || 1),
+      selected_strategy: $("#prediction-output-strategy").value || App.config?.default_reference_strategy || "recent_n_days",
+    }),
   });
   App.activeJobIds.predict = data.job_id;
   App.jobStates.predict = {
@@ -723,6 +856,43 @@ function formatDateText(date) {
   return `${year}-${month}-${day}`;
 }
 
+function shiftPickerMonth(picker, delta) {
+  const nextDate = new Date(picker.viewYear, picker.viewMonth - 1 + delta, 1);
+  picker.viewYear = nextDate.getFullYear();
+  picker.viewMonth = nextDate.getMonth() + 1;
+}
+
+function shiftPickerYear(picker, delta) {
+  picker.viewYear += delta;
+}
+
+function getYearPanelStart(viewYear) {
+  return Math.floor(viewYear / 12) * 12;
+}
+
+function buildMonthPanel(viewYear, selectedDate) {
+  return Array.from({ length: 12 }, (_, index) => {
+    const month = index + 1;
+    const label = `${String(month).padStart(2, "0")}月`;
+    const classes = ["calendar-cell"];
+    if (selectedDate && selectedDate.getFullYear() === viewYear && selectedDate.getMonth() + 1 === month) {
+      classes.push("selected");
+    }
+    return `<button type="button" class="${classes.join(" ")}" data-month="${month}">${label}</button>`;
+  }).join("");
+}
+
+function buildYearPanel(viewYear, selectedDate) {
+  const startYear = getYearPanelStart(viewYear);
+  return Array.from({ length: 12 }, (_, index) => {
+    const year = startYear + index;
+    const classes = ["calendar-cell"];
+    if (year === viewYear) classes.push("current");
+    if (selectedDate && selectedDate.getFullYear() === year) classes.push("selected");
+    return `<button type="button" class="${classes.join(" ")}" data-year="${year}">${year}</button>`;
+  }).join("");
+}
+
 function buildCalendarDays(viewYear, viewMonth, selectedValue) {
   const firstDay = new Date(viewYear, viewMonth - 1, 1);
   const firstWeekday = firstDay.getDay() || 7;
@@ -759,27 +929,68 @@ function renderDatePicker(pickerId) {
   const root = document.getElementById(pickerId);
   const input = document.getElementById(picker.inputId);
   const panel = root.querySelector(".date-panel");
-  const current = parseDateText(picker.value) || new Date();
+  const selectedDate = parseDateText(picker.value) || new Date();
+  const yearPanelStart = getYearPanelStart(picker.viewYear);
+  let bodyHtml = "";
+  let headerTitle = "";
+  let showWeekdays = false;
+  let leftNavHtml = `
+    <button type="button" class="calendar-nav-btn" data-action="prev-year">&laquo;</button>
+    <button type="button" class="calendar-nav-btn" data-action="prev-month">&lsaquo;</button>
+  `;
+  let rightNavHtml = `
+    <button type="button" class="calendar-nav-btn" data-action="next-month">&rsaquo;</button>
+    <button type="button" class="calendar-nav-btn" data-action="next-year">&raquo;</button>
+  `;
   input.value = picker.value || "";
   input.disabled = !!picker.disabled;
   root.classList.toggle("open", picker.open);
   root.classList.toggle("disabled", !!picker.disabled);
+
+  if (picker.panelMode === "year") {
+    headerTitle = `${yearPanelStart} - ${yearPanelStart + 11}`;
+    bodyHtml = `<div class="calendar-panel-grid">${buildYearPanel(picker.viewYear, selectedDate)}</div>`;
+    leftNavHtml = `<button type="button" class="calendar-nav-btn" data-action="prev-year">&lsaquo;</button>`;
+    rightNavHtml = `<button type="button" class="calendar-nav-btn" data-action="next-year">&rsaquo;</button>`;
+  } else if (picker.panelMode === "month") {
+    headerTitle = `${picker.viewYear}年`;
+    bodyHtml = `<div class="calendar-panel-grid">${buildMonthPanel(picker.viewYear, selectedDate)}</div>`;
+    leftNavHtml = `<button type="button" class="calendar-nav-btn" data-action="prev-year">&lsaquo;</button>`;
+    rightNavHtml = `<button type="button" class="calendar-nav-btn" data-action="next-year">&rsaquo;</button>`;
+  } else {
+    showWeekdays = true;
+    bodyHtml = `<div class="calendar-grid">${buildCalendarDays(picker.viewYear, picker.viewMonth, formatDateText(selectedDate))}</div>`;
+  }
+
   panel.innerHTML = `
     <div class="calendar-toolbar">
-      <button type="button" class="calendar-nav-btn" data-action="prev">‹</button>
-      <div class="calendar-title">${picker.viewYear}年 ${picker.viewMonth}月</div>
-      <button type="button" class="calendar-nav-btn" data-action="next">›</button>
+      <div class="calendar-nav-group">
+        ${leftNavHtml}
+      </div>
+      <div class="calendar-title calendar-title-controls">
+        <button type="button" class="calendar-mode-btn ${picker.panelMode === "year" ? "active" : ""}" data-action="open-year-panel">
+          ${picker.panelMode === "year" ? headerTitle : `${picker.viewYear}年`}
+        </button>
+        <button type="button" class="calendar-mode-btn ${picker.panelMode === "month" ? "active" : ""}" data-action="open-month-panel">
+          ${picker.panelMode === "month" ? "选择月份" : `${String(picker.viewMonth).padStart(2, "0")}月`}
+        </button>
+      </div>
+      <div class="calendar-nav-group">
+        ${rightNavHtml}
+      </div>
     </div>
-    <div class="calendar-weekdays">
-      <div class="calendar-weekday">一</div>
-      <div class="calendar-weekday">二</div>
-      <div class="calendar-weekday">三</div>
-      <div class="calendar-weekday">四</div>
-      <div class="calendar-weekday">五</div>
-      <div class="calendar-weekday">六</div>
-      <div class="calendar-weekday">日</div>
-    </div>
-    <div class="calendar-grid">${buildCalendarDays(picker.viewYear, picker.viewMonth, formatDateText(current))}</div>
+    ${showWeekdays ? `
+      <div class="calendar-weekdays">
+        <div class="calendar-weekday">一</div>
+        <div class="calendar-weekday">二</div>
+        <div class="calendar-weekday">三</div>
+        <div class="calendar-weekday">四</div>
+        <div class="calendar-weekday">五</div>
+        <div class="calendar-weekday">六</div>
+        <div class="calendar-weekday">日</div>
+      </div>
+    ` : ""}
+    ${bodyHtml}
   `;
 }
 
@@ -787,6 +998,7 @@ function closeOtherDatePickers(exceptId) {
   Object.keys(App.datePickers).forEach((pickerId) => {
     if (pickerId !== exceptId && App.datePickers[pickerId].open) {
       App.datePickers[pickerId].open = false;
+      App.datePickers[pickerId].panelMode = "day";
       renderDatePicker(pickerId);
     }
   });
@@ -799,6 +1011,7 @@ function initDatePicker(pickerId, inputId, defaultValue) {
     value: defaultValue,
     open: false,
     disabled: false,
+    panelMode: "day",
     viewYear: parsed.getFullYear(),
     viewMonth: parsed.getMonth() + 1,
   };
@@ -811,21 +1024,69 @@ function initDatePicker(pickerId, inputId, defaultValue) {
     if (picker.disabled) return;
 
     const action = event.target.closest("[data-action]")?.dataset.action;
-    if (action === "prev") {
-      picker.viewMonth -= 1;
-      if (picker.viewMonth <= 0) {
-        picker.viewMonth = 12;
-        picker.viewYear -= 1;
+    if (action === "open-year-panel") {
+      picker.panelMode = "year";
+      renderDatePicker(pickerId);
+      return;
+    }
+    if (action === "open-month-panel") {
+      picker.panelMode = "month";
+      renderDatePicker(pickerId);
+      return;
+    }
+    if (action === "prev-year") {
+      if (picker.panelMode === "year") {
+        shiftPickerYear(picker, -12);
+      } else {
+        shiftPickerYear(picker, -1);
       }
       renderDatePicker(pickerId);
       return;
     }
-    if (action === "next") {
-      picker.viewMonth += 1;
-      if (picker.viewMonth >= 13) {
-        picker.viewMonth = 1;
-        picker.viewYear += 1;
+    if (action === "prev-month") {
+      if (picker.panelMode === "month") {
+        shiftPickerYear(picker, -1);
+      } else if (picker.panelMode === "year") {
+        shiftPickerYear(picker, -12);
+      } else {
+        shiftPickerMonth(picker, -1);
       }
+      renderDatePicker(pickerId);
+      return;
+    }
+    if (action === "next-month") {
+      if (picker.panelMode === "month") {
+        shiftPickerYear(picker, 1);
+      } else if (picker.panelMode === "year") {
+        shiftPickerYear(picker, 12);
+      } else {
+        shiftPickerMonth(picker, 1);
+      }
+      renderDatePicker(pickerId);
+      return;
+    }
+    if (action === "next-year") {
+      if (picker.panelMode === "year") {
+        shiftPickerYear(picker, 12);
+      } else {
+        shiftPickerYear(picker, 1);
+      }
+      renderDatePicker(pickerId);
+      return;
+    }
+
+    const yearButton = event.target.closest("[data-year]");
+    if (yearButton?.dataset.year) {
+      picker.viewYear = Number(yearButton.dataset.year) || picker.viewYear;
+      picker.panelMode = "month";
+      renderDatePicker(pickerId);
+      return;
+    }
+
+    const monthButton = event.target.closest("[data-month]");
+    if (monthButton?.dataset.month) {
+      picker.viewMonth = Number(monthButton.dataset.month) || picker.viewMonth;
+      picker.panelMode = "day";
       renderDatePicker(pickerId);
       return;
     }
@@ -837,19 +1098,28 @@ function initDatePicker(pickerId, inputId, defaultValue) {
       picker.viewYear = selectedDate.getFullYear();
       picker.viewMonth = selectedDate.getMonth() + 1;
       picker.open = false;
+      picker.panelMode = "day";
       renderDatePicker(pickerId);
       return;
     }
 
     picker.open = !picker.open;
-    if (picker.open) closeOtherDatePickers(pickerId);
+    if (picker.open) {
+      picker.panelMode = "day";
+      closeOtherDatePickers(pickerId);
+    } else {
+      picker.panelMode = "day";
+    }
     renderDatePicker(pickerId);
   });
 }
 
 function setDatePickerDisabled(pickerId, disabled) {
   App.datePickers[pickerId].disabled = disabled;
-  if (disabled) App.datePickers[pickerId].open = false;
+  if (disabled) {
+    App.datePickers[pickerId].open = false;
+    App.datePickers[pickerId].panelMode = "day";
+  }
   renderDatePicker(pickerId);
 }
 
@@ -860,6 +1130,14 @@ function bindEvents() {
   $("#reload-template-btn").addEventListener("click", () => loadTemplate().then(() => showToast("预测文件已重新加载")).catch((error) => showToast(error.message, "error")));
   $("#save-template-btn").addEventListener("click", () => saveTemplate().catch((error) => showToast(error.message, "error")));
   $("#predict-btn").addEventListener("click", () => startPredict().catch((error) => showToast(error.message, "error")));
+  $("#reference-days").addEventListener("input", () => syncReferenceStrategyLabels());
+  $("#reference-days").addEventListener("change", () => syncReferenceStrategyLabels());
+  $("#prediction-view-strategy").addEventListener("change", () => {
+    App.predictionViewDirty = true;
+    renderComparisonCards(App.lastPrediction);
+    renderPredictionTable(App.lastPrediction);
+    renderPredictionChart(App.lastPrediction);
+  });
   $("#activate-version-btn").addEventListener("click", () => activateVersion().catch((error) => showToast(error.message, "error")));
   $("#rollback-btn").addEventListener("click", () => rollbackVersion().catch((error) => showToast(error.message, "error")));
   $("#delete-versions-btn").addEventListener("click", () => deleteSelectedVersions().catch((error) => showToast(error.message, "error")));
@@ -867,6 +1145,12 @@ function bindEvents() {
     $$(".version-check").forEach((item) => {
       item.checked = event.target.checked;
     });
+    syncSelectAllVersionsState();
+  });
+  $("#versions-table").addEventListener("change", (event) => {
+    if (event.target.matches(".version-check")) {
+      syncSelectAllVersionsState();
+    }
   });
   $("#enable-start").addEventListener("change", (event) => {
     setDatePickerDisabled("train-start-picker", !event.target.checked);

@@ -29,6 +29,7 @@ class PredictorDesktopApp:
         self.model_root_var = tk.StringVar(value=str(DEFAULT_MODEL_ROOT))
         self.forecast_file_var = tk.StringVar(value=str(DEFAULT_FORECAST_FILE))
         self.output_file_var = tk.StringVar(value=str(DEFAULT_OUTPUT_FILE))
+        self.reference_days_var = tk.StringVar(value="1")
         self.start_date_var = tk.StringVar()
         self.end_date_var = tk.StringVar()
         self.valid_days_var = tk.StringVar(value="14")
@@ -78,11 +79,13 @@ class PredictorDesktopApp:
         items = [
             ("预测文件", self.forecast_file_var, True, self.choose_file),
             ("输出文件", self.output_file_var, False, self.save_file),
+            ("参考天数", self.reference_days_var, False, None),
         ]
         for row, (label, variable, _, handler) in enumerate(items):
             ttk.Label(self.predict_frame, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=8)
             ttk.Entry(self.predict_frame, textvariable=variable, width=60).grid(row=row, column=1, sticky="ew", padx=8, pady=8)
-            ttk.Button(self.predict_frame, text="选择", command=lambda var=variable, fn=handler: fn(var)).grid(row=row, column=2, padx=8, pady=8)
+            if handler is not None:
+                ttk.Button(self.predict_frame, text="选择", command=lambda var=variable, fn=handler: fn(var)).grid(row=row, column=2, padx=8, pady=8)
         self.predict_frame.columnconfigure(1, weight=1)
         ttk.Button(self.predict_frame, text="执行预测", command=self.start_predict).grid(row=3, column=1, sticky="w", padx=8, pady=10)
 
@@ -151,6 +154,7 @@ class PredictorDesktopApp:
                 forecast_file=self.forecast_file_var.get(),
                 model_root=self.model_root_var.get(),
                 output_file=self.output_file_var.get(),
+                reference_days=int(self.reference_days_var.get() or "1"),
             )
             self.append_log(f"预测完成：{result.forecast_date} -> {result.output_file}")
         except Exception as exc:

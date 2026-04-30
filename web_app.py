@@ -359,6 +359,7 @@ def render_predict_tab() -> None:
 
     render_chip_row([f"当前表共 {len(sheet_df)} 行", "可直接在页面编辑", "支持保存后再预测"])
     edited_df = st.data_editor(sheet_df, num_rows="fixed", width="stretch", key="forecast_editor")
+    reference_days = st.number_input("参考天数", min_value=1, max_value=30, value=1, step=1)
 
     progress_bar = st.progress(0)
     status_placeholder = st.empty()
@@ -380,6 +381,7 @@ def render_predict_tab() -> None:
             forecast_file=FORECAST_FILE,
             model_root=MODEL_ROOT,
             output_file=OUTPUT_FILE,
+            reference_days=int(reference_days),
             progress_callback=callback,
         )
         st.session_state.last_predict_df = result.result_df.copy()

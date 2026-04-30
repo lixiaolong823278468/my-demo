@@ -40,6 +40,12 @@ FEATURE_COLUMNS = [
     SIMILAR_PRICE_COLUMN,
     SIMILAR_GAP_COLUMN,
 ]
+REFERENCE_STRATEGIES = OrderedDict(
+    [
+        ("recent_n_days", "最近 N 天"),
+        ("recent_same_type_days", "最近 N 个同类型日"),
+    ]
+)
 SEGMENTS = OrderedDict(
     [
         ("night", (1, 24)),
@@ -89,7 +95,21 @@ class PredictResult:
     forecast_date: str
     output_file: Path
     template_updated: bool
+    reference_strategy_key: str
+    reference_strategy_label: str
+    reference_days_requested: int
+    reference_dates: list[str]
     result_df: pd.DataFrame
+
+
+@dataclass
+class PredictCompareResult:
+    forecast_date: str
+    output_file: Path
+    template_updated: bool
+    selected_strategy_key: str
+    selected_strategy_label: str
+    strategy_results: dict[str, PredictResult]
 
 
 ProgressCallback = Callable[[str, int | None], None]
@@ -105,6 +125,20 @@ def ensure_xgboost_available() -> None:
 def emit_progress(callback: ProgressCallback | None, message: str, percent: int | None = None) -> None:
     if callback is not None:
         callback(message, percent)
+
+
+def normalize_reference_days(reference_days: int | None) -> int:
+    value = int(reference_days or 1)
+    if value <= 0:
+        raise ValueError("reference_days 必须大于等于 1")
+    return value
+
+
+def normalize_reference_strategy(reference_strategy: str | None) -> str:
+    strategy_key = str(reference_strategy or "recent_n_days").strip() or "recent_n_days"
+    if strategy_key not in REFERENCE_STRATEGIES:
+        raise ValueError(f"不支持的参考日策略: {strategy_key}")
+    return strategy_key
 
 
 def normalize_text(text: object) -> str:
@@ -152,6 +186,15 @@ def load_holiday_dates(holiday_file: str | Path | None) -> set[pd.Timestamp]:
         return set()
     date_series = holiday_df["date"] if "date" in holiday_df.columns else holiday_df.iloc[:, 0]
     return set(pd.to_datetime(date_series, errors="coerce").dropna().dt.normalize().tolist())
+
+
+def day_type_of(date_value: pd.Timestamp, holiday_dates: set[pd.Timestamp]) -> str:
+    normalized = pd.Timestamp(date_value).normalize()
+    if normalized in holiday_dates:
+        return "holiday"
+    if normalized.weekday() >= 5:
+        return "weekend"
+    return "workday"
 
 
 def resolve_column(columns: Iterable[object], candidates: list[str], required: bool) -> str | None:
@@ -251,7 +294,7 @@ class DayAheadDataBuilder:
         progress_callback: ProgressCallback | None = None,
         progress_start: int | None = None,
         progress_end: int | None = None,
-        progress_label: str = "????????",
+        progress_label: str = "正在读取数据",
     ) -> pd.DataFrame:
         all_days: list[pd.DataFrame] = []
         self.skipped_sheets = []
@@ -428,16 +471,16 @@ def build_training_frame(
         progress_end=18,
         progress_label="正在加载历史数据文件",
     )
-    emit_progress(progress_callback, "???? lag_96 ??", 19)
+    emit_progress(progress_callback, "正在构建 lag_96 特征", 19)
     history_df = attach_lag_96(history_df, history_df)
-    emit_progress(progress_callback, "正在加载历史数据文件?", 20)
+    emit_progress(progress_callback, "正在构建相似法特征", 20)
     history_df = attach_similarity_features(history_df)
-    emit_progress(progress_callback, "正在加载历史数据文件???", 21)
+    emit_progress(progress_callback, "相似法特征构建完成", 21)
     history_df = filter_date_range(history_df, config.start_date, config.end_date)
-    emit_progress(progress_callback, "????????", 22)
+    emit_progress(progress_callback, "正在过滤日期范围", 22)
     history_df = history_df.dropna(subset=[TARGET_COLUMN, "lag_96", SIMILAR_PRICE_COLUMN, RESIDUAL_TARGET_COLUMN]).reset_index(drop=True)
     if history_df.empty:
-        raise ValueError("正在加载历史数据文件正在加载历史数据文件?")
+        raise ValueError("数据加载后经清洗为空，请检查历史数据文件是否包含有效数据。")
     return history_df, builder.skipped_sheets
 
 def make_dmatrix(frame: pd.DataFrame, feature_columns: list[str], label_column: str | None = None):
@@ -808,6 +851,7 @@ def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.
 
     reference_df = pd.DataFrame(
         {
+            "date": reference_date.normalize(),
             "period": periods,
             "net_load": reference_net_load.iloc[:96].to_numpy(),
             TARGET_COLUMN: to_numeric(raw_df[reference_price_col]).iloc[:96].to_numpy(),
@@ -816,7 +860,7 @@ def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.
     return forecast_df, reference_df
 
 
-def load_forecast_generic(history_df: pd.DataFrame, forecast_file: str | Path, holiday_dates: set[pd.Timestamp]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_forecast_generic(history_df: pd.DataFrame, forecast_file: str | Path, holiday_dates: set[pd.Timestamp]) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     default_year = int(pd.to_datetime(history_df["date"]).max().year)
     template_df, template_reference = try_load_forecast_template(forecast_file, holiday_dates, default_year)
     if template_df is not None:
@@ -864,9 +908,68 @@ def load_forecast_generic(history_df: pd.DataFrame, forecast_file: str | Path, h
     if not all_days:
         raise ValueError(f"未解析到可用的预测 Sheet: {forecast_file}")
     forecast_df = pd.concat(all_days, ignore_index=True).sort_values(["date", "period"]).reset_index(drop=True)
-    last_history_date = pd.to_datetime(history_df["date"]).max()
-    reference_df = history_df[history_df["date"] == last_history_date][["period", "net_load", TARGET_COLUMN]].copy()
-    return forecast_df, reference_df
+    return forecast_df, None
+
+
+def build_reference_frame(
+    history_df: pd.DataFrame,
+    forecast_df: pd.DataFrame,
+    template_reference_df: pd.DataFrame | None,
+    reference_days: int,
+    reference_strategy: str,
+    holiday_dates: set[pd.Timestamp],
+) -> tuple[pd.DataFrame, list[str]]:
+    reference_days = normalize_reference_days(reference_days)
+    reference_strategy = normalize_reference_strategy(reference_strategy)
+    forecast_date = pd.to_datetime(forecast_df["date"]).min().normalize()
+    forecast_day_type = day_type_of(forecast_date, holiday_dates)
+    history_dates = pd.to_datetime(history_df["date"], errors="coerce").dropna().dt.normalize()
+    selected_dates: list[pd.Timestamp] = []
+    selected_frames: list[pd.DataFrame] = []
+
+    def is_eligible_reference(ref_date: pd.Timestamp) -> bool:
+        if reference_strategy == "recent_n_days":
+            return True
+        return day_type_of(ref_date, holiday_dates) == forecast_day_type
+
+    if template_reference_df is not None and not template_reference_df.empty and len(selected_dates) < reference_days:
+        template_reference = template_reference_df[["date", "period", "net_load", TARGET_COLUMN]].copy()
+        template_reference["date"] = pd.to_datetime(template_reference["date"], errors="coerce").dt.normalize()
+        template_date = pd.to_datetime(template_reference["date"]).iloc[0].normalize()
+        if is_eligible_reference(template_date):
+            selected_frames.append(template_reference)
+            selected_dates.append(template_date)
+
+    used_dates = set(selected_dates)
+    recent_history_dates = [
+        ref_date
+        for ref_date in sorted(set(history_dates.tolist()), reverse=True)
+        if ref_date < forecast_date and ref_date not in used_dates and is_eligible_reference(ref_date)
+    ]
+    for ref_date in recent_history_dates:
+        if len(selected_dates) >= reference_days:
+            break
+        history_reference = history_df.loc[history_dates == ref_date, ["date", "period", "net_load", TARGET_COLUMN]].copy()
+        if history_reference.empty:
+            continue
+        selected_frames.append(history_reference)
+        selected_dates.append(ref_date)
+
+    if not selected_frames:
+        raise ValueError("未找到可用于相似法预测的参考日数据")
+    if len(selected_dates) < reference_days:
+        warnings.warn(
+            f"请求使用最近 {reference_days} 天参考数据，但仅找到 {len(selected_dates)} 天可用样本，已自动降级为现有样本。",
+            stacklevel=2,
+        )
+
+    reference_df = pd.concat(selected_frames, ignore_index=True)
+    reference_df["date"] = pd.to_datetime(reference_df["date"], errors="coerce").dt.normalize()
+    reference_df = reference_df.dropna(subset=["net_load", TARGET_COLUMN]).reset_index(drop=True)
+    if reference_df.empty:
+        raise ValueError("参考日样本缺少有效净负荷或价格数据，无法构造相似法特征")
+    reference_dates = [pd.Timestamp(ref_date).strftime("%Y-%m-%d") for ref_date in selected_dates]
+    return reference_df, reference_dates
 
 
 def attach_forecast_similarity_features(forecast_df: pd.DataFrame, reference_df: pd.DataFrame) -> pd.DataFrame:
@@ -885,16 +988,14 @@ def clip_price_series(values: pd.Series | np.ndarray) -> pd.Series | np.ndarray:
     return np.clip(values, PRICE_FLOOR, PRICE_CAP)
 
 
-def predict_prices(
+def prepare_prediction_inputs(
     history_dir: str | Path,
     forecast_file: str | Path,
-    model_root: str | Path = DEFAULT_MODEL_ROOT,
-    output_file: str | Path = DEFAULT_OUTPUT_FILE,
-    holiday_file: str | Path | None = None,
+    model_root: str | Path,
+    holiday_file: str | Path | None,
     progress_callback: ProgressCallback | None = None,
-) -> PredictResult:
-    ensure_xgboost_available()
-    emit_progress(progress_callback, "开始加载历史数据", 5)
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, set[pd.Timestamp], dict, dict[str, object]]:
+    emit_progress(progress_callback, "开始加载预测所需数据", 5)
     holiday_dates = load_holiday_dates(holiday_file)
     builder = DayAheadDataBuilder(holiday_dates)
     history_df = builder.load_excel_collection(
@@ -903,26 +1004,53 @@ def predict_prices(
         progress_callback=progress_callback,
         progress_start=6,
         progress_end=18,
-        progress_label="正在加载历史数据文件",
+        progress_label="正在加载历史数据",
     )
-    emit_progress(progress_callback, "历史数据加载完成，开始解析预测文件", 20)
-    forecast_df, reference_df = load_forecast_generic(history_df, forecast_file, holiday_dates)
+    emit_progress(progress_callback, "历史数据加载完成，正在加载预测文件", 20)
+    forecast_df, template_reference_df = load_forecast_generic(history_df, forecast_file, holiday_dates)
     if "lag_96" not in forecast_df.columns:
         forecast_df = attach_lag_96(forecast_df, history_df)
     if forecast_df["lag_96"].isna().any():
         missing = forecast_df.loc[forecast_df["lag_96"].isna(), ["date", "period"]].head(10)
-        raise ValueError(f"以下日期/时段缺少 lag_96，无法直接预测:\n{missing.to_string(index=False)}")
-    emit_progress(progress_callback, "预测文件解析完成，开始构造相似法特征", 40)
-    forecast_df = attach_forecast_similarity_features(forecast_df, reference_df)
-    emit_progress(progress_callback, "正在加载默认模型", 55)
+        raise ValueError(f"Missing lag_96 for date/period:\n{missing.to_string(index=False)}")
+    emit_progress(progress_callback, "正在加载当前默认模型", 45)
     metadata, models, _ = load_models(model_root)
+    return history_df, forecast_df, template_reference_df, holiday_dates, metadata, models
+
+
+def run_prediction_with_strategy(
+    history_df: pd.DataFrame,
+    forecast_df: pd.DataFrame,
+    template_reference_df: pd.DataFrame | None,
+    holiday_dates: set[pd.Timestamp],
+    metadata: dict,
+    models: dict[str, object],
+    reference_days: int,
+    reference_strategy: str,
+    progress_callback: ProgressCallback | None = None,
+    segment_progress_start: int = 55,
+    segment_progress_span: int = 30,
+) -> tuple[pd.DataFrame, list[str], str, str]:
+    strategy_key = normalize_reference_strategy(reference_strategy)
+    strategy_label = REFERENCE_STRATEGIES[strategy_key]
+    reference_df, reference_dates = build_reference_frame(
+        history_df=history_df,
+        forecast_df=forecast_df,
+        template_reference_df=template_reference_df,
+        reference_days=reference_days,
+        reference_strategy=strategy_key,
+        holiday_dates=holiday_dates,
+    )
+    strategy_forecast_df = attach_forecast_similarity_features(forecast_df, reference_df)
 
     prediction_frames: list[pd.DataFrame] = []
     total_segments = len(metadata["segments"])
     for idx, segment in enumerate(metadata["segments"], start=1):
         segment_name = segment["name"]
-        emit_progress(progress_callback, f"正在预测分时段：{segment_name}", 55 + int(idx / total_segments * 30))
-        segment_df = forecast_df[forecast_df["segment"] == segment_name].copy()
+        if progress_callback is not None:
+            segment_percent = segment_progress_start + int(idx / max(total_segments, 1) * segment_progress_span)
+            emit_progress(progress_callback, f"正在预测 {strategy_label} / 时段{segment_name}", segment_percent)
+        segment_df = strategy_forecast_df[strategy_forecast_df["segment"] == segment_name].copy()
         if segment_df.empty:
             continue
         dmatrix = make_dmatrix(segment_df, metadata["feature_columns"])
@@ -936,18 +1064,134 @@ def predict_prices(
         prediction_frames.append(segment_df)
 
     result_df = pd.concat(prediction_frames, ignore_index=True).sort_values(["date", "period"]).reset_index(drop=True)
+    return result_df, reference_dates, strategy_key, strategy_label
+
+
+def predict_prices(
+    history_dir: str | Path,
+    forecast_file: str | Path,
+    model_root: str | Path = DEFAULT_MODEL_ROOT,
+    output_file: str | Path = DEFAULT_OUTPUT_FILE,
+    holiday_file: str | Path | None = None,
+    reference_days: int = 1,
+    reference_strategy: str = "recent_n_days",
+    progress_callback: ProgressCallback | None = None,
+) -> PredictResult:
+    ensure_xgboost_available()
+    reference_days = normalize_reference_days(reference_days)
+    history_df, forecast_df, template_reference_df, holiday_dates, metadata, models = prepare_prediction_inputs(
+        history_dir=history_dir,
+        forecast_file=forecast_file,
+        model_root=model_root,
+        holiday_file=holiday_file,
+        progress_callback=progress_callback,
+    )
+    emit_progress(progress_callback, "正在执行预测策略", 50)
+    result_df, reference_dates, strategy_key, strategy_label = run_prediction_with_strategy(
+        history_df=history_df,
+        forecast_df=forecast_df,
+        template_reference_df=template_reference_df,
+        holiday_dates=holiday_dates,
+        metadata=metadata,
+        models=models,
+        reference_days=reference_days,
+        reference_strategy=reference_strategy,
+        progress_callback=progress_callback,
+    )
     emit_progress(progress_callback, "正在导出预测结果", 92)
     export_prediction(result_df, output_file)
     template_updated = write_prediction_to_template(forecast_file, result_df)
-    emit_progress(progress_callback, "预测完成，结果已输出并回填模板", 100)
+    emit_progress(progress_callback, "预测任务完成", 100)
     forecast_date = pd.to_datetime(result_df["date"]).dt.strftime("%Y-%m-%d").iloc[0]
     return PredictResult(
         forecast_date=forecast_date,
         output_file=Path(output_file),
         template_updated=template_updated,
+        reference_strategy_key=strategy_key,
+        reference_strategy_label=strategy_label,
+        reference_days_requested=reference_days,
+        reference_dates=reference_dates,
         result_df=result_df,
     )
 
+
+def predict_prices_compare(
+    history_dir: str | Path,
+    forecast_file: str | Path,
+    model_root: str | Path = DEFAULT_MODEL_ROOT,
+    output_file: str | Path = DEFAULT_OUTPUT_FILE,
+    holiday_file: str | Path | None = None,
+    reference_days: int = 1,
+    selected_strategy: str = "recent_n_days",
+    progress_callback: ProgressCallback | None = None,
+) -> PredictCompareResult:
+    ensure_xgboost_available()
+    reference_days = normalize_reference_days(reference_days)
+    selected_strategy_key = normalize_reference_strategy(selected_strategy)
+    history_df, forecast_df, template_reference_df, holiday_dates, metadata, models = prepare_prediction_inputs(
+        history_dir=history_dir,
+        forecast_file=forecast_file,
+        model_root=model_root,
+        holiday_file=holiday_file,
+        progress_callback=progress_callback,
+    )
+
+    strategy_keys = list(REFERENCE_STRATEGIES.keys())
+    strategy_results: dict[str, PredictResult] = {}
+    total_strategies = len(strategy_keys)
+    for strategy_index, strategy_key in enumerate(strategy_keys, start=1):
+        emit_progress(progress_callback, f"正在对比策略 {strategy_index}/{total_strategies}: {REFERENCE_STRATEGIES[strategy_key]}", 48 + int((strategy_index - 1) / total_strategies * 6))
+        result_df, reference_dates, normalized_strategy_key, strategy_label = run_prediction_with_strategy(
+            history_df=history_df,
+            forecast_df=forecast_df,
+            template_reference_df=template_reference_df,
+            holiday_dates=holiday_dates,
+            metadata=metadata,
+            models=models,
+            reference_days=reference_days,
+            reference_strategy=strategy_key,
+            progress_callback=progress_callback,
+            segment_progress_start=55 + int((strategy_index - 1) * 15),
+            segment_progress_span=12,
+        )
+        forecast_date = pd.to_datetime(result_df["date"]).dt.strftime("%Y-%m-%d").iloc[0]
+        strategy_results[strategy_key] = PredictResult(
+            forecast_date=forecast_date,
+            output_file=Path(output_file),
+            template_updated=False,
+            reference_strategy_key=normalized_strategy_key,
+            reference_strategy_label=strategy_label,
+            reference_days_requested=reference_days,
+            reference_dates=reference_dates,
+            result_df=result_df,
+        )
+
+    selected_result = strategy_results[selected_strategy_key]
+    emit_progress(progress_callback, "正在导出预测结果", 92)
+    export_prediction(selected_result.result_df, output_file)
+    template_updated = write_prediction_to_template(forecast_file, selected_result.result_df)
+    emit_progress(progress_callback, f"预测完成，已选择策略 {selected_result.reference_strategy_label}", 100)
+
+    return PredictCompareResult(
+        forecast_date=selected_result.forecast_date,
+        output_file=Path(output_file),
+        template_updated=template_updated,
+        selected_strategy_key=selected_strategy_key,
+        selected_strategy_label=REFERENCE_STRATEGIES[selected_strategy_key],
+        strategy_results={
+            key: PredictResult(
+                forecast_date=value.forecast_date,
+                output_file=value.output_file,
+                template_updated=template_updated if key == selected_strategy_key else False,
+                reference_strategy_key=value.reference_strategy_key,
+                reference_strategy_label=value.reference_strategy_label,
+                reference_days_requested=value.reference_days_requested,
+                reference_dates=value.reference_dates,
+                result_df=value.result_df.copy(),
+            )
+            for key, value in strategy_results.items()
+        },
+    )
 
 def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:
     output_path = Path(output_file)

@@ -9,28 +9,44 @@
   <body>
     <div class="app-shell">
       <header class="hero-card">
-        <div class="hero-badge">欢迎使用 · 山西电力现货日前价格预测</div>
-        <h1 class="hero-title">日前电价预测平台</h1>
-        <p class="hero-subtitle">真正前后端分离架构 · 独立 HTML / JS / CSS 前端 · Python API 后端 · 相似法基线 + XGBoost 残差修正</p>
+        <div class="hero-content">
+          <div class="hero-badge">山西电力现货</div>
+          <h1 class="hero-title">日前电价预测</h1>
+          <p class="hero-subtitle">聚焦训练、预测与结果曲线，关键数据一屏掌握。</p>
+          <div class="hero-tags" aria-label="核心能力">
+            <span>96 点曲线</span>
+            <span>策略对比</span>
+            <span>模型回退</span>
+          </div>
+        </div>
+        <div class="hero-visual" aria-hidden="true">
+          <span class="hero-dot dot-a"></span>
+          <span class="hero-dot dot-b"></span>
+          <span class="hero-dot dot-c"></span>
+          <div class="hero-wave"></div>
+        </div>
       </header>
 
       <section class="top-status" id="top-status"></section>
 
       <section class="card-grid metrics-grid">
-        <article class="info-card">
+        <article class="info-card metric-card tone-blue">
+          <div class="card-icon">M</div>
           <div class="card-title">当前默认模型</div>
           <div class="card-value" id="current-model-id">-</div>
-          <div class="card-desc" id="current-model-range">-</div>
+          <div class="card-desc">正在使用的正式模型版本</div>
         </article>
-        <article class="info-card">
-          <div class="card-title">上一版模型</div>
-          <div class="card-value" id="previous-model-id">-</div>
-          <div class="card-desc" id="previous-model-range">-</div>
+        <article class="info-card metric-card tone-gold">
+          <div class="card-icon">T</div>
+          <div class="card-title">训练范围</div>
+          <div class="card-value" id="current-model-range">-</div>
+          <div class="card-desc">当前模型覆盖的数据日期</div>
         </article>
-        <article class="info-card">
-          <div class="card-title">业务约束</div>
+        <article class="info-card metric-card tone-green">
+          <div class="card-icon">¥</div>
+          <div class="card-title">价格范围</div>
           <div class="card-value">0 ~ 1500 元/兆瓦时</div>
-          <div class="card-desc">预测结果统一执行上下限裁剪，网页、命令行和导出文件保持一致。</div>
+          <div class="card-desc">预测结果自动执行上下限裁剪</div>
         </article>
       </section>
 
@@ -45,13 +61,8 @@
         <div class="tab-panel active" id="tab-train">
           <div class="section-header">
             <div>
-              <div class="section-title">训练参数设置</div>
-              <div class="hint-text">默认启用训练起止日期，可自定义历史时间范围，并支持手动重训与指标追踪。</div>
-            </div>
-            <div class="toolbar-chips">
-              <span class="toolbar-chip">正式版本留存</span>
-              <span class="toolbar-chip">可回退</span>
-              <span class="toolbar-chip">训练日志归档</span>
+              <div class="section-title">训练参数</div>
+              <div class="hint-text">设置日期范围后，可手动重训并查看核心指标。</div>
             </div>
           </div>
 
@@ -93,8 +104,6 @@
             </label>
           </div>
 
-          <div class="path-box" id="config-paths"></div>
-
           <div class="progress-grid">
             <div class="progress-card progress-card-train" id="train-progress-card">
               <div class="progress-header">
@@ -135,14 +144,30 @@
         <div class="tab-panel" id="tab-predict">
           <div class="section-header">
             <div>
-              <div class="section-title">预测文件编辑与执行</div>
-              <div class="hint-text">直接在下表修改预测文件数据，保存后执行预测，系统会将 96 点结果写回“预测价格”列。</div>
+              <div class="section-title">执行预测</div>
+              <div class="hint-text">选择参考策略后执行预测，重点查看 96 点价格曲线。</div>
             </div>
-            <div class="toolbar-chips">
-              <span class="toolbar-chip">可编辑表格</span>
-              <span class="toolbar-chip">实时回填 Excel</span>
-              <span class="toolbar-chip">预测结果导出</span>
-            </div>
+          </div>
+
+          <div class="form-grid four-col">
+            <label class="field">
+              <span>参考天数</span>
+              <input type="number" id="reference-days" min="1" max="30" value="1" />
+            </label>
+            <label class="field">
+              <span>输出策略</span>
+              <select id="prediction-output-strategy">
+                <option value="recent_n_days">最近 N 天</option>
+                <option value="recent_same_type_days">最近 N 个同类型日</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>查看策略</span>
+              <select id="prediction-view-strategy">
+                <option value="recent_n_days">最近 N 天</option>
+                <option value="recent_same_type_days">最近 N 个同类型日</option>
+              </select>
+            </label>
           </div>
 
           <div class="progress-grid">
@@ -165,16 +190,6 @@
             <a class="ghost-btn link-btn" href="/download/output" target="_blank">下载最新结果</a>
           </div>
 
-          <div class="table-toolbar">
-            <div class="toolbar-title">预测文件预览</div>
-            <div class="toolbar-meta" id="template-meta">-</div>
-          </div>
-          <div class="table-shell table-frame table-frame-xl">
-            <div class="table-scroll">
-              <table class="data-table editable-table" id="template-table"></table>
-            </div>
-          </div>
-
           <div class="chart-card">
             <div class="table-toolbar">
               <div class="toolbar-title">96 点预测曲线</div>
@@ -190,26 +205,40 @@
           </div>
 
           <div class="table-toolbar">
-            <div class="toolbar-title">预测结果明细</div>
-            <div class="toolbar-meta">支持左右滚动查看全部字段</div>
+            <div class="toolbar-title">策略对比</div>
+            <div class="toolbar-meta">对比不同参考策略的均价、最高价和最低价。</div>
           </div>
-          <div class="table-shell table-frame table-frame-lg">
-            <div class="table-scroll">
-              <table class="data-table" id="prediction-table"></table>
+          <div class="card-grid metrics-grid" id="comparison-cards"></div>
+
+          <details class="advanced-panel">
+            <summary>查看和编辑明细数据</summary>
+            <div class="table-toolbar">
+              <div class="toolbar-title">预测文件预览</div>
+              <div class="toolbar-meta" id="template-meta">-</div>
             </div>
-          </div>
+            <div class="table-shell table-frame table-frame-xl">
+              <div class="table-scroll">
+                <table class="data-table editable-table" id="template-table"></table>
+              </div>
+            </div>
+
+            <div class="table-toolbar">
+              <div class="toolbar-title">预测结果明细</div>
+              <div class="toolbar-meta">支持左右滚动查看全部字段</div>
+            </div>
+            <div class="table-shell table-frame table-frame-lg">
+              <div class="table-scroll">
+                <table class="data-table" id="prediction-table"></table>
+              </div>
+            </div>
+          </details>
         </div>
 
         <div class="tab-panel" id="tab-versions">
           <div class="section-header">
             <div>
-              <div class="section-title">模型版本管理</div>
-              <div class="hint-text">仅展示正式训练版本；当前默认模型和上一版模型受保护，不能直接删除。</div>
-            </div>
-            <div class="toolbar-chips">
-              <span class="toolbar-chip">默认最新模型</span>
-              <span class="toolbar-chip">多选删除</span>
-              <span class="toolbar-chip">可随时回退</span>
+              <div class="section-title">模型版本</div>
+              <div class="hint-text">选择历史版本作为默认模型，或清理不需要的版本。</div>
             </div>
           </div>
 
@@ -247,12 +276,8 @@
         <div class="tab-panel" id="tab-logs">
           <div class="section-header">
             <div>
-              <div class="section-title">训练日志与运行记录</div>
-              <div class="hint-text">这里展示每次正式训练的归档记录，便于查看历史时间范围与指标表现。</div>
-            </div>
-            <div class="toolbar-chips">
-              <span class="toolbar-chip">JSONL 归档</span>
-              <span class="toolbar-chip">按时间倒序</span>
+              <div class="section-title">训练日志</div>
+              <div class="hint-text">查看正式训练记录。</div>
             </div>
           </div>
 
