@@ -746,54 +746,72 @@ async function saveTemplate() {
 }
 
 async function startTrain() {
-  setPendingState("train", "正在提交训练任务...");
-  const data = await request("/api/train", {
-    method: "POST",
-    body: JSON.stringify({
-      start_date: $("#train-start-date").value || null,
-      end_date: $("#train-end-date").value || null,
-      enable_start: $("#enable-start").checked,
-      enable_end: $("#enable-end").checked,
-      valid_days: Number($("#valid-days").value || 14),
-      num_boost_round: Number($("#num-boost-round").value || 400),
-    }),
-  });
-  App.activeJobIds.train = data.job_id;
-  App.jobStates.train = {
-    job_id: data.job_id,
-    job_type: "train",
-    progress: 5,
-    status: `训练任务已启动：${data.job_id}`,
-    logs: [`[本地] 训练任务已启动：${data.job_id}`],
-    running: true,
-  };
-  applyProgressCard("train", { progress: 5, label: "已启动", status: `训练任务已启动：${data.job_id}`, type: "running" });
-  showToast(`已启动训练任务：${data.job_id}`);
+  const btn = $("#train-btn");
+  const originalText = btn.textContent;
+  try {
+    setButtonLoading(btn, true, originalText);
+    setPendingState("train", "正在提交训练任务...");
+    const data = await request("/api/train", {
+      method: "POST",
+      body: JSON.stringify({
+        start_date: $("#train-start-date").value || null,
+        end_date: $("#train-end-date").value || null,
+        enable_start: $("#enable-start").checked,
+        enable_end: $("#enable-end").checked,
+        valid_days: Number($("#valid-days").value || 14),
+        num_boost_round: Number($("#num-boost-round").value || 400),
+      }),
+    });
+    App.activeJobIds.train = data.job_id;
+    App.jobStates.train = {
+      job_id: data.job_id,
+      job_type: "train",
+      progress: 5,
+      status: `训练任务已启动：${data.job_id}`,
+      logs: [`[本地] 训练任务已启动：${data.job_id}`],
+      running: true,
+    };
+    applyProgressCard("train", { progress: 5, label: "已启动", status: `训练任务已启动：${data.job_id}`, type: "running" });
+    showToast(`已启动训练任务：${data.job_id}`);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    setButtonLoading(btn, false, originalText);
+  }
 }
 
 async function startPredict() {
-  App.predictSessionStarted = true;
-  App.predictionViewDirty = false;
-  setPendingState("predict", "正在保存并提交预测任务...");
-  await saveTemplate();
-  const data = await request("/api/predict", {
-    method: "POST",
-    body: JSON.stringify({
-      reference_days: Number($("#reference-days").value || App.config?.default_reference_days || 1),
-      selected_strategy: $("#prediction-output-strategy").value || App.config?.default_reference_strategy || "recent_n_days",
-    }),
-  });
-  App.activeJobIds.predict = data.job_id;
-  App.jobStates.predict = {
-    job_id: data.job_id,
-    job_type: "predict",
-    progress: 5,
-    status: `预测任务已启动：${data.job_id}`,
-    logs: [`[本地] 预测任务已启动：${data.job_id}`],
-    running: true,
-  };
-  applyProgressCard("predict", { progress: 5, label: "已启动", status: `预测任务已启动：${data.job_id}`, type: "running" });
-  showToast(`已启动预测任务：${data.job_id}`);
+  const btn = $("#predict-btn");
+  const originalText = btn.textContent;
+  try {
+    setButtonLoading(btn, true, originalText);
+    App.predictSessionStarted = true;
+    App.predictionViewDirty = false;
+    setPendingState("predict", "正在保存并提交预测任务...");
+    await saveTemplate();
+    const data = await request("/api/predict", {
+      method: "POST",
+      body: JSON.stringify({
+        reference_days: Number($("#reference-days").value || App.config?.default_reference_days || 1),
+        selected_strategy: $("#prediction-output-strategy").value || App.config?.default_reference_strategy || "recent_n_days",
+      }),
+    });
+    App.activeJobIds.predict = data.job_id;
+    App.jobStates.predict = {
+      job_id: data.job_id,
+      job_type: "predict",
+      progress: 5,
+      status: `预测任务已启动：${data.job_id}`,
+      logs: [`[本地] 预测任务已启动：${data.job_id}`],
+      running: true,
+    };
+    applyProgressCard("predict", { progress: 5, label: "已启动", status: `预测任务已启动：${data.job_id}`, type: "running" });
+    showToast(`已启动预测任务：${data.job_id}`);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    setButtonLoading(btn, false, originalText);
+  }
 }
 
 async function activateVersion() {
@@ -1188,8 +1206,77 @@ async function initialLoad() {
   updateStatusTicker(["系统待命，点击展开查看详细运行过程"], false);
 }
 
+/* startPolling moved below — uses stopPolling for clean teardown */
+
+/* ═══════════════════════════════════════════════
+   KEYBOARD SHORTCUTS
+   ═══════════════════════════════════════════════ */
+function bindKeyboardShortcuts() {
+  document.addEventListener("keydown", (event) => {
+    if (event.target.matches("input, textarea, [contenteditable]")) return;
+
+    const key = event.key.toLowerCase();
+    if (event.ctrlKey || event.metaKey) {
+      switch (key) {
+        case "1": event.preventDefault(); setActiveTab("train"); break;
+        case "2": event.preventDefault(); setActiveTab("predict"); break;
+        case "3": event.preventDefault(); setActiveTab("versions"); break;
+        case "4": event.preventDefault(); setActiveTab("logs"); break;
+        case "s": event.preventDefault(); saveTemplate().catch((error) => showToast(error.message, "error")); break;
+        case "enter": event.preventDefault(); startPredict().catch((error) => showToast(error.message, "error")); break;
+      }
+      return;
+    }
+    if (key === "escape") {
+      toggleStatusPanel(true);
+      Object.keys(App.datePickers).forEach((pickerId) => {
+        if (App.datePickers[pickerId].open) {
+          App.datePickers[pickerId].open = false;
+          renderDatePicker(pickerId);
+        }
+      });
+      document.activeElement?.blur();
+    }
+    if (key === "f5") {
+      event.preventDefault();
+      refreshSummary().then(() => showToast("已刷新")).catch((error) => showToast(error.message, "error"));
+    }
+  });
+}
+
+/* ═══════════════════════════════════════════════
+   AUTO-REFRESH TOGGLE
+   ═══════════════════════════════════════════════ */
+function initAutoRefresh() {
+  let running = true;
+  const btn = document.createElement("button");
+  btn.className = "auto-refresh on";
+  btn.innerHTML = `<span class="auto-refresh-dot"></span> 自动刷新`;
+  btn.title = "切换自动刷新 (每 1.5 秒)";
+  btn.addEventListener("click", () => {
+    running = !running;
+    btn.classList.toggle("on", running);
+    if (running) {
+      startPolling();
+      showToast("自动刷新已开启");
+    } else {
+      stopPolling();
+      showToast("自动刷新已暂停");
+    }
+  });
+  const topStatus = $("#top-status");
+  if (topStatus) topStatus.appendChild(btn);
+}
+
+function stopPolling() {
+  if (App.pollTimer) {
+    clearInterval(App.pollTimer);
+    App.pollTimer = null;
+  }
+}
+
 function startPolling() {
-  if (App.pollTimer) clearInterval(App.pollTimer);
+  stopPolling();
   App.pollTimer = setInterval(() => {
     Promise.allSettled([refreshSummary(), loadLogs()]).then((results) => {
       results.forEach((result) => {
@@ -1201,11 +1288,255 @@ function startPolling() {
   }, 1500);
 }
 
+/* ═══════════════════════════════════════════════
+   DATA EXPORT: COPY TABLE TO CLIPBOARD
+   ═══════════════════════════════════════════════ */
+function tableToCSV(tableId) {
+  const table = $(`#${tableId}`);
+  if (!table) return "";
+  const rows = Array.from(table.querySelectorAll("tr"));
+  return rows
+    .map((row) =>
+      Array.from(row.querySelectorAll("th, td"))
+        .map((cell) => {
+          let text = (cell.textContent || "").replace(/"/g, '""').trim();
+          if (text.includes(",") || text.includes('"') || text.includes("\n")) {
+            text = `"${text}"`;
+          }
+          return text;
+        })
+        .join(","),
+    )
+    .join("\n");
+}
+
+async function copyTableToClipboard(tableId) {
+  const csv = tableToCSV(tableId);
+  if (!csv) {
+    showToast("暂无数据可复制", "error");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(csv);
+    showToast("已复制表格数据到剪贴板");
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = csv;
+    textarea.style.cssText = "position:fixed;left:-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+    showToast("已复制表格数据到剪贴板");
+  }
+}
+
+function downloadCSV(filename, csvContent) {
+  const bom = "﻿";
+  const blob = new Blob([bom + csvContent], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function exportTableToCSV(tableId, filename) {
+  const csv = tableToCSV(tableId);
+  if (!csv) {
+    showToast("暂无数据可导出", "error");
+    return;
+  }
+  downloadCSV(filename, csv);
+  showToast(`已导出 ${filename}`);
+}
+
+/* ═══════════════════════════════════════════════
+   BUTTON LOADING STATE
+   ═══════════════════════════════════════════════ */
+function setButtonLoading(btn, loading, originalText) {
+  if (loading) {
+    btn.dataset.originalText = btn.textContent;
+    btn.classList.add("loading");
+    btn.textContent = "";
+    btn.disabled = true;
+  } else {
+    btn.classList.remove("loading");
+    btn.textContent = btn.dataset.originalText || originalText || btn.textContent;
+    btn.disabled = false;
+    delete btn.dataset.originalText;
+  }
+}
+
+function wrapButtonWithLoading(selector, asyncFn) {
+  const btn = $(selector);
+  if (!btn) return async () => {};
+  return async (...args) => {
+    const originalText = btn.textContent;
+    try {
+      setButtonLoading(btn, true, originalText);
+      return await asyncFn(...args);
+    } finally {
+      setButtonLoading(btn, false, originalText);
+    }
+  };
+}
+
+/* ═══════════════════════════════════════════════
+   CHART LOADING / EMPTY STATE
+   ═══════════════════════════════════════════════ */
+function showChartLoading() {
+  const stage = $("#prediction-chart");
+  if (!stage) return;
+  stage.innerHTML = `
+    <div class="chart-loading">
+      <div class="chart-spinner"></div>
+      <span style="color: var(--text-3); font-size: 13px;">正在加载图表...</span>
+    </div>`;
+}
+
+function showChartEmpty(message = "尚未执行预测") {
+  const stage = $("#prediction-chart");
+  if (!stage) return;
+  stage.innerHTML = `
+    <div class="chart-empty">
+      <div class="chart-empty-icon">📊</div>
+      <span>${htmlEscape(message)}</span>
+    </div>`;
+}
+
+/* ═══════════════════════════════════════════════
+   DARK MODE TOGGLE
+   ═══════════════════════════════════════════════ */
+function initDarkModeToggle() {
+  const root = document.documentElement;
+  const saved = localStorage.getItem("dayahead-dark-mode");
+  if (saved === "true") {
+    root.classList.add("dark-enabled");
+  }
+  const btn = document.createElement("button");
+  btn.className = "ghost-btn mini-btn";
+  btn.style.cssText = "position:fixed;top:18px;right:18px;z-index:1100;";
+  btn.textContent = root.classList.contains("dark-enabled") ? "☀️" : "🌙";
+  btn.title = "切换暗色模式";
+  btn.addEventListener("click", () => {
+    const isDark = root.classList.toggle("dark-enabled");
+    localStorage.setItem("dayahead-dark-mode", String(isDark));
+    btn.textContent = isDark ? "☀️" : "🌙";
+    if (App.chart) {
+      App.chart.dispose();
+      App.chart = null;
+      App.predictionChartSignature = null;
+      if (App.lastPrediction) {
+        renderPredictionChart(App.lastPrediction);
+      }
+    }
+  });
+  document.body.appendChild(btn);
+}
+
+/* ═══════════════════════════════════════════════
+   TOOLBAR ACTIONS ROW (copy/export buttons)
+   ═══════════════════════════════════════════════ */
+function injectTableToolbarActions() {
+  const toolbarSelectors = [
+    { toolbar: "#tab-versions .table-toolbar", tableId: "versions-table", filename: "模型版本.csv" },
+    { toolbar: "#tab-logs .table-toolbar", tableId: "training-logs-table", filename: "训练日志.csv" },
+  ];
+
+  toolbarSelectors.forEach(({ toolbar: toolbarSelector, tableId, filename }) => {
+    const toolbar = document.querySelector(toolbarSelector);
+    if (!toolbar) return;
+    if (toolbar.querySelector(".copy-btn")) return;
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+    actions.innerHTML = `
+      <button class="copy-btn" data-table="${tableId}" title="复制表格数据">📋 复制</button>
+      <button class="csv-btn" data-table="${tableId}" data-filename="${filename}" title="导出为 CSV">⬇ CSV</button>
+    `;
+    toolbar.appendChild(actions);
+
+    actions.querySelector(".copy-btn").addEventListener("click", (event) => {
+      const btn = event.target.closest(".copy-btn");
+      const tid = btn.dataset.table;
+      copyTableToClipboard(tid);
+      btn.classList.add("copied");
+      setTimeout(() => btn.classList.remove("copied"), 1200);
+    });
+
+    actions.querySelector(".csv-btn").addEventListener("click", (event) => {
+      const btn = event.target.closest(".csv-btn");
+      exportTableToCSV(btn.dataset.table, btn.dataset.filename);
+    });
+  });
+
+  const metricsToolbar = document.querySelector("#tab-train .subsection-title");
+  if (metricsToolbar && !metricsToolbar.parentElement.querySelector(".copy-btn")) {
+    const wrapper = document.createElement("div");
+    wrapper.style.cssText = "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;";
+    metricsToolbar.parentElement.insertBefore(wrapper, metricsToolbar);
+    wrapper.appendChild(metricsToolbar);
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;";
+    actions.innerHTML = `
+      <button class="copy-btn" data-table="metrics-table" title="复制指标数据">📋 复制</button>
+      <button class="csv-btn" data-table="metrics-table" data-filename="模型指标.csv" title="导出为 CSV">⬇ CSV</button>
+    `;
+    wrapper.appendChild(actions);
+
+    actions.querySelector(".copy-btn").addEventListener("click", (event) => {
+      const btn = event.target.closest(".copy-btn");
+      copyTableToClipboard(btn.dataset.table);
+      btn.classList.add("copied");
+      setTimeout(() => btn.classList.remove("copied"), 1200);
+    });
+
+    actions.querySelector(".csv-btn").addEventListener("click", (event) => {
+      const btn = event.target.closest(".csv-btn");
+      exportTableToCSV(btn.dataset.table, btn.dataset.filename);
+    });
+  }
+
+  const predictionToolbar = document.querySelector("#tab-predict .chart-card .table-toolbar");
+  if (predictionToolbar && !predictionToolbar.querySelector(".csv-btn")) {
+    const predictBtn = document.createElement("button");
+    predictBtn.className = "csv-btn";
+    predictBtn.innerHTML = "⬇ 导出 CSV";
+    predictBtn.title = "导出预测结果";
+    predictBtn.addEventListener("click", () => {
+      exportTableToCSV("prediction-table", "预测结果.csv");
+    });
+    predictionToolbar.appendChild(predictBtn);
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   CARD VALUE FLASH ANIMATION
+   ═══════════════════════════════════════════════ */
+function flashCardValue(el) {
+  el.classList.remove("updated");
+  void el.offsetWidth;
+  el.classList.add("updated");
+}
+
+/* ═══════════════════════════════════════════════
+   INITIALIZATION (overridden / extended)
+   ═══════════════════════════════════════════════ */
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
+  bindKeyboardShortcuts();
+  initDarkModeToggle();
+
   try {
     await initialLoad();
     startPolling();
+    initAutoRefresh();
+    injectTableToolbarActions();
   } catch (error) {
     showToast(error.message, "error");
   }

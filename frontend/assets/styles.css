@@ -435,3 +435,248 @@ div[data-testid="stDataFrame"] [data-testid="stDataFrameResizable"] {
     pointer-events: auto;
     transform: scale(1) translateY(0);
 }
+
+/* ═══════════════════════════════════════════════
+   SKELETON LOADING ANIMATIONS
+   ═══════════════════════════════════════════════ */
+@keyframes streamlitSkeleton {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.stSkeleton {
+    background: linear-gradient(90deg,
+        rgba(22, 119, 255, 0.04) 25%,
+        rgba(22, 119, 255, 0.1) 37%,
+        rgba(22, 119, 255, 0.04) 63%) !important;
+    background-size: 200% 100% !important;
+    animation: streamlitSkeleton 1.8s ease-in-out infinite !important;
+    border-radius: 10px !important;
+}
+
+div[data-testid="stSpinner"] {
+    border-top-color: #1677ff !important;
+}
+
+/* ═══════════════════════════════════════════════
+   CARD HOVER MICRO-INTERACTIONS
+   ═══════════════════════════════════════════════ */
+.info-card, .metric-card {
+    transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease !important;
+}
+
+.info-card:hover, .metric-card:hover {
+    transform: translateY(-2px) !important;
+    border-color: rgba(22, 119, 255, 0.18) !important;
+    box-shadow: 0 14px 28px rgba(31, 35, 41, 0.10) !important;
+}
+
+/* ═══════════════════════════════════════════════
+   BUTTON RIPPLE / PRESS EFFECT
+   ═══════════════════════════════════════════════ */
+.stButton > button:active {
+    transform: scale(0.97) !important;
+    transition: transform 0.12s ease !important;
+}
+
+/* ═══════════════════════════════════════════════
+   PROGRESS BAR PULSE (WHEN RUNNING)
+   ═══════════════════════════════════════════════ */
+@keyframes progressPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+div[data-testid="stProgress"] > div > div {
+    background: linear-gradient(90deg, #1677ff, #69b1ff) !important;
+    transition: width 0.4s ease !important;
+    border-radius: 999px !important;
+}
+
+/* ═══════════════════════════════════════════════
+   SCROLLBAR STYLING
+   ═══════════════════════════════════════════════ */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(16, 32, 51, 0.12);
+    border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(16, 32, 51, 0.22);
+}
+
+/* ═══════════════════════════════════════════════
+   FOCUS-VISIBLE ACCESSIBILITY
+   ═══════════════════════════════════════════════ */
+.stButton > button:focus-visible,
+.stTextInput input:focus-visible,
+.stNumberInput input:focus-visible,
+.stDateInput input:focus-visible,
+.stTextArea textarea:focus-visible {
+    outline: 2px solid #4096ff !important;
+    outline-offset: 2px !important;
+}
+
+/* ═══════════════════════════════════════════════
+   TOOLTIP ENHANCEMENTS
+   ═══════════════════════════════════════════════ */
+div[data-baseweb="tooltip"] {
+    background: rgba(31, 35, 41, 0.92) !important;
+    color: #ffffff !important;
+    border-radius: 10px !important;
+    padding: 8px 14px !important;
+    font-size: 0.84rem !important;
+    box-shadow: 0 8px 20px rgba(31, 35, 41, 0.18) !important;
+}
+
+/* ═══════════════════════════════════════════════
+   CHART AREA ENHANCEMENT
+   ═══════════════════════════════════════════════ */
+div[data-testid="stArrowVegaLiteChart"] {
+    border-radius: 16px !important;
+    overflow: hidden !important;
+    background: #ffffff !important;
+    box-shadow: 0 8px 24px rgba(31, 35, 41, 0.06) !important;
+    border: 1px solid rgba(5, 5, 5, 0.06) !important;
+}
+
+div[data-testid="stArrowVegaLiteChart"] canvas {
+    border-radius: 16px !important;
+}
+
+/* ═══════════════════════════════════════════════
+   MESSAGE / ALERT STYLING
+   ═══════════════════════════════════════════════ */
+div[data-testid="stAlert"] {
+    border-radius: 14px !important;
+    border: none !important;
+    box-shadow: 0 6px 18px rgba(31, 35, 41, 0.05) !important;
+}
+
+div[data-testid="stAlert"][data-kind="success"] {
+    background: rgba(82, 196, 26, 0.06) !important;
+    border: 1px solid rgba(82, 196, 26, 0.2) !important;
+}
+
+div[data-testid="stAlert"][data-kind="error"] {
+    background: rgba(255, 77, 79, 0.06) !important;
+    border: 1px solid rgba(255, 77, 79, 0.2) !important;
+}
+
+div[data-testid="stAlert"][data-kind="warning"] {
+    background: rgba(250, 173, 20, 0.06) !important;
+    border: 1px solid rgba(250, 173, 20, 0.2) !important;
+}
+
+div[data-testid="stAlert"][data-kind="info"] {
+    background: rgba(22, 119, 255, 0.06) !important;
+    border: 1px solid rgba(22, 119, 255, 0.2) !important;
+}
+
+/* ═══════════════════════════════════════════════
+   CHECKBOX / TOGGLE ENHANCEMENT
+   ═══════════════════════════════════════════════ */
+div[data-testid="stCheckbox"] label {
+    padding: 6px 12px !important;
+    border-radius: 10px !important;
+    transition: background 0.2s ease !important;
+}
+
+div[data-testid="stCheckbox"] label:hover {
+    background: rgba(22, 119, 255, 0.04) !important;
+}
+
+/* ═══════════════════════════════════════════════
+   TAB CONTENT FADE-IN ANIMATION
+   ═══════════════════════════════════════════════ */
+@keyframes tabFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+div[data-testid="stTabs"] [role="tabpanel"] {
+    animation: tabFadeIn 0.3s ease !important;
+}
+
+/* ═══════════════════════════════════════════════
+   PRINT STYLES
+   ═══════════════════════════════════════════════ */
+@media print {
+    body {
+        background: #ffffff !important;
+        color: #000000 !important;
+    }
+
+    .stApp {
+        background: #ffffff !important;
+    }
+
+    .log-widget,
+    .log-show-fab,
+    #log-panel-toggle {
+        display: none !important;
+    }
+
+    .hero-card {
+        background: #ffffff !important;
+        box-shadow: none !important;
+        border: 2px solid #000 !important;
+    }
+
+    .hero-card * { color: #000 !important; }
+
+    .glass-card, .info-card, .metric-card {
+        box-shadow: none !important;
+        border: 1px solid #ccc !important;
+        backdrop-filter: none !important;
+    }
+
+    .block-container {
+        max-width: 100% !important;
+        padding: 0 !important;
+    }
+
+    @page {
+        margin: 1.5cm;
+        size: A4 landscape;
+    }
+}
+
+/* ═══════════════════════════════════════════════
+   RESPONSIVE ENHANCEMENTS
+   ═══════════════════════════════════════════════ */
+@media (max-width: 768px) {
+    .block-container {
+        padding: 0.5rem !important;
+    }
+
+    .hero-card {
+        padding: 1rem 1.2rem !important;
+    }
+
+    .hero-title {
+        font-size: 1.4rem !important;
+    }
+
+    .hero-subtitle {
+        font-size: 0.84rem !important;
+    }
+
+    .glass-card {
+        padding: 0.85rem 0.9rem !important;
+    }
+
+    [data-testid="stTabs"] button[role="tab"] {
+        padding: 0.45rem 0.7rem !important;
+        font-size: 0.82rem !important;
+    }
+}
