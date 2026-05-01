@@ -10,6 +10,7 @@ const App = {
   tickerMessages: [],
   tickerIndex: 0,
   tickerLoop: false,
+  tickerVisibleMessages: [],
   activeJobIds: {
     train: null,
     predict: null,
@@ -51,6 +52,25 @@ const referenceStrategyLabelMap = {
   recent_same_type_days: "最近 N 个同类型日",
 };
 
+const pageMetaMap = {
+  train: {
+    title: "模型训练中心",
+    subtitle: "设置训练范围、执行重训，并查看当前模型的核心指标。",
+  },
+  predict: {
+    title: "日前电价预测",
+    subtitle: "选择参考策略后执行预测，重点查看 96 点价格曲线。",
+  },
+  versions: {
+    title: "模型版本管理",
+    subtitle: "管理历史模型版本，支持默认切换与快速回退。",
+  },
+  logs: {
+    title: "训练日志复盘",
+    subtitle: "按正式训练记录查看历史时间范围与样本表现。",
+  },
+};
+
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
@@ -90,6 +110,13 @@ function showToast(message, type = "success") {
 function setActiveTab(name) {
   $$(".tab-btn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === name));
   $$(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === `tab-${name}`));
+  const pageMeta = pageMetaMap[name];
+  if (pageMeta) {
+    const title = document.querySelector(".hero-title");
+    const subtitle = document.querySelector(".hero-subtitle");
+    if (title) title.textContent = pageMeta.title;
+    if (subtitle) subtitle.textContent = pageMeta.subtitle;
+  }
   if (name === "predict") {
     requestAnimationFrame(() => {
       if (App.chart) {
@@ -226,12 +253,22 @@ function stopTickerLoop() {
 }
 
 function setStatusTickerText(message, animate = false) {
-  const textNode = $("#status-fab-text");
-  textNode.textContent = message;
-  textNode.classList.remove("animate");
+  const stack = $("#status-fab-text");
+  if (!stack) return;
+  const text = String(message || "").trim() || "系统待命，点击展开查看详细运行过程";
+  const previous = App.tickerVisibleMessages[App.tickerVisibleMessages.length - 1];
+  if (previous === text && App.tickerVisibleMessages.length) return;
+  App.tickerVisibleMessages = [...App.tickerVisibleMessages, text].slice(-3);
+  stack.innerHTML = App.tickerVisibleMessages
+    .map((item, index, list) => {
+      const newestClass = index === list.length - 1 && animate ? " newest" : "";
+      return `<span class="status-ticker-line${newestClass}">${htmlEscape(item)}</span>`;
+    })
+    .join("");
   if (!animate) return;
-  void textNode.offsetWidth;
-  textNode.classList.add("animate");
+  stack.classList.remove("rolling");
+  void stack.offsetWidth;
+  stack.classList.add("rolling");
 }
 
 function isSameTickerMessages(messages) {
@@ -255,6 +292,7 @@ function updateStatusTicker(messages, loop = false) {
   App.tickerMessages = safeMessages;
   App.tickerLoop = loop;
   App.tickerIndex = 0;
+  App.tickerVisibleMessages = [];
   setStatusTickerText(safeMessages[0], loop && safeMessages.length > 1);
   if (loop && safeMessages.length > 1) {
     ensureTickerLoop();
@@ -605,6 +643,9 @@ function deriveJobState(job, mode) {
   if (!job) {
     return { progress: 0, label: "未开始", status: idleText, type: "" };
   }
+  if (job.cancelled) {
+    return { progress: Number(job.progress || 0), label: "已停止", status: job.status || "任务已停止", type: "error" };
+  }
   if (job.error) {
     return { progress: Math.max(1, Number(job.progress || 0)), label: "执行失败", status: job.error.split("\n")[0], type: "error" };
   }
@@ -627,6 +668,16 @@ function getFocusedJobState() {
 function renderProgressSections() {
   applyProgressCard("train", deriveJobState(App.jobStates.train, "train"));
   applyProgressCard("predict", deriveJobState(App.jobStates.predict, "predict"));
+  syncStopButtons();
+}
+
+function syncStopButtons() {
+  const states = {
+    train: Boolean(App.activeJobIds.train && App.jobStates.train?.running),
+    predict: Boolean(App.activeJobIds.predict && App.jobStates.predict?.running),
+  };
+  $("#stop-train-btn")?.classList.toggle("hidden", !states.train);
+  $("#stop-predict-btn")?.classList.toggle("hidden", !states.predict);
 }
 
 function setPendingState(mode, title) {
@@ -664,6 +715,20 @@ function renderStatusPanel(statusData) {
   } else {
     updateStatusTicker([logs[logs.length - 1] || currentJob.status || "执行完成"], false);
   }
+}
+
+async function pollJobUntilDone(jobId) {
+  let job = null;
+  for (let i = 0; i < 600; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    try {
+      job = await request(`/api/jobs/${jobId}`);
+    } catch {
+      continue;
+    }
+    if (!job || !job.running) break;
+  }
+  return job;
 }
 
 async function refreshTrackedJobs() {
@@ -746,54 +811,124 @@ async function saveTemplate() {
 }
 
 async function startTrain() {
-  setPendingState("train", "正在提交训练任务...");
-  const data = await request("/api/train", {
-    method: "POST",
-    body: JSON.stringify({
-      start_date: $("#train-start-date").value || null,
-      end_date: $("#train-end-date").value || null,
-      enable_start: $("#enable-start").checked,
-      enable_end: $("#enable-end").checked,
-      valid_days: Number($("#valid-days").value || 14),
-      num_boost_round: Number($("#num-boost-round").value || 400),
-    }),
-  });
-  App.activeJobIds.train = data.job_id;
-  App.jobStates.train = {
-    job_id: data.job_id,
-    job_type: "train",
-    progress: 5,
-    status: `训练任务已启动：${data.job_id}`,
-    logs: [`[本地] 训练任务已启动：${data.job_id}`],
-    running: true,
-  };
-  applyProgressCard("train", { progress: 5, label: "已启动", status: `训练任务已启动：${data.job_id}`, type: "running" });
-  showToast(`已启动训练任务：${data.job_id}`);
+  const btn = $("#train-btn");
+  const originalText = btn?.textContent || "手动重训模型";
+  try {
+    setButtonLoading(btn, true, originalText);
+    setPendingState("train", "正在提交训练任务...");
+    const data = await request("/api/train", {
+      method: "POST",
+      body: JSON.stringify({
+        start_date: $("#train-start-date").value || null,
+        end_date: $("#train-end-date").value || null,
+        enable_start: $("#enable-start").checked,
+        enable_end: $("#enable-end").checked,
+        valid_days: Number($("#valid-days").value || 14),
+        num_boost_round: Number($("#num-boost-round").value || 400),
+      }),
+    });
+    App.activeJobIds.train = data.job_id;
+    App.jobStates.train = {
+      job_id: data.job_id,
+      job_type: "train",
+      progress: 5,
+      status: `训练任务已启动：${data.job_id}`,
+      logs: [`[本地] 训练任务已启动：${data.job_id}`],
+      running: true,
+    };
+    syncStopButtons();
+    applyProgressCard("train", { progress: 5, label: "训练中", status: `训练任务已启动：${data.job_id}`, type: "running" });
+    showToast(`已启动训练任务：${data.job_id}，等待完成...`);
+    const job = await pollJobUntilDone(data.job_id);
+    if (!job) {
+      App.activeJobIds.train = null;
+      syncStopButtons();
+      applyProgressCard("train", { progress: 0, label: "超时", status: "训练超时（等待超过 15 分钟）", type: "error" });
+      showToast("训练超时，请检查服务器状态", "error");
+      return;
+    }
+    App.jobStates.train = job;
+    App.activeJobIds.train = null;
+    syncStopButtons();
+    if (job.error) {
+      applyProgressCard("train", { progress: job.progress || 0, label: "失败", status: job.error, type: "error" });
+      showToast(`训练失败：${job.error.split("\n")[0]}`, "error");
+    } else if (job.cancelled) {
+      applyProgressCard("train", { progress: job.progress || 0, label: "已停止", status: "训练已停止", type: "error" });
+      showToast("训练已停止");
+    } else {
+      applyProgressCard("train", { progress: 100, label: "已完成", status: "训练完成", type: "success" });
+      showToast("训练已完成");
+    }
+    await refreshSummary();
+  } catch (error) {
+    showToast(error.message, "error");
+    applyProgressCard("train", { progress: 0, label: "错误", status: error.message, type: "error" });
+  } finally {
+    const el = $("#train-btn");
+    if (el) setButtonLoading(el, false, originalText);
+    syncStopButtons();
+  }
 }
 
 async function startPredict() {
-  App.predictSessionStarted = true;
-  App.predictionViewDirty = false;
-  setPendingState("predict", "正在保存并提交预测任务...");
-  await saveTemplate();
-  const data = await request("/api/predict", {
-    method: "POST",
-    body: JSON.stringify({
-      reference_days: Number($("#reference-days").value || App.config?.default_reference_days || 1),
-      selected_strategy: $("#prediction-output-strategy").value || App.config?.default_reference_strategy || "recent_n_days",
-    }),
-  });
-  App.activeJobIds.predict = data.job_id;
-  App.jobStates.predict = {
-    job_id: data.job_id,
-    job_type: "predict",
-    progress: 5,
-    status: `预测任务已启动：${data.job_id}`,
-    logs: [`[本地] 预测任务已启动：${data.job_id}`],
-    running: true,
-  };
-  applyProgressCard("predict", { progress: 5, label: "已启动", status: `预测任务已启动：${data.job_id}`, type: "running" });
-  showToast(`已启动预测任务：${data.job_id}`);
+  const btn = $("#predict-btn");
+  const originalText = btn?.textContent || "执行预测";
+  try {
+    setButtonLoading(btn, true, originalText);
+    App.predictSessionStarted = true;
+    App.predictionViewDirty = false;
+    setPendingState("predict", "正在保存并提交预测任务...");
+    await saveTemplate();
+    const data = await request("/api/predict", {
+      method: "POST",
+      body: JSON.stringify({
+        reference_days: Number($("#reference-days").value || App.config?.default_reference_days || 1),
+        selected_strategy: $("#prediction-output-strategy").value || App.config?.default_reference_strategy || "recent_n_days",
+      }),
+    });
+    App.activeJobIds.predict = data.job_id;
+    App.jobStates.predict = {
+      job_id: data.job_id,
+      job_type: "predict",
+      progress: 5,
+      status: `预测任务已启动：${data.job_id}`,
+      logs: [`[本地] 预测任务已启动：${data.job_id}`],
+      running: true,
+    };
+    syncStopButtons();
+    applyProgressCard("predict", { progress: 5, label: "预测中", status: `预测任务已启动：${data.job_id}`, type: "running" });
+    showToast(`已启动预测任务：${data.job_id}，等待完成...`);
+    const job = await pollJobUntilDone(data.job_id);
+    if (!job) {
+      App.activeJobIds.predict = null;
+      syncStopButtons();
+      applyProgressCard("predict", { progress: 0, label: "超时", status: "预测超时（等待超过 15 分钟）", type: "error" });
+      showToast("预测超时，请检查服务器状态", "error");
+      return;
+    }
+    App.jobStates.predict = job;
+    App.activeJobIds.predict = null;
+    syncStopButtons();
+    if (job.error) {
+      applyProgressCard("predict", { progress: job.progress || 0, label: "失败", status: job.error, type: "error" });
+      showToast(`预测失败：${job.error.split("\n")[0]}`, "error");
+    } else if (job.cancelled) {
+      applyProgressCard("predict", { progress: job.progress || 0, label: "已停止", status: "预测已停止", type: "error" });
+      showToast("预测已停止");
+    } else {
+      applyProgressCard("predict", { progress: 100, label: "已完成", status: "预测完成", type: "success" });
+      showToast("预测已完成");
+    }
+    await refreshSummary();
+  } catch (error) {
+    showToast(error.message, "error");
+    applyProgressCard("predict", { progress: 0, label: "错误", status: error.message, type: "error" });
+  } finally {
+    const el = $("#predict-btn");
+    if (el) setButtonLoading(el, false, originalText);
+    syncStopButtons();
+  }
 }
 
 async function activateVersion() {
@@ -838,8 +973,51 @@ async function deleteSelectedVersions() {
 }
 
 function toggleStatusPanel(hidden) {
-  $("#status-panel").classList.toggle("hidden-panel", hidden);
-  $("#status-fab").classList.toggle("hidden", !hidden);
+  const wrapper = $("#sidebar-status");
+  if (wrapper) {
+    wrapper.classList.toggle("collapsed", hidden);
+    wrapper.classList.toggle("expanded", !hidden);
+  }
+  $("#status-panel")?.classList.toggle("hidden-panel", hidden);
+  $("#status-fab")?.classList.toggle("hidden", false);
+}
+
+async function cancelJob(mode) {
+  const jobId = App.activeJobIds[mode];
+  if (!jobId) {
+    showToast("当前没有正在执行的任务", "error");
+    return;
+  }
+  const stopButton = mode === "train" ? $("#stop-train-btn") : $("#stop-predict-btn");
+  const originalText = stopButton?.textContent || "停止任务";
+  try {
+    if (stopButton) {
+      stopButton.disabled = true;
+      stopButton.textContent = "停止中...";
+    }
+    let job;
+    try {
+      job = await request(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST", body: JSON.stringify({}) });
+    } catch (error) {
+      if (!String(error.message || "").includes("未找到接口")) {
+        throw error;
+      }
+      job = await request("/api/jobs/cancel", { method: "POST", body: JSON.stringify({ job_id: jobId }) });
+    }
+    App.jobStates[mode] = job;
+    App.statusFocus = mode;
+    renderProgressSections();
+    renderStatusPanel({ current_job: job, recent_jobs: [] });
+    updateStatusTicker(["已发送停止请求，等待任务安全中断"], false);
+    showToast("已发送停止请求");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    if (stopButton) {
+      stopButton.disabled = false;
+      stopButton.textContent = originalText;
+    }
+  }
 }
 
 function parseDateText(value) {
@@ -1126,10 +1304,12 @@ function setDatePickerDisabled(pickerId, disabled) {
 function bindEvents() {
   $$(".tab-btn").forEach((btn) => btn.addEventListener("click", () => setActiveTab(btn.dataset.tab)));
   $("#train-btn").addEventListener("click", () => startTrain().catch((error) => showToast(error.message, "error")));
+  $("#stop-train-btn").addEventListener("click", () => cancelJob("train"));
   $("#refresh-train-metrics-btn").addEventListener("click", () => refreshSummary().then(() => showToast("当前指标已刷新")).catch((error) => showToast(error.message, "error")));
   $("#reload-template-btn").addEventListener("click", () => loadTemplate().then(() => showToast("预测文件已重新加载")).catch((error) => showToast(error.message, "error")));
   $("#save-template-btn").addEventListener("click", () => saveTemplate().catch((error) => showToast(error.message, "error")));
   $("#predict-btn").addEventListener("click", () => startPredict().catch((error) => showToast(error.message, "error")));
+  $("#stop-predict-btn").addEventListener("click", () => cancelJob("predict"));
   $("#reference-days").addEventListener("input", () => syncReferenceStrategyLabels());
   $("#reference-days").addEventListener("change", () => syncReferenceStrategyLabels());
   $("#prediction-view-strategy").addEventListener("change", () => {
@@ -1188,8 +1368,77 @@ async function initialLoad() {
   updateStatusTicker(["系统待命，点击展开查看详细运行过程"], false);
 }
 
+/* startPolling moved below — uses stopPolling for clean teardown */
+
+/* ═══════════════════════════════════════════════
+   KEYBOARD SHORTCUTS
+   ═══════════════════════════════════════════════ */
+function bindKeyboardShortcuts() {
+  document.addEventListener("keydown", (event) => {
+    if (event.target.matches("input, textarea, [contenteditable]")) return;
+
+    const key = event.key.toLowerCase();
+    if (event.ctrlKey || event.metaKey) {
+      switch (key) {
+        case "1": event.preventDefault(); setActiveTab("train"); break;
+        case "2": event.preventDefault(); setActiveTab("predict"); break;
+        case "3": event.preventDefault(); setActiveTab("versions"); break;
+        case "4": event.preventDefault(); setActiveTab("logs"); break;
+        case "s": event.preventDefault(); saveTemplate().catch((error) => showToast(error.message, "error")); break;
+        case "enter": event.preventDefault(); startPredict().catch((error) => showToast(error.message, "error")); break;
+      }
+      return;
+    }
+    if (key === "escape") {
+      toggleStatusPanel(true);
+      Object.keys(App.datePickers).forEach((pickerId) => {
+        if (App.datePickers[pickerId].open) {
+          App.datePickers[pickerId].open = false;
+          renderDatePicker(pickerId);
+        }
+      });
+      document.activeElement?.blur();
+    }
+    if (key === "f5") {
+      event.preventDefault();
+      refreshSummary().then(() => showToast("已刷新")).catch((error) => showToast(error.message, "error"));
+    }
+  });
+}
+
+/* ═══════════════════════════════════════════════
+   AUTO-REFRESH TOGGLE
+   ═══════════════════════════════════════════════ */
+function initAutoRefresh() {
+  let running = true;
+  const btn = document.createElement("button");
+  btn.className = "auto-refresh on";
+  btn.innerHTML = `<span class="auto-refresh-dot"></span> 自动刷新`;
+  btn.title = "切换自动刷新 (每 1.5 秒)";
+  btn.addEventListener("click", () => {
+    running = !running;
+    btn.classList.toggle("on", running);
+    if (running) {
+      startPolling();
+      showToast("自动刷新已开启");
+    } else {
+      stopPolling();
+      showToast("自动刷新已暂停");
+    }
+  });
+  const topStatus = $("#top-status");
+  if (topStatus) topStatus.appendChild(btn);
+}
+
+function stopPolling() {
+  if (App.pollTimer) {
+    clearInterval(App.pollTimer);
+    App.pollTimer = null;
+  }
+}
+
 function startPolling() {
-  if (App.pollTimer) clearInterval(App.pollTimer);
+  stopPolling();
   App.pollTimer = setInterval(() => {
     Promise.allSettled([refreshSummary(), loadLogs()]).then((results) => {
       results.forEach((result) => {
@@ -1201,11 +1450,294 @@ function startPolling() {
   }, 1500);
 }
 
+/* ═══════════════════════════════════════════════
+   DATA EXPORT: COPY TABLE TO CLIPBOARD
+   ═══════════════════════════════════════════════ */
+function tableToCSV(tableId) {
+  const table = $(`#${tableId}`);
+  if (!table) return "";
+  const rows = Array.from(table.querySelectorAll("tr"));
+  return rows
+    .map((row) =>
+      Array.from(row.querySelectorAll("th, td"))
+        .map((cell) => {
+          let text = (cell.textContent || "").replace(/"/g, '""').trim();
+          if (text.includes(",") || text.includes('"') || text.includes("\n")) {
+            text = `"${text}"`;
+          }
+          return text;
+        })
+        .join(","),
+    )
+    .join("\n");
+}
+
+async function copyTableToClipboard(tableId) {
+  const csv = tableToCSV(tableId);
+  if (!csv) {
+    showToast("暂无数据可复制", "error");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(csv);
+    showToast("已复制表格数据到剪贴板");
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = csv;
+    textarea.style.cssText = "position:fixed;left:-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+    showToast("已复制表格数据到剪贴板");
+  }
+}
+
+function downloadCSV(filename, csvContent) {
+  const bom = "﻿";
+  const blob = new Blob([bom + csvContent], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function exportTableToCSV(tableId, filename) {
+  const csv = tableToCSV(tableId);
+  if (!csv) {
+    showToast("暂无数据可导出", "error");
+    return;
+  }
+  downloadCSV(filename, csv);
+  showToast(`已导出 ${filename}`);
+}
+
+/* ═══════════════════════════════════════════════
+   BUTTON LOADING STATE
+   ═══════════════════════════════════════════════ */
+function setButtonLoading(btn, loading, originalText) {
+  if (!btn) return;
+  if (loading) {
+    btn.dataset.originalText = btn.textContent;
+    btn.dataset.originalWidth = `${btn.offsetWidth}`;
+    btn.style.width = `${btn.offsetWidth}px`;
+    btn.style.minWidth = `${btn.offsetWidth}px`;
+    btn.setAttribute("aria-busy", "true");
+    btn.classList.add("loading");
+    btn.textContent = "执行中...";
+    btn.disabled = true;
+  } else {
+    btn.classList.remove("loading");
+    btn.textContent = btn.dataset.originalText || originalText || btn.textContent;
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+    btn.style.width = "";
+    btn.style.minWidth = "";
+    delete btn.dataset.originalText;
+    delete btn.dataset.originalWidth;
+  }
+}
+
+function wrapButtonWithLoading(selector, asyncFn) {
+  const btn = $(selector);
+  if (!btn) return async () => {};
+  return async (...args) => {
+    const originalText = btn.textContent;
+    try {
+      setButtonLoading(btn, true, originalText);
+      return await asyncFn(...args);
+    } finally {
+      setButtonLoading(btn, false, originalText);
+    }
+  };
+}
+
+/* ═══════════════════════════════════════════════
+   CHART LOADING / EMPTY STATE
+   ═══════════════════════════════════════════════ */
+function showChartLoading() {
+  const stage = $("#prediction-chart");
+  if (!stage) return;
+  stage.innerHTML = `
+    <div class="chart-loading">
+      <div class="chart-spinner"></div>
+      <span style="color: var(--text-3); font-size: 13px;">正在加载图表...</span>
+    </div>`;
+}
+
+function showChartEmpty(message = "尚未执行预测") {
+  const stage = $("#prediction-chart");
+  if (!stage) return;
+  stage.innerHTML = `
+    <div class="chart-empty">
+      <div class="chart-empty-icon">📊</div>
+      <span>${htmlEscape(message)}</span>
+    </div>`;
+}
+
+/* ═══════════════════════════════════════════════
+   DARK MODE TOGGLE
+   ═══════════════════════════════════════════════ */
+function initDarkModeToggle() {
+  const root = document.documentElement;
+  const saved = localStorage.getItem("dayahead-dark-mode");
+  if (saved === "true") {
+    root.classList.add("dark-enabled");
+  }
+  const btn = document.querySelector(".mode-pill") || document.createElement("button");
+  if (!btn.classList.contains("mode-pill")) {
+    btn.className = "ghost-btn mini-btn";
+    btn.style.cssText = "position:fixed;top:18px;right:18px;z-index:1100;";
+    document.body.appendChild(btn);
+  }
+  btn.textContent = root.classList.contains("dark-enabled") ? "浅色模式" : "暗色模式";
+  btn.title = "切换暗色模式";
+  btn.setAttribute("role", "button");
+  btn.tabIndex = 0;
+  btn.style.cursor = "pointer";
+  btn.addEventListener("click", () => {
+    const isDark = root.classList.toggle("dark-enabled");
+    localStorage.setItem("dayahead-dark-mode", String(isDark));
+    btn.textContent = isDark ? "浅色模式" : "暗色模式";
+    if (App.chart) {
+      App.chart.dispose();
+      App.chart = null;
+      App.predictionChartSignature = null;
+      if (App.lastPrediction) {
+        renderPredictionChart(App.lastPrediction);
+      }
+    }
+  });
+  btn.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      btn.click();
+    }
+  });
+}
+
+function updateUiClock() {
+  const target = $("#ui-clock");
+  if (!target) return;
+  const formatter = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  target.textContent = formatter.format(new Date());
+}
+
+function initUiClock() {
+  updateUiClock();
+  setInterval(updateUiClock, 1000);
+}
+
+/* ═══════════════════════════════════════════════
+   TOOLBAR ACTIONS ROW (copy/export buttons)
+   ═══════════════════════════════════════════════ */
+function injectTableToolbarActions() {
+  const toolbarSelectors = [
+    { toolbar: "#tab-versions .table-toolbar", tableId: "versions-table", filename: "模型版本.csv" },
+    { toolbar: "#tab-logs .table-toolbar", tableId: "training-logs-table", filename: "训练日志.csv" },
+  ];
+
+  toolbarSelectors.forEach(({ toolbar: toolbarSelector, tableId, filename }) => {
+    const toolbar = document.querySelector(toolbarSelector);
+    if (!toolbar) return;
+    if (toolbar.querySelector(".copy-btn")) return;
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+    actions.innerHTML = `
+      <button class="copy-btn" data-table="${tableId}" title="复制表格数据">📋 复制</button>
+      <button class="csv-btn" data-table="${tableId}" data-filename="${filename}" title="导出为 CSV">⬇ CSV</button>
+    `;
+    toolbar.appendChild(actions);
+
+    actions.querySelector(".copy-btn").addEventListener("click", (event) => {
+      const btn = event.target.closest(".copy-btn");
+      const tid = btn.dataset.table;
+      copyTableToClipboard(tid);
+      btn.classList.add("copied");
+      setTimeout(() => btn.classList.remove("copied"), 1200);
+    });
+
+    actions.querySelector(".csv-btn").addEventListener("click", (event) => {
+      const btn = event.target.closest(".csv-btn");
+      exportTableToCSV(btn.dataset.table, btn.dataset.filename);
+    });
+  });
+
+  const metricsToolbar = document.querySelector("#tab-train .subsection-title");
+  if (metricsToolbar && !metricsToolbar.parentElement.querySelector(".copy-btn")) {
+    const wrapper = document.createElement("div");
+    wrapper.style.cssText = "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;";
+    metricsToolbar.parentElement.insertBefore(wrapper, metricsToolbar);
+    wrapper.appendChild(metricsToolbar);
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;";
+    actions.innerHTML = `
+      <button class="copy-btn" data-table="metrics-table" title="复制指标数据">📋 复制</button>
+      <button class="csv-btn" data-table="metrics-table" data-filename="模型指标.csv" title="导出为 CSV">⬇ CSV</button>
+    `;
+    wrapper.appendChild(actions);
+
+    actions.querySelector(".copy-btn").addEventListener("click", (event) => {
+      const btn = event.target.closest(".copy-btn");
+      copyTableToClipboard(btn.dataset.table);
+      btn.classList.add("copied");
+      setTimeout(() => btn.classList.remove("copied"), 1200);
+    });
+
+    actions.querySelector(".csv-btn").addEventListener("click", (event) => {
+      const btn = event.target.closest(".csv-btn");
+      exportTableToCSV(btn.dataset.table, btn.dataset.filename);
+    });
+  }
+
+  const predictionToolbar = document.querySelector("#tab-predict .chart-card .table-toolbar");
+  if (predictionToolbar && !predictionToolbar.querySelector(".csv-btn")) {
+    const predictBtn = document.createElement("button");
+    predictBtn.className = "csv-btn";
+    predictBtn.innerHTML = "⬇ 导出 CSV";
+    predictBtn.title = "导出预测结果";
+    predictBtn.addEventListener("click", () => {
+      exportTableToCSV("prediction-table", "预测结果.csv");
+    });
+    predictionToolbar.appendChild(predictBtn);
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   CARD VALUE FLASH ANIMATION
+   ═══════════════════════════════════════════════ */
+function flashCardValue(el) {
+  el.classList.remove("updated");
+  void el.offsetWidth;
+  el.classList.add("updated");
+}
+
+/* ═══════════════════════════════════════════════
+   INITIALIZATION (overridden / extended)
+   ═══════════════════════════════════════════════ */
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
+  bindKeyboardShortcuts();
+  initUiClock();
+  initDarkModeToggle();
+
   try {
     await initialLoad();
     startPolling();
+    initAutoRefresh();
+    injectTableToolbarActions();
   } catch (error) {
     showToast(error.message, "error");
   }

@@ -174,11 +174,17 @@ class JobState:
     status: str = "等待中"
     progress: int = 0
     running: bool = True
+    cancel_requested: bool = False
+    cancelled: bool = False
     logs: list[str] = field(default_factory=list)
     error: str | None = None
     result: dict[str, Any] | None = None
     started_at: str = field(default_factory=now_text)
     finished_at: str | None = None
+
+
+class JobCancelledError(RuntimeError):
+    pass
 
 
 class AppState:
@@ -213,12 +219,42 @@ class AppState:
             job.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
             job.logs = job.logs[-400:]
 
-    def finish_job(self, job_id: str, result: dict[str, Any] | None = None, error: str | None = None) -> None:
+    def request_cancel(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            if job_id not in self._jobs:
+                raise KeyError(job_id)
+            job = self._jobs[job_id]
+            if not job.running:
+                return to_jsonable(job.__dict__)
+            job.cancel_requested = True
+            job.status = "正在停止任务..."
+            job.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 已收到停止请求，正在安全中断")
+            job.logs = job.logs[-400:]
+            return to_jsonable(job.__dict__)
+
+    def raise_if_cancelled(self, job_id: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job and job.cancel_requested:
+                raise JobCancelledError("任务已手动停止")
+
+    def finish_job(
+        self,
+        job_id: str,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+        cancelled: bool = False,
+    ) -> None:
         with self._lock:
             job = self._jobs[job_id]
             job.running = False
             job.finished_at = now_text()
-            if error:
+            if cancelled or job.cancel_requested:
+                job.cancelled = True
+                job.status = "任务已停止"
+                job.progress = min(job.progress or 0, 99)
+                job.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 任务已停止")
+            elif error:
                 job.error = error
                 job.status = "执行失败"
                 job.progress = min(job.progress or 0, 99)
@@ -257,7 +293,9 @@ STATE = AppState()
 
 def build_progress_callback(job_id: str) -> Callable[[str, int | None], None]:
     def callback(message: str, percent: int | None) -> None:
+        STATE.raise_if_cancelled(job_id)
         STATE.append_log(job_id, message, percent)
+        STATE.raise_if_cancelled(job_id)
 
     return callback
 
@@ -269,6 +307,8 @@ def start_background_job(job_type: str, worker: Callable[[str], dict[str, Any]])
         try:
             result = worker(job.job_id)
             STATE.finish_job(job.job_id, result=result)
+        except JobCancelledError:
+            STATE.finish_job(job.job_id, cancelled=True)
         except Exception as exc:  # noqa: BLE001
             STATE.finish_job(job.job_id, error=f"{exc}\n{traceback.format_exc(limit=3)}")
 
@@ -324,6 +364,7 @@ def summarize_predict_result(result: Any) -> dict[str, Any]:
 def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any]]:
     def worker(job_id: str) -> dict[str, Any]:
         STATE.append_log(job_id, "收到手动重训请求", 1)
+        STATE.raise_if_cancelled(job_id)
         result = train_and_register(
             TrainConfig(
                 history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
@@ -343,6 +384,7 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
 def build_predict_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any]]:
     def worker(job_id: str) -> dict[str, Any]:
         STATE.append_log(job_id, "收到预测请求", 1)
+        STATE.raise_if_cancelled(job_id)
         result = predict_prices_compare(
             history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
             forecast_file=Path(payload.get("forecast_file") or FORECAST_FILE),
@@ -407,9 +449,23 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
+        path = parsed.path.rstrip("/") or "/"
         try:
             payload = self.read_json_body()
+            if path == "/api/jobs/cancel":
+                job_id = str(payload.get("job_id") or "").strip()
+                if not job_id:
+                    return self.send_error_json(HTTPStatus.BAD_REQUEST, "缺少 job_id")
+                try:
+                    return self.send_json(STATE.request_cancel(job_id))
+                except KeyError:
+                    return self.send_error_json(HTTPStatus.NOT_FOUND, "未找到任务")
+            if path.startswith("/api/jobs/") and path.endswith("/cancel"):
+                job_id = urllib.parse.unquote(path.split("/")[-2])
+                try:
+                    return self.send_json(STATE.request_cancel(job_id))
+                except KeyError:
+                    return self.send_error_json(HTTPStatus.NOT_FOUND, "未找到任务")
             if path == "/api/train":
                 return self.send_json(start_background_job("train", build_train_worker(payload)), HTTPStatus.ACCEPTED)
             if path == "/api/predict":
