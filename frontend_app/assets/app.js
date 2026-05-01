@@ -10,6 +10,7 @@ const App = {
   tickerMessages: [],
   tickerIndex: 0,
   tickerLoop: false,
+  tickerVisibleMessages: [],
   activeJobIds: {
     train: null,
     predict: null,
@@ -51,6 +52,25 @@ const referenceStrategyLabelMap = {
   recent_same_type_days: "最近 N 个同类型日",
 };
 
+const pageMetaMap = {
+  train: {
+    title: "模型训练中心",
+    subtitle: "设置训练范围、执行重训，并查看当前模型的核心指标。",
+  },
+  predict: {
+    title: "日前电价预测",
+    subtitle: "选择参考策略后执行预测，重点查看 96 点价格曲线。",
+  },
+  versions: {
+    title: "模型版本管理",
+    subtitle: "管理历史模型版本，支持默认切换与快速回退。",
+  },
+  logs: {
+    title: "训练日志复盘",
+    subtitle: "按正式训练记录查看历史时间范围与样本表现。",
+  },
+};
+
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
@@ -90,6 +110,13 @@ function showToast(message, type = "success") {
 function setActiveTab(name) {
   $$(".tab-btn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === name));
   $$(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === `tab-${name}`));
+  const pageMeta = pageMetaMap[name];
+  if (pageMeta) {
+    const title = document.querySelector(".hero-title");
+    const subtitle = document.querySelector(".hero-subtitle");
+    if (title) title.textContent = pageMeta.title;
+    if (subtitle) subtitle.textContent = pageMeta.subtitle;
+  }
   if (name === "predict") {
     requestAnimationFrame(() => {
       if (App.chart) {
@@ -226,12 +253,22 @@ function stopTickerLoop() {
 }
 
 function setStatusTickerText(message, animate = false) {
-  const textNode = $("#status-fab-text");
-  textNode.textContent = message;
-  textNode.classList.remove("animate");
+  const stack = $("#status-fab-text");
+  if (!stack) return;
+  const text = String(message || "").trim() || "系统待命，点击展开查看详细运行过程";
+  const previous = App.tickerVisibleMessages[App.tickerVisibleMessages.length - 1];
+  if (previous === text && App.tickerVisibleMessages.length) return;
+  App.tickerVisibleMessages = [...App.tickerVisibleMessages, text].slice(-3);
+  stack.innerHTML = App.tickerVisibleMessages
+    .map((item, index, list) => {
+      const newestClass = index === list.length - 1 && animate ? " newest" : "";
+      return `<span class="status-ticker-line${newestClass}">${htmlEscape(item)}</span>`;
+    })
+    .join("");
   if (!animate) return;
-  void textNode.offsetWidth;
-  textNode.classList.add("animate");
+  stack.classList.remove("rolling");
+  void stack.offsetWidth;
+  stack.classList.add("rolling");
 }
 
 function isSameTickerMessages(messages) {
@@ -255,6 +292,7 @@ function updateStatusTicker(messages, loop = false) {
   App.tickerMessages = safeMessages;
   App.tickerLoop = loop;
   App.tickerIndex = 0;
+  App.tickerVisibleMessages = [];
   setStatusTickerText(safeMessages[0], loop && safeMessages.length > 1);
   if (loop && safeMessages.length > 1) {
     ensureTickerLoop();
@@ -605,6 +643,9 @@ function deriveJobState(job, mode) {
   if (!job) {
     return { progress: 0, label: "未开始", status: idleText, type: "" };
   }
+  if (job.cancelled) {
+    return { progress: Number(job.progress || 0), label: "已停止", status: job.status || "任务已停止", type: "error" };
+  }
   if (job.error) {
     return { progress: Math.max(1, Number(job.progress || 0)), label: "执行失败", status: job.error.split("\n")[0], type: "error" };
   }
@@ -627,6 +668,16 @@ function getFocusedJobState() {
 function renderProgressSections() {
   applyProgressCard("train", deriveJobState(App.jobStates.train, "train"));
   applyProgressCard("predict", deriveJobState(App.jobStates.predict, "predict"));
+  syncStopButtons();
+}
+
+function syncStopButtons() {
+  const states = {
+    train: Boolean(App.activeJobIds.train && App.jobStates.train?.running),
+    predict: Boolean(App.activeJobIds.predict && App.jobStates.predict?.running),
+  };
+  $("#stop-train-btn")?.classList.toggle("hidden", !states.train);
+  $("#stop-predict-btn")?.classList.toggle("hidden", !states.predict);
 }
 
 function setPendingState(mode, title) {
@@ -785,17 +836,26 @@ async function startTrain() {
       logs: [`[本地] 训练任务已启动：${data.job_id}`],
       running: true,
     };
+    syncStopButtons();
     applyProgressCard("train", { progress: 5, label: "训练中", status: `训练任务已启动：${data.job_id}`, type: "running" });
     showToast(`已启动训练任务：${data.job_id}，等待完成...`);
     const job = await pollJobUntilDone(data.job_id);
     if (!job) {
+      App.activeJobIds.train = null;
+      syncStopButtons();
       applyProgressCard("train", { progress: 0, label: "超时", status: "训练超时（等待超过 15 分钟）", type: "error" });
       showToast("训练超时，请检查服务器状态", "error");
       return;
     }
+    App.jobStates.train = job;
+    App.activeJobIds.train = null;
+    syncStopButtons();
     if (job.error) {
       applyProgressCard("train", { progress: job.progress || 0, label: "失败", status: job.error, type: "error" });
       showToast(`训练失败：${job.error.split("\n")[0]}`, "error");
+    } else if (job.cancelled) {
+      applyProgressCard("train", { progress: job.progress || 0, label: "已停止", status: "训练已停止", type: "error" });
+      showToast("训练已停止");
     } else {
       applyProgressCard("train", { progress: 100, label: "已完成", status: "训练完成", type: "success" });
       showToast("训练已完成");
@@ -807,6 +867,7 @@ async function startTrain() {
   } finally {
     const el = $("#train-btn");
     if (el) setButtonLoading(el, false, originalText);
+    syncStopButtons();
   }
 }
 
@@ -835,17 +896,26 @@ async function startPredict() {
       logs: [`[本地] 预测任务已启动：${data.job_id}`],
       running: true,
     };
+    syncStopButtons();
     applyProgressCard("predict", { progress: 5, label: "预测中", status: `预测任务已启动：${data.job_id}`, type: "running" });
     showToast(`已启动预测任务：${data.job_id}，等待完成...`);
     const job = await pollJobUntilDone(data.job_id);
     if (!job) {
+      App.activeJobIds.predict = null;
+      syncStopButtons();
       applyProgressCard("predict", { progress: 0, label: "超时", status: "预测超时（等待超过 15 分钟）", type: "error" });
       showToast("预测超时，请检查服务器状态", "error");
       return;
     }
+    App.jobStates.predict = job;
+    App.activeJobIds.predict = null;
+    syncStopButtons();
     if (job.error) {
       applyProgressCard("predict", { progress: job.progress || 0, label: "失败", status: job.error, type: "error" });
       showToast(`预测失败：${job.error.split("\n")[0]}`, "error");
+    } else if (job.cancelled) {
+      applyProgressCard("predict", { progress: job.progress || 0, label: "已停止", status: "预测已停止", type: "error" });
+      showToast("预测已停止");
     } else {
       applyProgressCard("predict", { progress: 100, label: "已完成", status: "预测完成", type: "success" });
       showToast("预测已完成");
@@ -857,6 +927,7 @@ async function startPredict() {
   } finally {
     const el = $("#predict-btn");
     if (el) setButtonLoading(el, false, originalText);
+    syncStopButtons();
   }
 }
 
@@ -902,8 +973,51 @@ async function deleteSelectedVersions() {
 }
 
 function toggleStatusPanel(hidden) {
-  $("#status-panel").classList.toggle("hidden-panel", hidden);
-  $("#status-fab").classList.toggle("hidden", !hidden);
+  const wrapper = $("#sidebar-status");
+  if (wrapper) {
+    wrapper.classList.toggle("collapsed", hidden);
+    wrapper.classList.toggle("expanded", !hidden);
+  }
+  $("#status-panel")?.classList.toggle("hidden-panel", hidden);
+  $("#status-fab")?.classList.toggle("hidden", false);
+}
+
+async function cancelJob(mode) {
+  const jobId = App.activeJobIds[mode];
+  if (!jobId) {
+    showToast("当前没有正在执行的任务", "error");
+    return;
+  }
+  const stopButton = mode === "train" ? $("#stop-train-btn") : $("#stop-predict-btn");
+  const originalText = stopButton?.textContent || "停止任务";
+  try {
+    if (stopButton) {
+      stopButton.disabled = true;
+      stopButton.textContent = "停止中...";
+    }
+    let job;
+    try {
+      job = await request(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST", body: JSON.stringify({}) });
+    } catch (error) {
+      if (!String(error.message || "").includes("未找到接口")) {
+        throw error;
+      }
+      job = await request("/api/jobs/cancel", { method: "POST", body: JSON.stringify({ job_id: jobId }) });
+    }
+    App.jobStates[mode] = job;
+    App.statusFocus = mode;
+    renderProgressSections();
+    renderStatusPanel({ current_job: job, recent_jobs: [] });
+    updateStatusTicker(["已发送停止请求，等待任务安全中断"], false);
+    showToast("已发送停止请求");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    if (stopButton) {
+      stopButton.disabled = false;
+      stopButton.textContent = originalText;
+    }
+  }
 }
 
 function parseDateText(value) {
@@ -1190,10 +1304,12 @@ function setDatePickerDisabled(pickerId, disabled) {
 function bindEvents() {
   $$(".tab-btn").forEach((btn) => btn.addEventListener("click", () => setActiveTab(btn.dataset.tab)));
   $("#train-btn").addEventListener("click", () => startTrain().catch((error) => showToast(error.message, "error")));
+  $("#stop-train-btn").addEventListener("click", () => cancelJob("train"));
   $("#refresh-train-metrics-btn").addEventListener("click", () => refreshSummary().then(() => showToast("当前指标已刷新")).catch((error) => showToast(error.message, "error")));
   $("#reload-template-btn").addEventListener("click", () => loadTemplate().then(() => showToast("预测文件已重新加载")).catch((error) => showToast(error.message, "error")));
   $("#save-template-btn").addEventListener("click", () => saveTemplate().catch((error) => showToast(error.message, "error")));
   $("#predict-btn").addEventListener("click", () => startPredict().catch((error) => showToast(error.message, "error")));
+  $("#stop-predict-btn").addEventListener("click", () => cancelJob("predict"));
   $("#reference-days").addEventListener("input", () => syncReferenceStrategyLabels());
   $("#reference-days").addEventListener("change", () => syncReferenceStrategyLabels());
   $("#prediction-view-strategy").addEventListener("change", () => {
@@ -1404,16 +1520,25 @@ function exportTableToCSV(tableId, filename) {
    BUTTON LOADING STATE
    ═══════════════════════════════════════════════ */
 function setButtonLoading(btn, loading, originalText) {
+  if (!btn) return;
   if (loading) {
     btn.dataset.originalText = btn.textContent;
+    btn.dataset.originalWidth = `${btn.offsetWidth}`;
+    btn.style.width = `${btn.offsetWidth}px`;
+    btn.style.minWidth = `${btn.offsetWidth}px`;
+    btn.setAttribute("aria-busy", "true");
     btn.classList.add("loading");
-    btn.textContent = "";
+    btn.textContent = "执行中...";
     btn.disabled = true;
   } else {
     btn.classList.remove("loading");
     btn.textContent = btn.dataset.originalText || originalText || btn.textContent;
     btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+    btn.style.width = "";
+    btn.style.minWidth = "";
     delete btn.dataset.originalText;
+    delete btn.dataset.originalWidth;
   }
 }
 
@@ -1463,15 +1588,21 @@ function initDarkModeToggle() {
   if (saved === "true") {
     root.classList.add("dark-enabled");
   }
-  const btn = document.createElement("button");
-  btn.className = "ghost-btn mini-btn";
-  btn.style.cssText = "position:fixed;top:18px;right:18px;z-index:1100;";
-  btn.textContent = root.classList.contains("dark-enabled") ? "☀️" : "🌙";
+  const btn = document.querySelector(".mode-pill") || document.createElement("button");
+  if (!btn.classList.contains("mode-pill")) {
+    btn.className = "ghost-btn mini-btn";
+    btn.style.cssText = "position:fixed;top:18px;right:18px;z-index:1100;";
+    document.body.appendChild(btn);
+  }
+  btn.textContent = root.classList.contains("dark-enabled") ? "浅色模式" : "暗色模式";
   btn.title = "切换暗色模式";
+  btn.setAttribute("role", "button");
+  btn.tabIndex = 0;
+  btn.style.cursor = "pointer";
   btn.addEventListener("click", () => {
     const isDark = root.classList.toggle("dark-enabled");
     localStorage.setItem("dayahead-dark-mode", String(isDark));
-    btn.textContent = isDark ? "☀️" : "🌙";
+    btn.textContent = isDark ? "浅色模式" : "暗色模式";
     if (App.chart) {
       App.chart.dispose();
       App.chart = null;
@@ -1481,7 +1612,30 @@ function initDarkModeToggle() {
       }
     }
   });
-  document.body.appendChild(btn);
+  btn.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      btn.click();
+    }
+  });
+}
+
+function updateUiClock() {
+  const target = $("#ui-clock");
+  if (!target) return;
+  const formatter = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  target.textContent = formatter.format(new Date());
+}
+
+function initUiClock() {
+  updateUiClock();
+  setInterval(updateUiClock, 1000);
 }
 
 /* ═══════════════════════════════════════════════
@@ -1576,6 +1730,7 @@ function flashCardValue(el) {
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   bindKeyboardShortcuts();
+  initUiClock();
   initDarkModeToggle();
 
   try {

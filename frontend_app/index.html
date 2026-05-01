@@ -7,56 +7,86 @@
     <link rel="stylesheet" href="/assets/app.css" />
   </head>
   <body>
-    <div class="app-shell">
-      <header class="hero-card">
-        <div class="hero-content">
-          <div class="hero-badge">山西电力现货</div>
-          <h1 class="hero-title">日前电价预测</h1>
-          <p class="hero-subtitle">聚焦训练、预测与结果曲线，关键数据一屏掌握。</p>
-          <div class="hero-tags" aria-label="核心能力">
-            <span>96 点曲线</span>
-            <span>策略对比</span>
-            <span>模型回退</span>
+    <div class="app-frame">
+      <aside class="app-sidebar">
+        <div class="brand-card">
+          <div class="brand-title">日前电价预测系统</div>
+          <div class="brand-subtitle">Forecast MVP v1.0</div>
+        </div>
+
+        <nav class="tabs-bar" aria-label="主导航">
+          <button class="tab-btn active" data-tab="train"><span>📈</span>训练中心</button>
+          <button class="tab-btn" data-tab="predict"><span>⚡</span>预测中心</button>
+          <button class="tab-btn" data-tab="versions"><span>📦</span>模型版本</button>
+          <button class="tab-btn" data-tab="logs"><span>📊</span>训练日志</button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <section class="sidebar-status collapsed" id="sidebar-status">
+            <button class="status-fab status-ticker" id="status-fab" type="button">
+              <span class="status-fab-title">运行状态</span>
+              <span class="status-fab-marquee">
+                <span class="status-ticker-stack" id="status-fab-text">
+                  <span class="status-ticker-line">系统待命，点击展开查看详细运行过程</span>
+                </span>
+              </span>
+            </button>
+
+            <aside class="status-panel" id="status-panel">
+              <div class="status-panel-header">
+                <div class="status-panel-title">运行状态窗口</div>
+                <button class="ghost-btn mini-btn" id="hide-status-btn">收起</button>
+              </div>
+              <div class="status-current" id="status-current">系统待命</div>
+              <div class="status-progress-track">
+                <div class="status-progress-fill" id="status-progress-fill"></div>
+              </div>
+              <div class="log-console" id="log-console">暂无运行日志</div>
+            </aside>
+          </section>
+        </div>
+      </aside>
+
+      <main class="app-shell">
+        <header class="hero-card">
+          <div class="hero-content">
+            <div class="hero-badge">山西电力现货</div>
+            <h1 class="hero-title">日前电价预测</h1>
+            <p class="hero-subtitle">围绕模型训练、预测执行和结果复盘，管理每一次日前价格预测。</p>
           </div>
-        </div>
-        <div class="hero-visual" aria-hidden="true">
-          <span class="hero-dot dot-a"></span>
-          <span class="hero-dot dot-b"></span>
-          <span class="hero-dot dot-c"></span>
-          <div class="hero-wave"></div>
-        </div>
-      </header>
+          <div class="header-actions" aria-label="页面工具">
+            <div class="time-card">
+              <span>北京时间</span>
+              <strong id="ui-clock">--:--:--</strong>
+            </div>
+            <div class="mode-pill">浅色模式</div>
+          </div>
+        </header>
 
-      <section class="top-status" id="top-status"></section>
+        <section class="top-status" id="top-status"></section>
 
-      <section class="card-grid metrics-grid">
-        <article class="info-card metric-card tone-blue">
-          <div class="card-icon">M</div>
-          <div class="card-title">当前默认模型</div>
-          <div class="card-value" id="current-model-id">-</div>
-          <div class="card-desc">正在使用的正式模型版本</div>
-        </article>
-        <article class="info-card metric-card tone-gold">
-          <div class="card-icon">T</div>
-          <div class="card-title">训练范围</div>
-          <div class="card-value" id="current-model-range">-</div>
-          <div class="card-desc">当前模型覆盖的数据日期</div>
-        </article>
-        <article class="info-card metric-card tone-green">
-          <div class="card-icon">¥</div>
-          <div class="card-title">价格范围</div>
-          <div class="card-value">0 ~ 1500 元/兆瓦时</div>
-          <div class="card-desc">预测结果自动执行上下限裁剪</div>
-        </article>
-      </section>
+        <section class="card-grid metrics-grid">
+          <article class="info-card metric-card tone-blue">
+            <div class="card-icon">M</div>
+            <div class="card-title">当前模型编号</div>
+            <div class="card-value" id="current-model-id">-</div>
+            <div class="card-desc">正在使用的正式模型版本</div>
+          </article>
+          <article class="info-card metric-card tone-gold">
+            <div class="card-icon">T</div>
+            <div class="card-title">训练时间范围</div>
+            <div class="card-value" id="current-model-range">-</div>
+            <div class="card-desc">当前模型覆盖的数据日期</div>
+          </article>
+          <article class="info-card metric-card tone-green">
+            <div class="card-icon">¥</div>
+            <div class="card-title">价格范围</div>
+            <div class="card-value">0 ~ 1500 元/兆瓦时</div>
+            <div class="card-desc">预测结果自动执行上下限裁剪</div>
+          </article>
+        </section>
 
-      <section class="glass-card">
-        <div class="tabs-bar">
-          <button class="tab-btn active" data-tab="train">训练中心</button>
-          <button class="tab-btn" data-tab="predict">预测中心</button>
-          <button class="tab-btn" data-tab="versions">模型版本</button>
-          <button class="tab-btn" data-tab="logs">训练日志</button>
-        </div>
+        <section class="glass-card">
 
         <div class="tab-panel active" id="tab-train">
           <div class="section-header">
@@ -119,6 +149,7 @@
 
           <div class="actions-row">
             <button class="primary-btn" id="train-btn">手动重训模型</button>
+            <button class="stop-btn hidden" id="stop-train-btn" type="button">停止训练</button>
             <button class="ghost-btn" id="refresh-train-metrics-btn">刷新当前指标</button>
           </div>
 
@@ -187,6 +218,7 @@
             <button class="ghost-btn" id="reload-template-btn">重新加载预测文件</button>
             <button class="ghost-btn" id="save-template-btn">保存当前编辑</button>
             <button class="primary-btn" id="predict-btn">执行预测</button>
+            <button class="stop-btn hidden" id="stop-predict-btn" type="button">停止预测</button>
             <a class="ghost-btn link-btn" href="/download/output" target="_blank">下载最新结果</a>
           </div>
 
@@ -303,27 +335,10 @@
             </div>
           </div>
         </div>
-      </section>
+        </section>
+      </main>
     </div>
 
-    <aside class="status-panel hidden-panel" id="status-panel">
-      <div class="status-panel-header">
-        <button class="ghost-btn mini-btn" id="hide-status-btn">隐藏</button>
-        <div class="status-panel-title">运行状态窗口</div>
-      </div>
-      <div class="status-current" id="status-current">系统待命</div>
-      <div class="status-progress-track">
-        <div class="status-progress-fill" id="status-progress-fill"></div>
-      </div>
-      <div class="log-console" id="log-console">暂无运行日志</div>
-    </aside>
-
-    <button class="status-fab status-ticker" id="status-fab">
-      <span class="status-fab-title">运行状态</span>
-      <span class="status-fab-marquee">
-        <span class="status-fab-marquee-text" id="status-fab-text">系统待命，点击展开查看详细运行过程</span>
-      </span>
-    </button>
     <div class="toast-stack" id="toast-stack"></div>
 
     <script src="/assets/vendor/echarts.min.js"></script>

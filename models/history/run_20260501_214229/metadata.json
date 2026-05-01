@@ -1,6 +1,6 @@
 {
-  "run_id": "run_20260501_190130",
-  "created_at": "2026-05-01T19:01:31",
+  "run_id": "run_20260501_214229",
+  "created_at": "2026-05-01T21:42:30",
   "target_column": "日前出清价格(元/MWh)",
   "feature_columns": [
     "net_load",
