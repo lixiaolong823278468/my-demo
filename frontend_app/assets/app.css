@@ -614,6 +614,15 @@ select {
   box-shadow: 0 7px 16px rgba(16, 32, 51, 0.04);
 }
 
+.field select {
+  appearance: none;
+  padding-right: 44px;
+  background-image: url("data:image/svg+xml,%3Csvg width='14' height='14' viewBox='0 0 14 14' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3.2 5.25L7 9.05l3.8-3.8' fill='none' stroke='%23526174' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position: right 20px center;
+  background-size: 14px 14px;
+  background-repeat: no-repeat;
+}
+
 .field input:focus,
 .field select:focus,
 .date-picker.open .date-display {
@@ -3196,6 +3205,45 @@ html {
 /* ═══════════════════════════════════════════════
    PRINT STYLES
    ═══════════════════════════════════════════════ */
+/* Final select arrow layer: keep it after all background overrides. */
+.field select {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  padding-right: 48px !important;
+  background-color: #ffffff !important;
+  background-image: none !important;
+  background-repeat: no-repeat !important;
+  background-position: right 22px center !important;
+  background-size: 16px 16px !important;
+}
+
+:root.dark-enabled .field select {
+  background-color: rgba(30, 41, 59, 0.88) !important;
+}
+
+.field.select-field {
+  position: relative;
+}
+
+.field.select-field::after {
+  content: "";
+  position: absolute;
+  right: 22px;
+  bottom: 19px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid #293547;
+  border-bottom: 2px solid #293547;
+  border-radius: 1px;
+  pointer-events: none;
+  transform: rotate(45deg);
+  opacity: 0.82;
+}
+
+:root.dark-enabled .field.select-field::after {
+  border-color: #cbd5e1;
+}
+
 @media print {
   body {
     background: #ffffff !important;
