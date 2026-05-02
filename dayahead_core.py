@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import pickle
 import re
 import shutil
 import warnings
@@ -14,6 +16,15 @@ import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 
+from data_quality import (
+    DataQualityIssue,
+    DataQualityValidationError,
+    has_blocking_issues,
+    save_quality_report,
+    validate_forecast_template,
+    validate_history_sheet,
+)
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_HISTORY_DIR = BASE_DIR / "数据"
@@ -22,6 +33,7 @@ DEFAULT_OUTPUT_FILE = BASE_DIR / "output" / "dayahead_price_prediction.xlsx"
 DEFAULT_FORECAST_FILE = BASE_DIR / "预测文件" / "预测文件.xlsx"
 PRICE_FLOOR = 0.0
 PRICE_CAP = 1500.0
+HISTORY_CACHE_VERSION = 2
 
 TARGET_COLUMN = "日前出清价格(元/MWh)"
 SIMILAR_PRICE_COLUMN = "similar_price"
@@ -88,6 +100,7 @@ class TrainResult:
     valid_dates: list[str]
     skipped_sheets: list[str]
     metadata_path: Path
+    quality_report_path: Path | None = None
 
 
 @dataclass
@@ -100,6 +113,7 @@ class PredictResult:
     reference_days_requested: int
     reference_dates: list[str]
     result_df: pd.DataFrame
+    quality_report_path: Path | None = None
 
 
 @dataclass
@@ -110,6 +124,7 @@ class PredictCompareResult:
     selected_strategy_key: str
     selected_strategy_label: str
     strategy_results: dict[str, PredictResult]
+    quality_report_path: Path | None = None
 
 
 ProgressCallback = Callable[[str, int | None], None]
@@ -159,6 +174,220 @@ def list_excel_files(source: str | Path) -> list[Path]:
     if not files:
         raise FileNotFoundError(f"未在 {path} 下找到 Excel 文件")
     return files
+
+
+def parse_optional_date(value: str | Path | pd.Timestamp | None) -> pd.Timestamp | None:
+    if value is None:
+        return None
+    timestamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    return pd.Timestamp(timestamp).normalize()
+
+
+def excel_file_month(file_path: str | Path) -> pd.Timestamp | None:
+    path = Path(file_path)
+    candidates = [path.stem, path.name, *[part for part in path.parts[-3:]]]
+    for text in candidates:
+        match = re.search(r"(20\d{2})\s*年?\D{0,8}(1[0-2]|0?[1-9])\s*月?", str(text))
+        if match:
+            return pd.Timestamp(year=int(match.group(1)), month=int(match.group(2)), day=1)
+    year_value = None
+    month_value = None
+    for part in reversed(path.parts):
+        year_match = re.search(r"(20\d{2})\s*年", part)
+        month_match = re.search(r"(1[0-2]|0?[1-9])\s*月", part)
+        if year_match and year_value is None:
+            year_value = int(year_match.group(1))
+        if month_match and month_value is None:
+            month_value = int(month_match.group(1))
+        if year_value is not None and month_value is not None:
+            return pd.Timestamp(year=year_value, month=month_value, day=1)
+    return None
+
+
+def list_excel_files_for_date_window(
+    source: str | Path,
+    start_date: str | pd.Timestamp | None,
+    end_date: str | pd.Timestamp | None,
+    leading_days: int = 0,
+) -> list[Path]:
+    path = Path(source)
+    files = list_excel_files(path)
+    if path.is_file():
+        return files
+    window_start = parse_optional_date(start_date)
+    window_end = parse_optional_date(end_date)
+    if window_start is None and window_end is None:
+        return files
+    if window_start is not None and leading_days > 0:
+        window_start = window_start - pd.Timedelta(days=leading_days)
+    selected: list[Path] = []
+    unknown: list[Path] = []
+    for file_path in files:
+        month_start = excel_file_month(file_path)
+        if month_start is None:
+            unknown.append(file_path)
+            continue
+        month_end = month_start + pd.offsets.MonthEnd(0)
+        if window_start is not None and month_end < window_start:
+            continue
+        if window_end is not None and month_start > window_end:
+            continue
+        selected.append(file_path)
+    scoped_files = [*selected, *unknown]
+    if not scoped_files:
+        raise FileNotFoundError(f"未找到覆盖日期范围的历史 Excel 文件: {source}")
+    return sorted(scoped_files)
+
+
+def build_history_source_signature(
+    source: str | Path,
+    holiday_file: str | Path | None,
+    require_target: bool,
+    excel_files: list[Path] | None = None,
+    scope: dict | None = None,
+) -> dict:
+    source_path = Path(source).resolve()
+    files = []
+    for file_path in (excel_files if excel_files is not None else list_excel_files(source_path)):
+        stat = file_path.stat()
+        files.append(
+            {
+                "path": str(file_path.resolve()),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        )
+    holiday_signature = None
+    if holiday_file:
+        holiday_path = Path(holiday_file).resolve()
+        holiday_stat = holiday_path.stat()
+        holiday_signature = {
+            "path": str(holiday_path),
+            "size": holiday_stat.st_size,
+            "mtime_ns": holiday_stat.st_mtime_ns,
+        }
+    payload = {
+        "version": HISTORY_CACHE_VERSION,
+        "source": str(source_path),
+        "require_target": bool(require_target),
+        "files": files,
+        "holiday_file": holiday_signature,
+        "scope": scope or {},
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    payload["cache_key"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return payload
+
+
+def derived_cache_key(source_key: str, namespace: str) -> str:
+    raw = json.dumps(
+        {
+            "version": HISTORY_CACHE_VERSION,
+            "source_key": source_key,
+            "namespace": namespace,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def dataframe_cache_path(cache_dir: str | Path, cache_name: str, cache_key: str) -> Path:
+    return Path(cache_dir) / f"{cache_name}_{cache_key}.pkl"
+
+
+def load_dataframe_cache(cache_dir: str | Path, cache_name: str, cache_key: str) -> tuple[pd.DataFrame, list[str]] | None:
+    cache_path = dataframe_cache_path(cache_dir, cache_name, cache_key)
+    if not cache_path.exists():
+        return None
+    try:
+        with cache_path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except (OSError, pickle.PickleError, EOFError, AttributeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("version") != HISTORY_CACHE_VERSION or payload.get("cache_key") != cache_key:
+        return None
+    frame = payload.get("frame")
+    if not isinstance(frame, pd.DataFrame):
+        return None
+    skipped_sheets = payload.get("skipped_sheets") or []
+    if not isinstance(skipped_sheets, list):
+        skipped_sheets = []
+    return frame.copy(), [str(item) for item in skipped_sheets]
+
+
+def save_dataframe_cache(cache_dir: str | Path, cache_name: str, cache_key: str, frame: pd.DataFrame, skipped_sheets: list[str]) -> None:
+    cache_root = Path(cache_dir)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_path = dataframe_cache_path(cache_root, cache_name, cache_key)
+    temp_path = cache_path.with_suffix(".tmp")
+    payload = {
+        "version": HISTORY_CACHE_VERSION,
+        "cache_key": cache_key,
+        "frame": frame,
+        "skipped_sheets": skipped_sheets,
+    }
+    with temp_path.open("wb") as handle:
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    temp_path.replace(cache_path)
+
+
+def quality_report_status(issues: list[DataQualityIssue], blocked: bool = False) -> str:
+    if blocked:
+        return "blocked"
+    if issues:
+        return "completed_with_issues"
+    return "clean"
+
+
+def load_cached_history_collection(
+    history_dir: str | Path,
+    holiday_file: str | Path | None,
+    require_target: bool,
+    model_root: str | Path,
+    progress_callback: ProgressCallback | None = None,
+    progress_start: int | None = None,
+    progress_end: int | None = None,
+    progress_label: str = "正在加载历史数据",
+    start_date: str | pd.Timestamp | None = None,
+    end_date: str | pd.Timestamp | None = None,
+    leading_days: int = 0,
+) -> tuple[pd.DataFrame, list[str], set[pd.Timestamp], dict, list[DataQualityIssue]]:
+    holiday_dates = load_holiday_dates(holiday_file)
+    scoped_files = list_excel_files_for_date_window(history_dir, start_date, end_date, leading_days=leading_days)
+    scope = {
+        "start_date": str(parse_optional_date(start_date).date()) if parse_optional_date(start_date) is not None else None,
+        "end_date": str(parse_optional_date(end_date).date()) if parse_optional_date(end_date) is not None else None,
+        "leading_days": int(leading_days or 0),
+    }
+    signature = build_history_source_signature(history_dir, holiday_file, require_target, excel_files=scoped_files, scope=scope)
+    cache_dir = Path(model_root) / "cache"
+    cached = load_dataframe_cache(cache_dir, "history_raw", signature["cache_key"])
+    if cached is not None:
+        emit_progress(progress_callback, "历史数据未变化，已复用缓存", progress_end)
+        cached_frame, skipped_sheets = cached
+        return cached_frame, skipped_sheets, holiday_dates, signature, []
+
+    builder = DayAheadDataBuilder(holiday_dates)
+    try:
+        history_df = builder.load_excel_collection(
+            history_dir,
+            require_target=require_target,
+            progress_callback=progress_callback,
+            progress_start=progress_start,
+            progress_end=progress_end,
+            progress_label=progress_label,
+            excel_files=scoped_files,
+        )
+    except ValueError as exc:
+        if builder.quality_issues:
+            raise DataQualityValidationError(str(exc), builder.quality_issues) from exc
+        raise
+    save_dataframe_cache(cache_dir, "history_raw", signature["cache_key"], history_df, builder.skipped_sheets)
+    return history_df, builder.skipped_sheets, holiday_dates, signature, builder.quality_issues
 
 
 def to_numeric(series: pd.Series) -> pd.Series:
@@ -262,7 +491,6 @@ def extract_thermal_on_capacity(text: object) -> float:
     patterns = [
         r"火电开机容量[^0-9]*([0-9]+(?:\.[0-9]+)?)\s*(万千瓦|万kw|万kW|MW|mw|GW|gw|kW|kw|KW)?",
         r"运行机组容量[^0-9]*([0-9]+(?:\.[0-9]+)?)\s*(万千瓦|万kw|万kW|MW|mw|GW|gw|kW|kw|KW)?",
-        r"必开容量[^0-9]*([0-9]+(?:\.[0-9]+)?)\s*(万千瓦|万kw|万kW|MW|mw|GW|gw|kW|kw|KW)?",
     ]
     for pattern in patterns:
         match = re.search(pattern, content)
@@ -286,6 +514,7 @@ class DayAheadDataBuilder:
     def __init__(self, holiday_dates: set[pd.Timestamp] | None = None) -> None:
         self.holiday_dates = holiday_dates or set()
         self.skipped_sheets: list[str] = []
+        self.quality_issues: list[DataQualityIssue] = []
 
     def load_excel_collection(
         self,
@@ -295,10 +524,12 @@ class DayAheadDataBuilder:
         progress_start: int | None = None,
         progress_end: int | None = None,
         progress_label: str = "正在读取数据",
+        excel_files: list[Path] | None = None,
     ) -> pd.DataFrame:
         all_days: list[pd.DataFrame] = []
         self.skipped_sheets = []
-        excel_files = list_excel_files(source)
+        self.quality_issues = []
+        excel_files = excel_files if excel_files is not None else list_excel_files(source)
         total_files = len(excel_files)
         for file_index, file_path in enumerate(excel_files, start=1):
             if progress_callback is not None and progress_start is not None and progress_end is not None and total_files > 0:
@@ -308,11 +539,50 @@ class DayAheadDataBuilder:
             for sheet_name, raw_df in workbook.items():
                 trade_date = parse_sheet_date(str(sheet_name))
                 if trade_date is None:
+                    self.quality_issues.append(
+                        DataQualityIssue(
+                            task_type="train",
+                            severity="error",
+                            action="skipped",
+                            issue_type="unrecognized_sheet_date",
+                            file_path=str(file_path),
+                            sheet_name=str(sheet_name),
+                            message="Sheet 名称无法识别为日期",
+                        )
+                    )
+                    if require_target:
+                        self.skipped_sheets.append(f"{file_path.name} | {sheet_name} | Sheet 名称无法识别为日期")
                     continue
+                validation_issues = validate_history_sheet(
+                    raw_df,
+                    file_path=file_path,
+                    sheet_name=str(sheet_name),
+                    trade_date=trade_date,
+                    require_target=require_target,
+                )
+                self.quality_issues.extend(validation_issues)
+                if has_blocking_issues(validation_issues):
+                    if require_target:
+                        first_issue = validation_issues[0]
+                        self.skipped_sheets.append(f"{file_path.name} | {sheet_name} | {first_issue.message}")
+                        continue
+                    raise DataQualityValidationError("历史数据存在关键字段异常", validation_issues)
                 try:
                     day_df = self.prepare_single_sheet(raw_df, file_path, str(sheet_name), trade_date, require_target)
                     all_days.append(day_df)
                 except (KeyError, ValueError) as exc:
+                    self.quality_issues.append(
+                        DataQualityIssue(
+                            task_type="train",
+                            severity="error",
+                            action="skipped" if require_target else "blocked",
+                            issue_type="parse_error",
+                            file_path=str(file_path),
+                            sheet_name=str(sheet_name),
+                            date=trade_date.strftime("%Y-%m-%d"),
+                            message=str(exc),
+                        )
+                    )
                     if require_target:
                         self.skipped_sheets.append(f"{file_path.name} | {sheet_name} | {exc}")
                         continue
@@ -348,15 +618,12 @@ class DayAheadDataBuilder:
             required=require_target,
         )
         overview_col = resolve_column(day_df.columns, ["日前-出清概况", "日前出清概况", "出清概况"], required=False)
-        thermal_col = resolve_column(day_df.columns, ["火电开机容量(MW)", "火电开机容量", "运行机组容量"], required=False)
 
         overview_series = pd.Series([np.nan] * len(day_df))
         thermal_series = pd.Series([np.nan] * len(day_df))
         if overview_col:
             overview_series = day_df[overview_col].ffill().bfill()
             thermal_series = overview_series.map(extract_thermal_on_capacity)
-        if thermal_col:
-            thermal_series = to_numeric(day_df[thermal_col]).combine_first(to_numeric(thermal_series))
 
         periods = np.arange(1, 97)
         date_value = trade_date.normalize()
@@ -461,27 +728,64 @@ def filter_date_range(data: pd.DataFrame, start_date: str | None, end_date: str 
 def build_training_frame(
     config: TrainConfig,
     progress_callback: ProgressCallback | None = None,
-) -> tuple[pd.DataFrame, list[str]]:
-    builder = DayAheadDataBuilder(load_holiday_dates(config.holiday_file))
-    history_df = builder.load_excel_collection(
-        config.history_dir,
-        require_target=True,
-        progress_callback=progress_callback,
-        progress_start=6,
-        progress_end=18,
-        progress_label="正在加载历史数据文件",
+) -> tuple[pd.DataFrame, list[str], Path]:
+    try:
+        history_df, skipped_sheets, _, history_signature, quality_issues = load_cached_history_collection(
+            config.history_dir,
+            config.holiday_file,
+            True,
+            config.model_root,
+            progress_callback=progress_callback,
+            progress_start=6,
+            progress_end=18,
+            progress_label="正在加载历史数据文件",
+            start_date=config.start_date,
+            end_date=config.end_date,
+            leading_days=1,
+        )
+    except DataQualityValidationError as exc:
+        report_path = save_quality_report(
+            task_type="train",
+            status="blocked",
+            issues=exc.issues,
+            metadata={
+                "history_dir": str(config.history_dir),
+                "start_date": config.start_date,
+                "end_date": config.end_date,
+            },
+        )
+        exc.report_path = report_path
+        raise
+    quality_report_path = save_quality_report(
+        task_type="train",
+        status=quality_report_status(quality_issues),
+        issues=quality_issues,
+        metadata={
+            "history_dir": str(config.history_dir),
+            "skipped_sheets": skipped_sheets,
+            "start_date": config.start_date,
+            "end_date": config.end_date,
+        },
     )
-    emit_progress(progress_callback, "正在构建 lag_96 特征", 19)
-    history_df = attach_lag_96(history_df, history_df)
-    emit_progress(progress_callback, "正在构建相似法特征", 20)
-    history_df = attach_similarity_features(history_df)
-    emit_progress(progress_callback, "相似法特征构建完成", 21)
+    feature_cache_key = derived_cache_key(history_signature["cache_key"], "training_features")
+    feature_cache_dir = config.model_root / "cache"
+    cached_features = load_dataframe_cache(feature_cache_dir, "training_features", feature_cache_key)
+    if cached_features is not None:
+        history_df, _ = cached_features
+        emit_progress(progress_callback, "训练特征未变化，已复用缓存", 21)
+    else:
+        emit_progress(progress_callback, "正在构建 lag_96 特征", 19)
+        history_df = attach_lag_96(history_df, history_df)
+        emit_progress(progress_callback, "正在构建相似法特征", 20)
+        history_df = attach_similarity_features(history_df)
+        save_dataframe_cache(feature_cache_dir, "training_features", feature_cache_key, history_df, skipped_sheets)
+        emit_progress(progress_callback, "相似法特征构建完成", 21)
     history_df = filter_date_range(history_df, config.start_date, config.end_date)
     emit_progress(progress_callback, "正在过滤日期范围", 22)
     history_df = history_df.dropna(subset=[TARGET_COLUMN, "lag_96", SIMILAR_PRICE_COLUMN, RESIDUAL_TARGET_COLUMN]).reset_index(drop=True)
     if history_df.empty:
         raise ValueError("数据加载后经清洗为空，请检查历史数据文件是否包含有效数据。")
-    return history_df, builder.skipped_sheets
+    return history_df, skipped_sheets, quality_report_path
 
 def make_dmatrix(frame: pd.DataFrame, feature_columns: list[str], label_column: str | None = None):
     import xgboost as xgb
@@ -652,7 +956,7 @@ def finalize_model_version(model_root: Path, staging_dir: Path, run_id: str) -> 
 def train_and_register(config: TrainConfig, progress_callback: ProgressCallback | None = None) -> TrainResult:
     ensure_xgboost_available()
     emit_progress(progress_callback, "开始加载历史数据", 5)
-    history_df, skipped_sheets = build_training_frame(config, progress_callback=progress_callback)
+    history_df, skipped_sheets, quality_report_path = build_training_frame(config, progress_callback=progress_callback)
     emit_progress(progress_callback, "历史数据加载完成，开始生成训练样本", 20)
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     staging_dir = config.model_root / "_staging" / run_id
@@ -680,6 +984,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "valid_dates": valid_dates,
         "sample_rows": int(len(history_df)),
         "skipped_sheets": skipped_sheets,
+        "quality_report_path": str(quality_report_path),
         "train_config": {
             "history_dir": str(config.history_dir),
             "holiday_file": str(config.holiday_file) if config.holiday_file else None,
@@ -720,6 +1025,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         valid_dates=valid_dates,
         skipped_sheets=skipped_sheets,
         metadata_path=current_dir / "metadata.json",
+        quality_report_path=quality_report_path,
     )
 
 
@@ -780,12 +1086,13 @@ def resolve_forecast_template_column(columns: Iterable[object], target_date: pd.
     return resolve_column(names, candidates, required=required)
 
 
-def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.Timestamp], default_year: int) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.Timestamp], default_year: int) -> tuple[pd.DataFrame | None, pd.DataFrame | None, list[DataQualityIssue]]:
     workbook = pd.read_excel(forecast_file, sheet_name=None)
-    non_empty_sheets = [df for df in workbook.values() if not df.empty and len(df.columns) > 0]
+    non_empty_sheets = [(str(name), df) for name, df in workbook.items() if not df.empty and len(df.columns) > 0]
     if not non_empty_sheets:
-        return None, None
-    raw_df = non_empty_sheets[0].copy().reset_index(drop=True)
+        return None, None, []
+    template_sheet_name, template_raw_df = non_empty_sheets[0]
+    raw_df = template_raw_df.copy().reset_index(drop=True)
     raw_df.columns = [str(column).strip() for column in raw_df.columns]
     header_dates = []
     for column in raw_df.columns:
@@ -795,7 +1102,16 @@ def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.
         header_dates.append(pd.Timestamp(year=default_year, month=month_day[0], day=month_day[1]).normalize())
     unique_dates = sorted(set(header_dates))
     if len(unique_dates) < 2:
-        return None, None
+        return None, None, []
+
+    quality_issues = validate_forecast_template(
+        raw_df,
+        file_path=Path(forecast_file),
+        sheet_name=template_sheet_name,
+        default_year=default_year,
+    )
+    if has_blocking_issues(quality_issues):
+        raise DataQualityValidationError("预测文件关键字段异常，已停止预测", quality_issues)
 
     target_date = unique_dates[-1]
     reference_date = unique_dates[-2]
@@ -857,23 +1173,47 @@ def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.
             TARGET_COLUMN: to_numeric(raw_df[reference_price_col]).iloc[:96].to_numpy(),
         }
     )
-    return forecast_df, reference_df
+    return forecast_df, reference_df, quality_issues
 
 
-def load_forecast_generic(history_df: pd.DataFrame, forecast_file: str | Path, holiday_dates: set[pd.Timestamp]) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+def load_forecast_generic(history_df: pd.DataFrame, forecast_file: str | Path, holiday_dates: set[pd.Timestamp]) -> tuple[pd.DataFrame, pd.DataFrame | None, list[DataQualityIssue]]:
     default_year = int(pd.to_datetime(history_df["date"]).max().year)
-    template_df, template_reference = try_load_forecast_template(forecast_file, holiday_dates, default_year)
+    template_df, template_reference, quality_issues = try_load_forecast_template(forecast_file, holiday_dates, default_year)
     if template_df is not None:
-        return template_df, template_reference
+        return template_df, template_reference, quality_issues
 
     workbook = pd.read_excel(forecast_file, sheet_name=None)
     all_days = []
+    quality_issues = []
     for sheet_name, raw_df in workbook.items():
         trade_date = parse_sheet_date(str(sheet_name))
         if trade_date is None:
             trade_date = infer_date_from_header(raw_df.columns, default_year)
         if trade_date is None:
+            quality_issues.append(
+                DataQualityIssue(
+                    task_type="predict",
+                    severity="warning",
+                    action="recorded",
+                    issue_type="unrecognized_sheet_date",
+                    file_path=str(forecast_file),
+                    sheet_name=str(sheet_name),
+                    message="Sheet 名称和字段表头均无法识别预测日期，已忽略该 Sheet",
+                )
+            )
             continue
+        sheet_issues = validate_history_sheet(
+            raw_df,
+            file_path=Path(forecast_file),
+            sheet_name=str(sheet_name),
+            trade_date=trade_date,
+            require_target=False,
+            task_type="predict",
+            blocking_action="blocked",
+        )
+        quality_issues.extend(sheet_issues)
+        if has_blocking_issues(sheet_issues):
+            raise DataQualityValidationError("预测文件关键字段异常，已停止预测", sheet_issues)
         day_df = raw_df.copy().iloc[:96].reset_index(drop=True)
         if len(day_df) < 96:
             raise ValueError(f"{sheet_name} 不是 96 行时段数据")
@@ -908,7 +1248,50 @@ def load_forecast_generic(history_df: pd.DataFrame, forecast_file: str | Path, h
     if not all_days:
         raise ValueError(f"未解析到可用的预测 Sheet: {forecast_file}")
     forecast_df = pd.concat(all_days, ignore_index=True).sort_values(["date", "period"]).reset_index(drop=True)
-    return forecast_df, None
+    return forecast_df, None, quality_issues
+
+
+def default_forecast_year_from_model(model_root: str | Path) -> int:
+    metadata = load_current_metadata(Path(model_root)) or {}
+    for key in ("train_end_date", "created_at"):
+        value = metadata.get(key)
+        if not value:
+            continue
+        timestamp = pd.to_datetime(value, errors="coerce")
+        if not pd.isna(timestamp):
+            return int(pd.Timestamp(timestamp).year)
+    return datetime.now().year
+
+
+def peek_forecast_target_date(forecast_file: str | Path, default_year: int) -> pd.Timestamp | None:
+    workbook = pd.read_excel(forecast_file, sheet_name=None)
+    header_dates: list[pd.Timestamp] = []
+    sheet_dates: list[pd.Timestamp] = []
+    for sheet_name, raw_df in workbook.items():
+        sheet_date = parse_sheet_date(str(sheet_name))
+        if sheet_date is not None:
+            sheet_dates.append(sheet_date.normalize())
+        if raw_df.empty:
+            continue
+        for column in raw_df.columns:
+            month_day = extract_month_day(column)
+            if month_day is not None:
+                header_dates.append(pd.Timestamp(year=default_year, month=month_day[0], day=month_day[1]).normalize())
+    if header_dates:
+        return max(header_dates)
+    if sheet_dates:
+        return max(sheet_dates)
+    return None
+
+
+def prediction_history_window(forecast_date: pd.Timestamp | None, reference_days: int) -> tuple[str | None, str | None]:
+    if forecast_date is None:
+        return None, None
+    normalized_days = normalize_reference_days(reference_days)
+    lookback_days = max(normalized_days, normalized_days * 8)
+    start_date = pd.Timestamp(forecast_date).normalize() - pd.Timedelta(days=lookback_days)
+    end_date = pd.Timestamp(forecast_date).normalize() - pd.Timedelta(days=1)
+    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 
 def build_reference_frame(
@@ -993,21 +1376,50 @@ def prepare_prediction_inputs(
     forecast_file: str | Path,
     model_root: str | Path,
     holiday_file: str | Path | None,
+    reference_days: int = 1,
     progress_callback: ProgressCallback | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, set[pd.Timestamp], dict, dict[str, object]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, set[pd.Timestamp], dict, dict[str, object], Path]:
     emit_progress(progress_callback, "开始加载预测所需数据", 5)
-    holiday_dates = load_holiday_dates(holiday_file)
-    builder = DayAheadDataBuilder(holiday_dates)
-    history_df = builder.load_excel_collection(
-        history_dir,
-        require_target=True,
-        progress_callback=progress_callback,
-        progress_start=6,
-        progress_end=18,
-        progress_label="正在加载历史数据",
-    )
+    forecast_default_year = default_forecast_year_from_model(model_root)
+    forecast_target_date = peek_forecast_target_date(forecast_file, forecast_default_year)
+    history_start_date, history_end_date = prediction_history_window(forecast_target_date, reference_days)
+    try:
+        history_df, _, holiday_dates, _, history_quality_issues = load_cached_history_collection(
+            history_dir,
+            holiday_file,
+            True,
+            model_root,
+            progress_callback=progress_callback,
+            progress_start=6,
+            progress_end=18,
+            progress_label="正在加载历史数据",
+            start_date=history_start_date,
+            end_date=history_end_date,
+        )
+    except DataQualityValidationError as exc:
+        report_path = save_quality_report(
+            task_type="predict",
+            status="blocked",
+            issues=exc.issues,
+            metadata={"forecast_file": str(forecast_file), "history_dir": str(history_dir)},
+        )
+        exc.report_path = report_path
+        raise
     emit_progress(progress_callback, "历史数据加载完成，正在加载预测文件", 20)
-    forecast_df, template_reference_df = load_forecast_generic(history_df, forecast_file, holiday_dates)
+    quality_issues = list(history_quality_issues)
+    try:
+        forecast_df, template_reference_df, forecast_quality_issues = load_forecast_generic(history_df, forecast_file, holiday_dates)
+        quality_issues.extend(forecast_quality_issues)
+    except DataQualityValidationError as exc:
+        quality_issues.extend(exc.issues)
+        report_path = save_quality_report(
+            task_type="predict",
+            status="blocked",
+            issues=quality_issues,
+            metadata={"forecast_file": str(forecast_file), "history_dir": str(history_dir)},
+        )
+        exc.report_path = report_path
+        raise
     if "lag_96" not in forecast_df.columns:
         forecast_df = attach_lag_96(forecast_df, history_df)
     if forecast_df["lag_96"].isna().any():
@@ -1015,7 +1427,13 @@ def prepare_prediction_inputs(
         raise ValueError(f"Missing lag_96 for date/period:\n{missing.to_string(index=False)}")
     emit_progress(progress_callback, "正在加载当前默认模型", 45)
     metadata, models, _ = load_models(model_root)
-    return history_df, forecast_df, template_reference_df, holiday_dates, metadata, models
+    report_path = save_quality_report(
+        task_type="predict",
+        status=quality_report_status(quality_issues),
+        issues=quality_issues,
+        metadata={"forecast_file": str(forecast_file), "history_dir": str(history_dir)},
+    )
+    return history_df, forecast_df, template_reference_df, holiday_dates, metadata, models, report_path
 
 
 def run_prediction_with_strategy(
@@ -1079,11 +1497,12 @@ def predict_prices(
 ) -> PredictResult:
     ensure_xgboost_available()
     reference_days = normalize_reference_days(reference_days)
-    history_df, forecast_df, template_reference_df, holiday_dates, metadata, models = prepare_prediction_inputs(
+    history_df, forecast_df, template_reference_df, holiday_dates, metadata, models, quality_report_path = prepare_prediction_inputs(
         history_dir=history_dir,
         forecast_file=forecast_file,
         model_root=model_root,
         holiday_file=holiday_file,
+        reference_days=reference_days,
         progress_callback=progress_callback,
     )
     emit_progress(progress_callback, "正在执行预测策略", 50)
@@ -1112,6 +1531,7 @@ def predict_prices(
         reference_days_requested=reference_days,
         reference_dates=reference_dates,
         result_df=result_df,
+        quality_report_path=quality_report_path,
     )
 
 
@@ -1128,11 +1548,12 @@ def predict_prices_compare(
     ensure_xgboost_available()
     reference_days = normalize_reference_days(reference_days)
     selected_strategy_key = normalize_reference_strategy(selected_strategy)
-    history_df, forecast_df, template_reference_df, holiday_dates, metadata, models = prepare_prediction_inputs(
+    history_df, forecast_df, template_reference_df, holiday_dates, metadata, models, quality_report_path = prepare_prediction_inputs(
         history_dir=history_dir,
         forecast_file=forecast_file,
         model_root=model_root,
         holiday_file=holiday_file,
+        reference_days=reference_days,
         progress_callback=progress_callback,
     )
 
@@ -1164,6 +1585,7 @@ def predict_prices_compare(
             reference_days_requested=reference_days,
             reference_dates=reference_dates,
             result_df=result_df,
+            quality_report_path=quality_report_path,
         )
 
     selected_result = strategy_results[selected_strategy_key]
@@ -1188,9 +1610,11 @@ def predict_prices_compare(
                 reference_days_requested=value.reference_days_requested,
                 reference_dates=value.reference_dates,
                 result_df=value.result_df.copy(),
+                quality_report_path=value.quality_report_path,
             )
             for key, value in strategy_results.items()
         },
+        quality_report_path=quality_report_path,
     )
 
 def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:

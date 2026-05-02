@@ -476,6 +476,28 @@ def test_prediction_pipeline_units() -> None:
     record("day_type_of 节假日", day_type_of(holiday, holiday_set) == "holiday", "", "pipeline")
 
 
+# ========== 8. 前端预测交互测试 ==========
+def test_frontend_prediction_ui() -> None:
+    print("\n--- 8. 前端预测交互测试 ---")
+    index_html = (BASE_DIR / "frontend_app" / "index.html").read_text(encoding="utf-8")
+    app_js = (BASE_DIR / "frontend_app" / "assets" / "app.js").read_text(encoding="utf-8")
+    app_css = (BASE_DIR / "frontend_app" / "assets" / "app.css").read_text(encoding="utf-8")
+
+    record("预测执行前不显示输出策略下拉", 'id="prediction-output-strategy"' not in index_html, "", "frontend")
+    record("预测执行前不显示查看策略下拉", 'id="prediction-view-strategy"' not in index_html, "", "frontend")
+    record("预测请求不提交预选策略", "selected_strategy:" not in app_js, "", "frontend")
+    record("预测结果包含最近天图表", 'id="prediction-chart-recent-n-days"' in index_html, "", "frontend")
+    record("预测结果包含同类型日图表", 'id="prediction-chart-same-type-days"' in index_html, "", "frontend")
+    record("预测图表支持分段布局选择", 'data-chart-layout="stacked"' in index_html and 'data-chart-layout="side-by-side"' in index_html, "", "frontend")
+    record("预测图表布局偏好可记忆", "dayahead-prediction-chart-layout" in app_js and "localStorage.setItem" in app_js, "", "frontend")
+    record("预测图表切换包含动画过渡", "prediction-chart-grid" in app_css and "transition:" in app_css, "", "frontend")
+    segmented_active = re.search(r"\.segmented-option\.active\s*\{[^}]+\}", app_css)
+    record("布局选中态避免白色字体", bool(segmented_active and "color: #ffffff" not in segmented_active.group(0)), "", "frontend")
+    record("最近天图表包含预测/基线/残差", all(text in app_js for text in ["最近 N 天预测价格", "最近 N 天相似基线", "最近 N 天模型残差修正"]), "", "frontend")
+    record("同类型日图表包含预测/基线/残差", all(text in app_js for text in ["同类型日预测价格", "同类型日相似基线", "同类型日模型残差修正"]), "", "frontend")
+    record("明细表包含双策略分解列", all(text in app_js for text in ["recent_n_days_similar_price", "recent_n_days_residual_pred", "recent_n_days_predicted_price", "recent_same_type_days_similar_price", "recent_same_type_days_residual_pred", "recent_same_type_days_predicted_price"]), "", "frontend")
+
+
 # ========== 8. 边界条件与异常处理 ==========
 def test_edge_cases() -> None:
     print("\n--- 8. 边界条件与异常处理 ---")
@@ -528,6 +550,7 @@ def main() -> None:
     test_models()
     test_core_functions()
     test_prediction_pipeline_units()
+    test_frontend_prediction_ui()
     test_edge_cases()
 
     # 输出总结

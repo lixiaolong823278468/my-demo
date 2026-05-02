@@ -19,6 +19,7 @@
           <button class="tab-btn" data-tab="predict"><span>⚡</span>预测中心</button>
           <button class="tab-btn" data-tab="versions"><span>📦</span>模型版本</button>
           <button class="tab-btn" data-tab="logs"><span>📊</span>训练日志</button>
+          <button class="tab-btn" data-tab="data-quality"><span>🧾</span>数据异常</button>
         </nav>
 
         <div class="sidebar-foot">
@@ -176,7 +177,7 @@
           <div class="section-header">
             <div>
               <div class="section-title">执行预测</div>
-              <div class="hint-text">选择参考策略后执行预测，重点查看 96 点价格曲线。</div>
+              <div class="hint-text">输入参考天数后执行预测，同时查看最近天和同类型日两条 96 点价格曲线。</div>
             </div>
           </div>
 
@@ -184,20 +185,6 @@
             <label class="field">
               <span>参考天数</span>
               <input type="number" id="reference-days" min="1" max="30" value="1" />
-            </label>
-            <label class="field select-field">
-              <span>输出策略</span>
-              <select id="prediction-output-strategy">
-                <option value="recent_n_days">最近 N 天</option>
-                <option value="recent_same_type_days">最近 N 个同类型日</option>
-              </select>
-            </label>
-            <label class="field select-field">
-              <span>查看策略</span>
-              <select id="prediction-view-strategy">
-                <option value="recent_n_days">最近 N 天</option>
-                <option value="recent_same_type_days">最近 N 个同类型日</option>
-              </select>
             </label>
           </div>
 
@@ -226,6 +213,11 @@
             <div class="table-toolbar">
               <div class="toolbar-title">96 点预测曲线</div>
               <div class="toolbar-meta" id="prediction-meta">尚未执行预测</div>
+              <div class="segmented-control" id="prediction-chart-layout-control" aria-label="图表布局">
+                <span class="segmented-label">图表布局</span>
+                <button class="segmented-option active" type="button" data-chart-layout="stacked">上下排列</button>
+                <button class="segmented-option" type="button" data-chart-layout="side-by-side">左右排列</button>
+              </div>
             </div>
             <div class="chart-stats" id="prediction-stats">
               <span class="chart-stat">预测最低价：-</span>
@@ -233,7 +225,16 @@
               <span class="chart-stat">预测均价：-</span>
               <span class="chart-stat">参考日期：-</span>
             </div>
-            <div id="prediction-chart" class="chart-stage"></div>
+            <div class="prediction-chart-grid" id="prediction-chart-grid">
+              <article class="strategy-chart-panel">
+                <div class="strategy-chart-title">最近 N 天</div>
+                <div id="prediction-chart-recent-n-days" class="chart-stage strategy-chart-stage"></div>
+              </article>
+              <article class="strategy-chart-panel">
+                <div class="strategy-chart-title">同类型日</div>
+                <div id="prediction-chart-same-type-days" class="chart-stage strategy-chart-stage"></div>
+              </article>
+            </div>
           </div>
 
           <div class="table-toolbar">
@@ -328,6 +329,66 @@
                     <th>训练起始</th>
                     <th>训练结束</th>
                     <th>样本数</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="tab-data-quality">
+          <div class="section-header">
+            <div>
+              <div class="section-title">数据异常</div>
+              <div class="hint-text">查看训练和预测导入 Excel 时发现的数据问题。</div>
+            </div>
+            <button class="ghost-btn" id="refresh-quality-btn">刷新异常报告</button>
+          </div>
+
+          <section class="card-grid metrics-grid quality-summary-grid" id="quality-summary"></section>
+
+          <div class="table-toolbar">
+            <div class="toolbar-title">异常报告列表</div>
+            <div class="toolbar-meta" id="quality-reports-meta">正在加载数据异常报告...</div>
+          </div>
+          <div class="table-shell table-frame">
+            <div class="table-scroll">
+              <table class="data-table" id="quality-reports-table">
+                <thead>
+                  <tr>
+                    <th>报告编号</th>
+                    <th>任务类型</th>
+                    <th>状态</th>
+                    <th>生成时间</th>
+                    <th>问题数</th>
+                    <th>跳过 Sheet</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="table-toolbar">
+            <div class="toolbar-title">异常明细</div>
+            <div class="toolbar-meta" id="quality-issues-meta">请选择或刷新报告</div>
+          </div>
+          <div class="table-shell table-frame table-frame-lg">
+            <div class="table-scroll">
+              <table class="data-table" id="quality-issues-table">
+                <thead>
+                  <tr>
+                    <th>处理</th>
+                    <th>级别</th>
+                    <th>类型</th>
+                    <th>文件</th>
+                    <th>Sheet</th>
+                    <th>日期</th>
+                    <th>时点</th>
+                    <th>字段</th>
+                    <th>原值</th>
+                    <th>说明</th>
                   </tr>
                 </thead>
                 <tbody></tbody>

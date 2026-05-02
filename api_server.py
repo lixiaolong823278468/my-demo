@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 
+from data_quality import latest_quality_report, list_quality_reports, load_quality_report
 from dayahead_core import (
     DEFAULT_FORECAST_FILE,
     DEFAULT_HISTORY_DIR,
@@ -326,6 +327,7 @@ def summarize_train_result(result: Any) -> dict[str, Any]:
         "valid_dates": result.valid_dates,
         "skipped_sheets": result.skipped_sheets,
         "metadata_path": str(result.metadata_path),
+        "quality_report_path": str(result.quality_report_path) if result.quality_report_path else None,
     }
 
 
@@ -338,6 +340,7 @@ def serialize_prediction_variant(result: Any) -> dict[str, Any]:
         "reference_strategy_label": result.reference_strategy_label,
         "reference_days_requested": result.reference_days_requested,
         "reference_dates": result.reference_dates,
+        "quality_report_path": str(result.quality_report_path) if result.quality_report_path else None,
         "columns": list(result.result_df.columns),
         "rows": dataframe_to_records(result.result_df),
     }
@@ -357,6 +360,7 @@ def summarize_predict_result(result: Any) -> dict[str, Any]:
         "template_updated": result.template_updated,
         "selected_strategy_key": result.selected_strategy_key,
         "selected_strategy_label": result.selected_strategy_label,
+        "quality_report_path": str(result.quality_report_path) if result.quality_report_path else None,
         "prediction": prediction,
     }
 
@@ -431,6 +435,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self.send_json(self.get_versions())
             if path == "/api/training/logs":
                 return self.send_json(self.get_training_logs())
+            if path == "/api/data-quality/reports":
+                return self.send_json({"reports": list_quality_reports()})
+            if path == "/api/data-quality/reports/latest":
+                return self.send_json({"report": latest_quality_report()})
+            if path.startswith("/api/data-quality/reports/"):
+                report_id = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+                return self.send_json({"report": load_quality_report(report_id)})
             if path == "/api/forecast/template":
                 return self.send_json(load_forecast_template_preview())
             if path == "/api/prediction/latest":

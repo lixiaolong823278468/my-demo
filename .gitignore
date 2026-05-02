@@ -23,3 +23,7 @@ Thumbs.db
 
 # 日志
 *.log
+
+# 本地缓存
+models/cache/
+.test_tmp/

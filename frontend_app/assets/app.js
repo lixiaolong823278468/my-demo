@@ -3,7 +3,9 @@ const App = {
   versions: [],
   templateRows: [],
   pollTimer: null,
-  chart: null,
+  charts: {},
+  chartResizeBound: false,
+  predictionChartLayout: "stacked",
   pendingStatus: null,
   datePickers: {},
   tickerTimer: null,
@@ -22,8 +24,9 @@ const App = {
   statusFocus: null,
   predictSessionStarted: false,
   lastPrediction: null,
-  predictionViewDirty: false,
   predictionChartSignature: null,
+  qualityReports: [],
+  latestQualityReport: null,
 };
 
 const columnTitleMap = {
@@ -37,6 +40,13 @@ const columnTitleMap = {
   similar_price: "相似法基线价格",
   residual_pred: "模型残差修正值",
   predicted_price: "预测价格",
+  recent_n_days_similar_price: "最近 N 天相似基线",
+  recent_n_days_residual_pred: "最近 N 天残差修正",
+  recent_n_days_predicted_price: "最近 N 天预测价",
+  recent_same_type_days_similar_price: "同类型日相似基线",
+  recent_same_type_days_residual_pred: "同类型日残差修正",
+  recent_same_type_days_predicted_price: "同类型日预测价",
+  prediction_price_diff: "两策略价差",
 };
 
 const segmentNameMap = {
@@ -51,6 +61,26 @@ const referenceStrategyLabelMap = {
   recent_n_days: "最近 N 天",
   recent_same_type_days: "最近 N 个同类型日",
 };
+const referenceStrategyOrder = ["recent_n_days", "recent_same_type_days"];
+const predictionSeriesNameMap = {
+  recent_n_days: "最近 N 天预测价格",
+  recent_same_type_days: "同类型日预测价格",
+};
+const predictionChartConfigMap = {
+  recent_n_days: {
+    elementId: "prediction-chart-recent-n-days",
+    predictedName: "最近 N 天预测价格",
+    similarName: "最近 N 天相似基线",
+    residualName: "最近 N 天模型残差修正",
+  },
+  recent_same_type_days: {
+    elementId: "prediction-chart-same-type-days",
+    predictedName: "同类型日预测价格",
+    similarName: "同类型日相似基线",
+    residualName: "同类型日模型残差修正",
+  },
+};
+const predictionChartLayoutStorageKey = "dayahead-prediction-chart-layout";
 
 const pageMetaMap = {
   train: {
@@ -59,7 +89,7 @@ const pageMetaMap = {
   },
   predict: {
     title: "日前电价预测",
-    subtitle: "选择参考策略后执行预测，重点查看 96 点价格曲线。",
+    subtitle: "输入参考天数后执行预测，同时对比最近天和同类型日两条 96 点价格曲线。",
   },
   versions: {
     title: "模型版本管理",
@@ -68,6 +98,10 @@ const pageMetaMap = {
   logs: {
     title: "训练日志复盘",
     subtitle: "按正式训练记录查看历史时间范围与样本表现。",
+  },
+  "data-quality": {
+    title: "数据异常记录",
+    subtitle: "汇总 Excel 导入时发现的缺失、非数字、字段不匹配和时点不足等问题。",
   },
 };
 
@@ -119,13 +153,17 @@ function setActiveTab(name) {
   }
   if (name === "predict") {
     requestAnimationFrame(() => {
-      if (App.chart) {
-        App.chart.resize();
-      }
+      resizePredictionCharts();
     });
   }
   if (name === "logs") {
     loadLogs().catch((error) => {
+      console.error(error);
+      showToast(error.message, "error");
+    });
+  }
+  if (name === "data-quality") {
+    loadDataQuality().catch((error) => {
       console.error(error);
       showToast(error.message, "error");
     });
@@ -245,6 +283,103 @@ function renderTrainingLogs(logs) {
     .join("");
 }
 
+function qualityStatusLabel(status) {
+  return {
+    clean: "无异常",
+    completed_with_issues: "有异常",
+    blocked: "已拦截",
+  }[status] || status || "-";
+}
+
+function qualityActionLabel(action) {
+  return {
+    skipped: "已跳过",
+    blocked: "已拦截",
+    recorded: "已记录",
+  }[action] || action || "-";
+}
+
+function renderQualitySummary(report) {
+  const summary = report?.summary || {};
+  const items = [
+    ["报告状态", qualityStatusLabel(report?.status), "最近一次导入检查结果"],
+    ["问题总数", summary.total_issues ?? 0, "缺失、非数字、字段不匹配等"],
+    ["跳过 Sheet", summary.skipped_sheets ?? 0, "训练中未参与建模的异常天"],
+    ["拦截问题", summary.blocked_issues ?? 0, "预测中导致停止的关键异常"],
+  ];
+  $("#quality-summary").innerHTML = items
+    .map(
+      ([title, value, desc]) => `
+        <article class="info-card metric-card tone-blue">
+          <div class="card-title">${htmlEscape(title)}</div>
+          <div class="card-value">${htmlEscape(value)}</div>
+          <div class="card-desc">${htmlEscape(desc)}</div>
+        </article>
+      `,
+    )
+    .join("");
+}
+
+function renderQualityReports(reports) {
+  App.qualityReports = reports || [];
+  const tbody = $("#quality-reports-table tbody");
+  $("#quality-reports-meta").textContent = App.qualityReports.length ? `共 ${App.qualityReports.length} 份报告` : "暂无数据异常报告";
+  if (!App.qualityReports.length) {
+    tbody.innerHTML = `<tr><td colspan="6">暂无数据异常报告</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = App.qualityReports
+    .map((report) => {
+      const summary = report.summary || {};
+      return `
+        <tr class="clickable-row" data-report-id="${htmlEscape(report.report_id || "")}">
+          <td>${htmlEscape(report.report_id || "-")}</td>
+          <td>${htmlEscape(report.task_type || "-")}</td>
+          <td><span class="quality-badge ${htmlEscape(report.status || "")}">${htmlEscape(qualityStatusLabel(report.status))}</span></td>
+          <td>${htmlEscape(report.created_at || "-")}</td>
+          <td>${htmlEscape(summary.total_issues ?? 0)}</td>
+          <td>${htmlEscape(summary.skipped_sheets ?? 0)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+  $$("#quality-reports-table tbody tr").forEach((row) => {
+    row.addEventListener("click", () => loadQualityReportDetail(row.dataset.reportId).catch((error) => showToast(error.message, "error")));
+  });
+}
+
+function renderQualityIssues(report) {
+  App.latestQualityReport = report || null;
+  renderQualitySummary(report);
+  const issues = report?.issues || [];
+  const tbody = $("#quality-issues-table tbody");
+  $("#quality-issues-meta").textContent = report
+    ? `${report.report_id || "-"}：共 ${issues.length} 条异常`
+    : "暂无报告明细";
+  if (!issues.length) {
+    tbody.innerHTML = `<tr><td colspan="10">暂无异常明细</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = issues
+    .map(
+      (issue) => `
+        <tr>
+          <td>${htmlEscape(qualityActionLabel(issue.action))}</td>
+          <td>${htmlEscape(issue.severity || "-")}</td>
+          <td>${htmlEscape(issue.issue_type || "-")}</td>
+          <td title="${htmlEscape(issue.file_path || "-")}">${htmlEscape(String(issue.file_path || "-").split(/[\\/]/).pop())}</td>
+          <td>${htmlEscape(issue.sheet_name || "-")}</td>
+          <td>${htmlEscape(issue.date || "-")}</td>
+          <td>${htmlEscape(issue.period ?? "-")}</td>
+          <td>${htmlEscape(issue.field || "-")}</td>
+          <td>${htmlEscape(issue.value ?? "-")}</td>
+          <td>${htmlEscape(issue.message || "-")}</td>
+        </tr>
+      `,
+    )
+    .join("");
+}
+
 function stopTickerLoop() {
   if (App.tickerTimer) {
     clearInterval(App.tickerTimer);
@@ -341,6 +476,15 @@ function comparisonPredictions(prediction) {
   };
 }
 
+function orderedPredictionComparisons(prediction) {
+  const comparisons = comparisonPredictions(prediction);
+  const orderedKeys = [
+    ...referenceStrategyOrder.filter((key) => comparisons[key]),
+    ...Object.keys(comparisons).filter((key) => !referenceStrategyOrder.includes(key)),
+  ];
+  return orderedKeys.map((key) => [key, comparisons[key]]).filter(([, item]) => item?.rows?.length);
+}
+
 function currentReferenceDays() {
   const value = Number($("#reference-days")?.value || App.config?.default_reference_days || 1);
   return Number.isFinite(value) && value >= 1 ? value : 1;
@@ -351,39 +495,8 @@ function formatReferenceStrategyLabel(strategyKey, label, referenceDays = curren
   return String(baseLabel).replace(/\s*N\s*/g, ` ${referenceDays} `).replace(/\s+/g, " ").trim();
 }
 
-function syncReferenceStrategyLabels(referenceDays = currentReferenceDays()) {
-  const options = App.config?.reference_strategy_options || [];
-  ["#prediction-output-strategy", "#prediction-view-strategy"].forEach((selector) => {
-    const select = $(selector);
-    if (!select) return;
-    Array.from(select.options).forEach((option) => {
-      const configOption = options.find((item) => item.key === option.value);
-      option.textContent = formatReferenceStrategyLabel(option.value, configOption?.label || referenceStrategyLabelMap[option.value], referenceDays);
-    });
-  });
-}
-
-function activePredictionVariant(prediction) {
-  if (!prediction) return null;
-  const comparisons = comparisonPredictions(prediction);
-  const viewKey = $("#prediction-view-strategy")?.value || prediction.selected_strategy_key || prediction.reference_strategy_key;
-  return comparisons[viewKey] || comparisons[prediction.selected_strategy_key] || Object.values(comparisons)[0] || prediction;
-}
-
 function syncPredictionStrategySelectors(prediction) {
-  const outputSelect = $("#prediction-output-strategy");
-  const viewSelect = $("#prediction-view-strategy");
-  if (!outputSelect || !viewSelect || !prediction) return;
-  const selectedKey = prediction.selected_strategy_key || prediction.reference_strategy_key || "recent_n_days";
-  syncReferenceStrategyLabels();
-  if (prediction.selected_strategy_key) {
-    outputSelect.value = selectedKey;
-  }
-  const comparisons = comparisonPredictions(prediction);
-  const keys = Object.keys(comparisons);
-  if (keys.length && (!App.predictionViewDirty || !keys.includes(viewSelect.value))) {
-    viewSelect.value = selectedKey || keys[0];
-  }
+  if (!prediction) return;
 }
 
 function renderComparisonCards(prediction) {
@@ -402,7 +515,7 @@ function renderComparisonCards(prediction) {
       const avgValue = values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
       const minValue = Math.min(...values);
       const maxValue = Math.max(...values);
-      const activeClass = ($("#prediction-view-strategy")?.value || prediction.selected_strategy_key) === key ? " active-strategy-card" : "";
+      const activeClass = prediction.selected_strategy_key === key ? " active-strategy-card" : "";
       const strategyLabel = formatReferenceStrategyLabel(key, item.reference_strategy_label, item.reference_days_requested || prediction.reference_days_requested);
       return `
         <article class="info-card${activeClass}">
@@ -437,14 +550,53 @@ function predictionVariantSignature(variant) {
 
 function renderPredictionTable(prediction) {
   const table = $("#prediction-table");
-  const variant = activePredictionVariant(prediction);
-  if (!variant || !variant.rows?.length) {
+  const variants = orderedPredictionComparisons(prediction);
+  if (!variants.length) {
     table.innerHTML = `<thead><tr><th>字段</th></tr></thead><tbody><tr><td>暂无预测数据</td></tr></tbody>`;
     return;
   }
-  const columns = variant.columns || Object.keys(variant.rows[0]);
+  const primaryRows = variants[0][1].rows;
+  const variantRowMaps = Object.fromEntries(
+    variants.map(([key, variant]) => [
+      key,
+      new Map(variant.rows.map((row) => [String(row.period), row])),
+    ]),
+  );
+  const columns = [
+    "date",
+    "period",
+    "recent_n_days_similar_price",
+    "recent_n_days_residual_pred",
+    "recent_n_days_predicted_price",
+    "recent_same_type_days_similar_price",
+    "recent_same_type_days_residual_pred",
+    "recent_same_type_days_predicted_price",
+    "prediction_price_diff",
+    "net_load",
+    "lag_96",
+  ];
+  const rows = primaryRows.map((row) => {
+    const periodKey = String(row.period);
+    const recentRow = variantRowMaps.recent_n_days?.get(periodKey);
+    const sameTypeRow = variantRowMaps.recent_same_type_days?.get(periodKey);
+    const recentPrice = recentRow ? Number(recentRow.predicted_price || 0) : null;
+    const sameTypePrice = sameTypeRow ? Number(sameTypeRow.predicted_price || 0) : null;
+    return {
+      date: row.date,
+      period: row.period,
+      recent_n_days_similar_price: recentRow ? Number(recentRow.similar_price || 0).toFixed(2) : "",
+      recent_n_days_residual_pred: recentRow ? Number(recentRow.residual_pred || 0).toFixed(2) : "",
+      recent_n_days_predicted_price: recentPrice === null ? "" : recentPrice.toFixed(2),
+      recent_same_type_days_similar_price: sameTypeRow ? Number(sameTypeRow.similar_price || 0).toFixed(2) : "",
+      recent_same_type_days_residual_pred: sameTypeRow ? Number(sameTypeRow.residual_pred || 0).toFixed(2) : "",
+      recent_same_type_days_predicted_price: sameTypePrice === null ? "" : sameTypePrice.toFixed(2),
+      prediction_price_diff: recentPrice === null || sameTypePrice === null ? "" : (sameTypePrice - recentPrice).toFixed(2),
+      net_load: row.net_load,
+      lag_96: row.lag_96,
+    };
+  });
   const head = `<thead><tr>${columns.map((col) => `<th>${htmlEscape(columnTitleMap[col] || col)}</th>`).join("")}</tr></thead>`;
-  const body = variant.rows
+  const body = rows
     .map(
       (row) => `
         <tr>
@@ -456,173 +608,194 @@ function renderPredictionTable(prediction) {
   table.innerHTML = `${head}<tbody>${body}</tbody>`;
 }
 
-function ensureChart() {
+function resizePredictionCharts() {
+  Object.values(App.charts || {}).forEach((chart) => {
+    if (chart) chart.resize();
+  });
+}
+
+function ensureChart(strategyKey) {
   if (!window.echarts) return null;
-  if (!App.chart) {
-    App.chart = window.echarts.init($("#prediction-chart"));
-    window.addEventListener("resize", () => {
-      if (App.chart) App.chart.resize();
-    });
+  const config = predictionChartConfigMap[strategyKey];
+  const target = config ? $(`#${config.elementId}`) : null;
+  if (!target) return null;
+  if (!App.charts[strategyKey]) {
+    App.charts[strategyKey] = window.echarts.init(target);
+    if (!App.chartResizeBound) {
+      window.addEventListener("resize", () => resizePredictionCharts());
+      App.chartResizeBound = true;
+    }
   }
-  return App.chart;
+  return App.charts[strategyKey];
 }
 
 function renderPredictionStats(prediction) {
   const target = $("#prediction-stats");
-  const variant = activePredictionVariant(prediction);
-  if (!variant || !variant.rows?.length) {
+  const variants = orderedPredictionComparisons(prediction);
+  if (!variants.length) {
     target.innerHTML = "";
     return;
   }
 
-  const values = variant.rows.map((row) => Number(row.predicted_price || 0));
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
-  const avgValue = values.reduce((sum, item) => sum + item, 0) / Math.max(1, values.length);
-  const referenceDates = variant.reference_dates || [];
-  const referenceLabel = referenceDates.length ? referenceDates.join(" / ") : "-";
-  target.innerHTML = [
-    `最低价：${minValue.toFixed(2)}`,
-    `最高价：${maxValue.toFixed(2)}`,
-    `均价：${avgValue.toFixed(2)}`,
-    `参考日：${referenceLabel}`,
-  ].map((text) => `<span class="chart-stat">${text}</span>`).join("");
+  target.innerHTML = variants
+    .flatMap(([key, variant]) => {
+      const values = variant.rows.map((row) => Number(row.predicted_price || 0));
+      const minValue = Math.min(...values);
+      const maxValue = Math.max(...values);
+      const avgValue = values.reduce((sum, item) => sum + item, 0) / Math.max(1, values.length);
+      const referenceDays = variant.reference_days_requested || (variant.reference_dates || []).length || currentReferenceDays();
+      const strategyLabel = formatReferenceStrategyLabel(key, variant.reference_strategy_label, referenceDays);
+      const referenceLabel = (variant.reference_dates || []).join(" / ") || "-";
+      return [
+        `${strategyLabel}均价：${avgValue.toFixed(2)}`,
+        `${strategyLabel}范围：${minValue.toFixed(2)} ~ ${maxValue.toFixed(2)}`,
+        `${strategyLabel}参考日：${referenceLabel}`,
+      ];
+    })
+    .map((text) => `<span class="chart-stat">${text}</span>`)
+    .join("");
 }
 
 function renderPredictionChart(prediction) {
   renderPredictionStats(prediction);
-  const chart = ensureChart();
-  if (!chart) return;
-
-  const variant = activePredictionVariant(prediction);
-  if (!variant || !variant.rows?.length) {
+  const variants = orderedPredictionComparisons(prediction);
+  const variantMap = Object.fromEntries(variants);
+  if (!variants.length) {
     if (App.predictionChartSignature !== "") {
-      chart.clear();
+      Object.values(App.charts).forEach((chart) => chart?.clear());
       App.predictionChartSignature = "";
     }
     $("#prediction-meta").textContent = "暂无预测数据";
     return;
   }
 
+  const primaryVariant = variantMap.recent_n_days || variants[0][1];
+  const forecastDate = primaryVariant.forecast_date || primaryVariant.rows?.[0]?.date || "-";
+  const referenceDays = primaryVariant.reference_days_requested || (primaryVariant.reference_dates || []).length || currentReferenceDays();
+  const chartSignature = JSON.stringify(variants.map(([key, variant]) => [key, predictionVariantSignature(variant)]));
+
+  if (App.predictionChartSignature !== chartSignature) {
+    referenceStrategyOrder.forEach((strategyKey) => {
+      renderStrategyChart(strategyKey, variantMap[strategyKey], referenceDays);
+    });
+    App.predictionChartSignature = chartSignature;
+    requestAnimationFrame(() => resizePredictionCharts());
+  }
+
+  $("#prediction-meta").textContent = `预测日期：${forecastDate} | 参考天数：${referenceDays} 天 | 已同时展示最近天与同类型日两种预测`;
+}
+
+function renderStrategyChart(strategyKey, variant, referenceDays) {
+  const chart = ensureChart(strategyKey);
+  if (!chart) return;
+  if (!variant?.rows?.length) {
+    chart.clear();
+    return;
+  }
+
+  const config = predictionChartConfigMap[strategyKey];
   const rows = variant.rows;
   const periods = rows.map((row) => row.period);
   const predicted = rows.map((row) => Number(row.predicted_price || 0));
   const similar = rows.map((row) => Number(row.similar_price || 0));
-  const lag96 = rows.map((row) => Number(row.lag_96 || 0));
   const residual = rows.map((row) => Number(row.residual_pred || 0));
-  const forecastDate = variant.forecast_date || rows[0]?.date || "-";
-  const referenceDays = variant.reference_days_requested || (variant.reference_dates || []).length || 1;
-  const strategyLabel = formatReferenceStrategyLabel(variant.reference_strategy_key, variant.reference_strategy_label, referenceDays);
-  const chartSignature = predictionVariantSignature(variant);
+  const predictedName = formatReferenceStrategyLabel(strategyKey, config.predictedName, referenceDays);
+  const similarName = formatReferenceStrategyLabel(strategyKey, config.similarName, referenceDays);
+  const residualName = formatReferenceStrategyLabel(strategyKey, config.residualName, referenceDays);
 
-  if (App.predictionChartSignature !== chartSignature) {
-    chart.setOption(
-      {
-        backgroundColor: "transparent",
-        animationDuration: 500,
-        color: ["#1677ff", "#52c41a", "#722ed1", "#faad14"],
-        tooltip: {
-          trigger: "axis",
-          triggerOn: "mousemove|click",
-          axisPointer: { type: "cross" },
-          backgroundColor: "rgba(17,24,39,0.92)",
-          borderWidth: 0,
-          confine: true,
-          hideDelay: 120,
-          textStyle: { color: "#ffffff" },
-        },
-        legend: {
-          top: 12,
-          textStyle: { color: "#4e5969" },
-          data: ["最终预测价格", "相似法基线", "lag_96 前日价格", "残差修正值"],
-        },
-        grid: [
-          { left: 54, right: 36, top: 54, height: 230 },
-          { left: 54, right: 36, top: 308, height: 72 },
-        ],
-        xAxis: [
-          {
-            type: "category",
-            boundaryGap: false,
-            data: periods,
-            axisLabel: { color: "#86909c" },
-            axisLine: { lineStyle: { color: "#d9d9d9" } },
-          },
-          {
-            type: "category",
-            gridIndex: 1,
-            boundaryGap: false,
-            data: periods,
-            axisLabel: { color: "#86909c" },
-            axisLine: { lineStyle: { color: "#d9d9d9" } },
-          },
-        ],
-        yAxis: [
-          {
-            type: "value",
-            name: "Price",
-            min: 0,
-            max: 1500,
-            axisLabel: { color: "#86909c" },
-            splitLine: { lineStyle: { color: "rgba(5,5,5,0.06)" } },
-          },
-          {
-            type: "value",
-            gridIndex: 1,
-            name: "Residual",
-            axisLabel: { color: "#86909c" },
-            splitLine: { show: false },
-          },
-        ],
-        dataZoom: [
-          { type: "inside", xAxisIndex: [0, 1], start: 0, end: 100 },
-          { type: "slider", xAxisIndex: [0, 1], bottom: 0, height: 18, borderColor: "transparent" },
-        ],
-        series: [
-          {
-            name: "最终预测价格",
-            type: "line",
-            smooth: true,
-            symbol: "circle",
-            symbolSize: 6,
-            areaStyle: { color: "rgba(22,119,255,0.10)" },
-            data: predicted,
-          },
-          {
-            name: "相似法基线",
-            type: "line",
-            smooth: true,
-            symbol: "none",
-            lineStyle: { width: 2, type: "dashed" },
-            data: similar,
-          },
-          {
-            name: "lag_96 前日价格",
-            type: "line",
-            smooth: true,
-            symbol: "none",
-            lineStyle: { width: 2 },
-            data: lag96,
-          },
-          {
-            name: "残差修正值",
-            type: "bar",
-            xAxisIndex: 1,
-            yAxisIndex: 1,
-            barMaxWidth: 10,
-            data: residual,
-          },
-        ],
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      animationDuration: 500,
+      color: ["#1677ff", "#52c41a", "#fa8c16"],
+      tooltip: {
+        trigger: "axis",
+        triggerOn: "mousemove|click",
+        axisPointer: { type: "cross" },
+        backgroundColor: "rgba(17,24,39,0.92)",
+        borderWidth: 0,
+        confine: true,
+        hideDelay: 120,
+        textStyle: { color: "#ffffff" },
       },
-      true,
-    );
-    App.predictionChartSignature = chartSignature;
-    requestAnimationFrame(() => {
-      chart.resize();
-    });
-  }
-
-  $("#prediction-meta").textContent = `策略：${strategyLabel} | 预测日期：${forecastDate} | 参考天数：${referenceDays} 天`;
+      legend: {
+        top: 8,
+        textStyle: { color: "#4e5969" },
+        data: [predictedName, similarName, residualName],
+      },
+      grid: [
+        { left: 54, right: 38, top: 52, height: 210 },
+        { left: 54, right: 38, top: 292, height: 74 },
+      ],
+      xAxis: [
+        {
+          type: "category",
+          boundaryGap: false,
+          data: periods,
+          axisLabel: { color: "#86909c" },
+          axisLine: { lineStyle: { color: "#d9d9d9" } },
+        },
+        {
+          type: "category",
+          gridIndex: 1,
+          boundaryGap: false,
+          data: periods,
+          axisLabel: { color: "#86909c" },
+          axisLine: { lineStyle: { color: "#d9d9d9" } },
+        },
+      ],
+      yAxis: [
+        {
+          type: "value",
+          name: "Price",
+          min: 0,
+          max: 1500,
+          axisLabel: { color: "#86909c" },
+          splitLine: { lineStyle: { color: "rgba(5,5,5,0.06)" } },
+        },
+        {
+          type: "value",
+          gridIndex: 1,
+          name: "Residual",
+          axisLabel: { color: "#86909c" },
+          splitLine: { show: false },
+        },
+      ],
+      dataZoom: [
+        { type: "inside", xAxisIndex: [0, 1], start: 0, end: 100 },
+        { type: "slider", xAxisIndex: [0, 1], bottom: 0, height: 18, borderColor: "transparent" },
+      ],
+      series: [
+        {
+          name: predictedName,
+          type: "line",
+          smooth: true,
+          symbol: "circle",
+          symbolSize: 5,
+          lineStyle: { width: 3 },
+          areaStyle: { color: "rgba(22,119,255,0.08)" },
+          data: predicted,
+        },
+        {
+          name: similarName,
+          type: "line",
+          smooth: true,
+          symbol: "none",
+          lineStyle: { width: 2, type: "dashed" },
+          data: similar,
+        },
+        {
+          name: residualName,
+          type: "bar",
+          xAxisIndex: 1,
+          yAxisIndex: 1,
+          barMaxWidth: 10,
+          data: residual,
+        },
+      ],
+    },
+    true,
+  );
 }
 
 function applyProgressCard(key, state) {
@@ -759,7 +932,6 @@ function resetSessionProgress() {
   App.jobStates = { train: null, predict: null };
   App.statusFocus = null;
   App.predictSessionStarted = false;
-  App.predictionViewDirty = false;
   renderProgressSections();
   renderStatusPanel({});
   renderPredictionBundle(null);
@@ -770,7 +942,6 @@ async function loadConfig() {
   if ($("#reference-days") && App.config?.default_reference_days && !$("#reference-days").value) {
     $("#reference-days").value = App.config.default_reference_days;
   }
-  syncReferenceStrategyLabels();
   renderConfigPaths();
 }
 
@@ -795,6 +966,21 @@ async function refreshSummary() {
 async function loadLogs() {
   const data = await request("/api/training/logs");
   renderTrainingLogs(data.logs || []);
+}
+
+async function loadQualityReportDetail(reportId) {
+  if (!reportId) return;
+  const data = await request(`/api/data-quality/reports/${encodeURIComponent(reportId)}`);
+  renderQualityIssues(data.report || null);
+}
+
+async function loadDataQuality() {
+  const [reportsData, latestData] = await Promise.all([
+    request("/api/data-quality/reports"),
+    request("/api/data-quality/reports/latest"),
+  ]);
+  renderQualityReports(reportsData.reports || []);
+  renderQualityIssues(latestData.report || null);
 }
 
 async function loadTemplate() {
@@ -861,6 +1047,7 @@ async function startTrain() {
       showToast("训练已完成");
     }
     await refreshSummary();
+    await loadDataQuality();
   } catch (error) {
     showToast(error.message, "error");
     applyProgressCard("train", { progress: 0, label: "错误", status: error.message, type: "error" });
@@ -877,14 +1064,12 @@ async function startPredict() {
   try {
     setButtonLoading(btn, true, originalText);
     App.predictSessionStarted = true;
-    App.predictionViewDirty = false;
     setPendingState("predict", "正在保存并提交预测任务...");
     await saveTemplate();
     const data = await request("/api/predict", {
       method: "POST",
       body: JSON.stringify({
         reference_days: Number($("#reference-days").value || App.config?.default_reference_days || 1),
-        selected_strategy: $("#prediction-output-strategy").value || App.config?.default_reference_strategy || "recent_n_days",
       }),
     });
     App.activeJobIds.predict = data.job_id;
@@ -921,6 +1106,7 @@ async function startPredict() {
       showToast("预测已完成");
     }
     await refreshSummary();
+    await loadDataQuality();
   } catch (error) {
     showToast(error.message, "error");
     applyProgressCard("predict", { progress: 0, label: "错误", status: error.message, type: "error" });
@@ -1301,6 +1487,27 @@ function setDatePickerDisabled(pickerId, disabled) {
   renderDatePicker(pickerId);
 }
 
+function applyPredictionChartLayout(layout) {
+  const grid = $("#prediction-chart-grid");
+  if (!grid) return;
+  App.predictionChartLayout = layout === "side-by-side" ? "side-by-side" : "stacked";
+  grid.classList.toggle("prediction-chart-grid-side-by-side", App.predictionChartLayout === "side-by-side");
+  $$("[data-chart-layout]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.chartLayout === App.predictionChartLayout);
+  });
+  window.setTimeout(() => resizePredictionCharts(), 260);
+}
+
+function setPredictionChartLayout(layout) {
+  applyPredictionChartLayout(layout);
+  localStorage.setItem(predictionChartLayoutStorageKey, App.predictionChartLayout);
+}
+
+function initPredictionChartLayout() {
+  const savedLayout = localStorage.getItem(predictionChartLayoutStorageKey);
+  applyPredictionChartLayout(savedLayout || App.predictionChartLayout);
+}
+
 function bindEvents() {
   $$(".tab-btn").forEach((btn) => btn.addEventListener("click", () => setActiveTab(btn.dataset.tab)));
   $("#train-btn").addEventListener("click", () => startTrain().catch((error) => showToast(error.message, "error")));
@@ -1310,13 +1517,9 @@ function bindEvents() {
   $("#save-template-btn").addEventListener("click", () => saveTemplate().catch((error) => showToast(error.message, "error")));
   $("#predict-btn").addEventListener("click", () => startPredict().catch((error) => showToast(error.message, "error")));
   $("#stop-predict-btn").addEventListener("click", () => cancelJob("predict"));
-  $("#reference-days").addEventListener("input", () => syncReferenceStrategyLabels());
-  $("#reference-days").addEventListener("change", () => syncReferenceStrategyLabels());
-  $("#prediction-view-strategy").addEventListener("change", () => {
-    App.predictionViewDirty = true;
-    renderComparisonCards(App.lastPrediction);
-    renderPredictionTable(App.lastPrediction);
-    renderPredictionChart(App.lastPrediction);
+  $("#refresh-quality-btn")?.addEventListener("click", () => loadDataQuality().then(() => showToast("数据异常报告已刷新")).catch((error) => showToast(error.message, "error")));
+  $$("#prediction-chart-layout-control [data-chart-layout]").forEach((button) => {
+    button.addEventListener("click", () => setPredictionChartLayout(button.dataset.chartLayout));
   });
   $("#activate-version-btn").addEventListener("click", () => activateVersion().catch((error) => showToast(error.message, "error")));
   $("#rollback-btn").addEventListener("click", () => rollbackVersion().catch((error) => showToast(error.message, "error")));
@@ -1560,23 +1763,23 @@ function wrapButtonWithLoading(selector, asyncFn) {
    CHART LOADING / EMPTY STATE
    ═══════════════════════════════════════════════ */
 function showChartLoading() {
-  const stage = $("#prediction-chart");
-  if (!stage) return;
-  stage.innerHTML = `
+  $$(".strategy-chart-stage").forEach((stage) => {
+    stage.innerHTML = `
     <div class="chart-loading">
       <div class="chart-spinner"></div>
       <span style="color: var(--text-3); font-size: 13px;">正在加载图表...</span>
     </div>`;
+  });
 }
 
 function showChartEmpty(message = "尚未执行预测") {
-  const stage = $("#prediction-chart");
-  if (!stage) return;
-  stage.innerHTML = `
+  $$(".strategy-chart-stage").forEach((stage) => {
+    stage.innerHTML = `
     <div class="chart-empty">
       <div class="chart-empty-icon">📊</div>
       <span>${htmlEscape(message)}</span>
     </div>`;
+  });
 }
 
 /* ═══════════════════════════════════════════════
@@ -1603,9 +1806,9 @@ function initDarkModeToggle() {
     const isDark = root.classList.toggle("dark-enabled");
     localStorage.setItem("dayahead-dark-mode", String(isDark));
     btn.textContent = isDark ? "浅色模式" : "暗色模式";
-    if (App.chart) {
-      App.chart.dispose();
-      App.chart = null;
+    if (Object.keys(App.charts).length) {
+      Object.values(App.charts).forEach((chart) => chart?.dispose());
+      App.charts = {};
       App.predictionChartSignature = null;
       if (App.lastPrediction) {
         renderPredictionChart(App.lastPrediction);
@@ -1732,6 +1935,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindKeyboardShortcuts();
   initUiClock();
   initDarkModeToggle();
+  initPredictionChartLayout();
 
   try {
     await initialLoad();
