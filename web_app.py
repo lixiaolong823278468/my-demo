@@ -21,8 +21,11 @@ from dayahead_core import (
     list_model_versions,
     load_current_metadata,
     load_training_log,
+    load_training_preferences,
+    normalize_similarity_weights,
     predict_prices,
     rollback_to_previous,
+    save_training_preferences,
     train_and_register,
 )
 
@@ -156,7 +159,7 @@ def chinese_result_df(result_df: pd.DataFrame) -> pd.DataFrame:
             "period": "时段",
             "segment": "分时段",
             "hour": "小时",
-            "net_load": "火电剩余空间/净负荷",
+            "net_load": "火电空间",
             "thermal_on_capacity": "火电开机容量(MW)",
             "lag_96": "前一日同点日前价格",
             "similar_price": "相似法基线价格",
@@ -221,6 +224,14 @@ def render_train_tab() -> None:
     end_date = col2.date_input("训练结束日期", value=date(2026, 3, 31), disabled=not enable_end)
     valid_days = col3.number_input("验证集天数", min_value=1, max_value=90, value=14)
     num_boost_round = col4.number_input("训练轮数", min_value=50, max_value=3000, value=400, step=50)
+    default_weights = normalize_similarity_weights(load_training_preferences(MODEL_ROOT).get("similarity_weights"))
+    st.markdown('<div class="subsection-title">相似法权重</div>', unsafe_allow_html=True)
+    weight_col1, weight_col2, weight_col3, weight_col4, weight_col5 = st.columns(5)
+    net_load_weight = weight_col1.number_input("火电空间权重", min_value=0.0, value=float(default_weights["thermal_space"]), step=0.01)
+    renewable_weight = weight_col2.number_input("新能源权重", min_value=0.0, value=float(default_weights["renewable_power"]), step=0.01)
+    thermal_weight = weight_col3.number_input("火电容量权重", min_value=0.0, value=float(default_weights["thermal_on_capacity"]), step=0.01)
+    day_type_weight = weight_col4.number_input("日期类型权重", min_value=0.0, value=float(default_weights["day_type"]), step=0.01)
+    ratio_weight = weight_col5.number_input("供需比权重", min_value=0.0, value=float(default_weights["thermal_space_load_ratio"]), step=0.01)
 
     render_path_box(
         [
@@ -236,6 +247,14 @@ def render_train_tab() -> None:
 
     if st.button("手动重训模型", type="primary", use_container_width=True):
         add_log("收到重训指令")
+        similarity_weights = {
+            "thermal_space": float(net_load_weight),
+            "renewable_power": float(renewable_weight),
+            "thermal_on_capacity": float(thermal_weight),
+            "day_type": float(day_type_weight),
+            "thermal_space_load_ratio": float(ratio_weight),
+        }
+        save_training_preferences(MODEL_ROOT, {"similarity_weights": similarity_weights})
         result = train_and_register(
             TrainConfig(
                 history_dir=HISTORY_DIR,
@@ -244,6 +263,7 @@ def render_train_tab() -> None:
                 num_boost_round=int(num_boost_round),
                 start_date=start_date.isoformat() if enable_start else None,
                 end_date=end_date.isoformat() if enable_end else None,
+                similarity_weights=similarity_weights,
             ),
             progress_callback=callback,
         )

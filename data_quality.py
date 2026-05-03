@@ -21,7 +21,7 @@ HISTORY_TARGET_CANDIDATES = ["日前出清价格(元/MWh)", "日前-出清价格
 THERMAL_CANDIDATES = ["火电开机容量(MW)", "火电开机容量", "运行机组容量"]
 OVERVIEW_CANDIDATES = ["日前-出清概况", "日前出清概况", "出清概况"]
 
-FORECAST_NET_LOAD_CANDIDATES = ["剩余电力值(MW)", "剩余电力值", "净负荷"]
+FORECAST_NET_LOAD_CANDIDATES = ["剩余电力值(MW)", "剩余电力值", "火电空间", "火电剩余空间"]
 FORECAST_TOTAL_POWER_CANDIDATES = HISTORY_TOTAL_POWER_CANDIDATES
 FORECAST_POWER_CANDIDATES = HISTORY_POWER_CANDIDATES
 PERIOD_CANDIDATES = ["序号", "时段", "period"]
@@ -345,6 +345,7 @@ def validate_forecast_template(
     file_path: Path,
     sheet_name: str,
     default_year: int,
+    require_reference_price: bool = True,
 ) -> list[DataQualityIssue]:
     issues: list[DataQualityIssue] = []
     if len(raw_df) < 96:
@@ -402,7 +403,7 @@ def validate_forecast_template(
         add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=target_total_col, series=df[target_total_col])
         add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=target_power_col, series=df[target_power_col])
     else:
-        add_missing_field_issue(issues, task_type="predict", action="blocked", file_path=file_path, sheet_name=sheet_name, date=target_text, field="预测日净负荷", candidates=FORECAST_NET_LOAD_CANDIDATES + FORECAST_TOTAL_POWER_CANDIDATES + FORECAST_POWER_CANDIDATES)
+        add_missing_field_issue(issues, task_type="predict", action="blocked", file_path=file_path, sheet_name=sheet_name, date=target_text, field="预测日火电空间", candidates=FORECAST_NET_LOAD_CANDIDATES + FORECAST_TOTAL_POWER_CANDIDATES + FORECAST_POWER_CANDIDATES)
 
     if reference_net_load_col:
         add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_net_load_col, series=df[reference_net_load_col])
@@ -410,11 +411,11 @@ def validate_forecast_template(
         add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_total_col, series=df[reference_total_col])
         add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_power_col, series=df[reference_power_col])
     else:
-        add_missing_field_issue(issues, task_type="predict", action="blocked", file_path=file_path, sheet_name=sheet_name, date=reference_text, field="参考日净负荷", candidates=FORECAST_NET_LOAD_CANDIDATES + FORECAST_TOTAL_POWER_CANDIDATES + FORECAST_POWER_CANDIDATES)
+        add_missing_field_issue(issues, task_type="predict", action="blocked", file_path=file_path, sheet_name=sheet_name, date=reference_text, field="参考日火电空间", candidates=FORECAST_NET_LOAD_CANDIDATES + FORECAST_TOTAL_POWER_CANDIDATES + FORECAST_POWER_CANDIDATES)
 
-    if not reference_price_col:
+    if not reference_price_col and require_reference_price:
         add_missing_field_issue(issues, task_type="predict", action="blocked", file_path=file_path, sheet_name=sheet_name, date=reference_text, field="参考日前日价格", candidates=HISTORY_TARGET_CANDIDATES)
-    else:
+    elif reference_price_col:
         add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_price_col, series=df[reference_price_col])
 
     period_col = resolve_column(df.columns, PERIOD_CANDIDATES)

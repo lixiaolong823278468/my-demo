@@ -1014,6 +1014,40 @@ select {
   white-space: nowrap;
 }
 
+.data-table th.sortable-head {
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.data-table th.sortable-head::after {
+  content: "↕";
+  margin-left: 6px;
+  font-size: 12px;
+  color: #9aa8b8;
+}
+
+.data-table th.sortable-head:hover {
+  background: linear-gradient(180deg, #eef5ff, #e8f1ff);
+  color: #285ea8;
+}
+
+.data-table th.sortable-head.active-sort {
+  background: linear-gradient(180deg, #e7f1ff, #dcecff);
+  color: #1257b8;
+  box-shadow: inset 0 -2px 0 #1677ff;
+}
+
+.data-table th.sortable-head.active-sort[data-sort-state="asc"]::after {
+  content: "↑";
+  color: #1677ff;
+}
+
+.data-table th.sortable-head.active-sort[data-sort-state="desc"]::after {
+  content: "↓";
+  color: #1677ff;
+}
+
 .data-table tbody tr:nth-child(even) td {
   background: #fbfdff;
 }
@@ -2127,6 +2161,7 @@ body::after {
 
 .app-sidebar .status-fab-marquee {
   align-self: center;
+  flex: 1;
   height: 22px;
   min-width: 0;
 }
@@ -2143,6 +2178,29 @@ body::after {
   height: 22px;
   padding-top: 0;
   justify-content: flex-end;
+}
+
+.app-sidebar .sidebar-status.collapsed .status-ticker-stack {
+  position: static;
+  top: auto;
+  bottom: auto;
+  display: block;
+  width: 100%;
+  height: 22px;
+  overflow: hidden;
+}
+
+.app-sidebar .sidebar-status.collapsed .status-ticker-line {
+  display: none;
+  height: 22px;
+  line-height: 22px;
+  opacity: 1;
+  transform: none;
+}
+
+.app-sidebar .sidebar-status.collapsed .status-ticker-line:last-child {
+  display: block;
+  color: rgba(255, 255, 255, 0.74);
 }
 
 .app-sidebar .sidebar-status.expanded .status-fab-marquee {
@@ -2248,7 +2306,15 @@ body::after {
 }
 
 .app-sidebar .sidebar-status.collapsed .status-fab {
+  display: flex;
+  align-items: center;
   color: #ffffff;
+}
+
+.app-sidebar .sidebar-status.collapsed .status-fab-title,
+.app-sidebar .sidebar-status.collapsed .status-fab-marquee {
+  height: 22px;
+  line-height: 22px;
 }
 
 .app-sidebar .sidebar-status.expanded .status-fab {
@@ -3286,6 +3352,26 @@ html {
 
   :root.dark-enabled .data-table th {
     background: linear-gradient(180deg, #1a2540, #152038);
+  }
+
+  :root.dark-enabled .data-table th.sortable-head::after {
+    color: #7f93ad;
+  }
+
+  :root.dark-enabled .data-table th.sortable-head:hover {
+    background: linear-gradient(180deg, #23304d, #1a2742);
+    color: #93c5fd;
+  }
+
+  :root.dark-enabled .data-table th.sortable-head.active-sort {
+    background: linear-gradient(180deg, #213559, #182a48);
+    color: #bfdbfe;
+    box-shadow: inset 0 -2px 0 #60a5fa;
+  }
+
+  :root.dark-enabled .data-table th.sortable-head.active-sort[data-sort-state="asc"]::after,
+  :root.dark-enabled .data-table th.sortable-head.active-sort[data-sort-state="desc"]::after {
+    color: #60a5fa;
   }
 
   :root.dark-enabled .data-table td,

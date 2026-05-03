@@ -52,7 +52,8 @@
 当前模板支持按列头中的日期自动识别：
 
 - 最新日期作为预测日
-- 前一天作为 `lag_96` 与相似法参考日
+- 默认把参考日价格作为 `lag_96`，用于带 `lag_96` 的模型
+- 如果训练时关闭 `lag_96`，预测时会自动跟随模型元数据，不再强制要求参考日价格列
 - 预测结果自动写回 `预测价格` 列
 
 ## 4. 如何启动与使用
@@ -115,6 +116,20 @@ python dayahead_timeseg_model.py train --start-date 2026-02-01 --end-date 2026-0
 ```bash
 python dayahead_timeseg_model.py train --valid-days 14 --num-boost-round 500
 ```
+
+关闭 `lag_96` 特征训练：
+
+```bash
+python dayahead_timeseg_model.py train --no-lag-96
+```
+
+调整相似法权重：
+
+```bash
+python dayahead_timeseg_model.py train --similarity-weights "{\"thermal_space\":0.45,\"renewable_power\":0.15,\"thermal_on_capacity\":0.2,\"day_type\":0.1,\"thermal_space_load_ratio\":0.1}"
+```
+
+默认权重为：火电空间 `0.45`、新能源 `0.15`、火电容量 `0.20`、日期类型 `0.10`、供需比 `0.10`。权重会写入 `metadata.json` 和 `training_runs.jsonl`，预测时会按当前模型元数据继续使用同一组权重。
 
 ### 4.4 命令行执行预测
 
@@ -247,7 +262,7 @@ python dayahead_timeseg_model.py rollback
 
 ### 10.1 第一步：相似法基线
 
-以预测日的 `净负荷 / 火电剩余空间` 为目标，在参考日中寻找最相近的点，形成相似法基线价格。
+以预测日的 `火电空间 / 新能源出力 / 火电容量 / 日期类型 / 供需比` 为目标，在参考日中寻找最相近的点，形成相似法基线价格。
 
 ### 10.2 第二步：XGBoost 预测残差
 
@@ -268,6 +283,42 @@ python dayahead_timeseg_model.py rollback
 - 更接近人工“相似法”思路
 - 可解释性更强
 - 通常比纯机器学习直接预测更稳
+
+### 10.3 相似法权重贯穿逻辑
+
+相似法权重用于控制“什么样的历史时段算更相似”。当前支持 4 个权重：
+
+- `thermal_space`：火电空间权重，内部计算为 `用电负荷 - 新能源出力`
+- `renewable_power`：新能源出力权重
+- `thermal_on_capacity`：火电容量权重
+- `day_type`：日期类型权重
+- `thermal_space_load_ratio`：供需比权重，内部计算为 `火电空间 / 用电负荷`
+
+这组权重会贯穿训练、缓存、元数据和预测链路：
+
+- 训练链路：权重真正参与相似法计算，用来生成 `similar_price` 和 `similar_gap`，再训练 XGBoost 残差模型。
+- 缓存：权重作为训练特征缓存 key 的一部分。修改权重后，系统会重新生成相似法特征，避免误用旧权重生成过的缓存。
+- 元数据：训练完成后，权重会写入当前模型的 `metadata.json` 和 `models\training_runs.jsonl`，便于复盘每次模型版本的相似法设置。
+- 预测链路：预测时会读取当前模型 `metadata.json` 中保存的权重，用同一组权重重新计算预测日的相似法基线，保证训练和预测对“相似”的定义一致。
+
+简单理解：权重主要影响 `相似法基线价格`；缓存和元数据用于保证不串旧结果、可追溯、训练预测一致。
+
+训练页面还会单独维护一份页面偏好：
+
+- 偏好文件位置：`models\training_preferences.json`
+- 用途：只决定训练页面下次默认显示什么权重
+- 保存时机：在网页训练页面修改权重后会自动保存；点击 `手动重训模型` 时也会再次保存当前页面权重
+- 独立性：切换默认模型、回退模型、删除历史模型都不会覆盖训练页面偏好
+- 与模型元数据区别：`training_preferences.json` 是页面默认值，`metadata.json` 是某个模型实际训练时使用的权重
+
+### 10.4 `lag_96` 开关
+
+`lag_96` 表示参考日/昨日同一时段价格。它不是电价形成原因，只是给模型提供近期价格状态参考。
+
+- 默认训练会使用 `lag_96`
+- 网页训练参数里可以取消勾选 `使用 lag_96（参考日/昨日同点价格）`
+- 命令行可使用 `--no-lag-96`
+- 预测时不需要手动选择，系统会读取当前模型 `metadata.json` 中的 `feature_columns` 自动判断是否需要 `lag_96`
 
 ## 11. 价格边界约束
 

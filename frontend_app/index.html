@@ -133,6 +133,40 @@
               <input type="checkbox" id="enable-end" checked />
               <span>启用训练结束日期</span>
             </label>
+            <label class="switch-item">
+              <input type="checkbox" id="use-lag-96" checked />
+              <span>使用 lag_96（参考日/昨日同点价格）</span>
+            </label>
+          </div>
+
+          <div class="section-header compact">
+            <div>
+              <div class="section-title">相似法权重</div>
+              <div class="hint-text">用于计算相似法基线价格；权重越大，该字段对相似样本选择影响越大。</div>
+            </div>
+          </div>
+
+          <div class="form-grid four-col">
+            <label class="field">
+              <span>火电空间权重</span>
+              <input type="number" id="similarity-weight-net-load" min="0" step="0.01" value="0.45" />
+            </label>
+            <label class="field">
+              <span>新能源权重</span>
+              <input type="number" id="similarity-weight-renewable-power" min="0" step="0.01" value="0.15" />
+            </label>
+            <label class="field">
+              <span>火电容量权重</span>
+              <input type="number" id="similarity-weight-thermal-on-capacity" min="0" step="0.01" value="0.2" />
+            </label>
+            <label class="field">
+              <span>日期类型权重</span>
+              <input type="number" id="similarity-weight-day-type" min="0" step="0.01" value="0.1" />
+            </label>
+            <label class="field">
+              <span>供需比权重</span>
+              <input type="number" id="similarity-weight-ratio" min="0" step="0.01" value="0.1" />
+            </label>
           </div>
 
           <div class="progress-grid">
@@ -184,7 +218,7 @@
           <div class="form-grid four-col">
             <label class="field">
               <span>参考天数</span>
-              <input type="number" id="reference-days" min="1" max="30" value="1" />
+              <input type="number" id="reference-days" min="1" max="100" value="1" />
             </label>
           </div>
 
@@ -280,6 +314,16 @@
               <span>历史模型下拉列表</span>
               <select id="version-select"></select>
             </label>
+            <label class="field select-field version-select-field">
+              <span>排序方式</span>
+              <select id="version-sort">
+                <option value="created_at_desc">训练时间（新到旧）</option>
+                <option value="final_rmse_asc">融合 RMSE（小到大）</option>
+                <option value="final_mae_asc">融合 MAE（小到大）</option>
+                <option value="baseline_rmse_asc">相似法 RMSE（小到大）</option>
+                <option value="baseline_mae_asc">相似法 MAE（小到大）</option>
+              </select>
+            </label>
             <div class="actions-row compact-actions">
               <button class="primary-btn" id="activate-version-btn">设为默认模型</button>
               <button class="ghost-btn" id="rollback-btn">回退到上一版</button>
@@ -294,9 +338,13 @@
                   <tr>
                     <th><input type="checkbox" id="select-all-versions" /></th>
                     <th>版本号</th>
-                    <th>创建时间</th>
+                    <th class="version-sort-head" data-version-sort="created_at_desc">创建时间</th>
                     <th>训练范围</th>
                     <th>样本数</th>
+                    <th class="version-sort-head" data-version-sort="baseline_mae_asc">相似法 MAE</th>
+                    <th class="version-sort-head" data-version-sort="baseline_rmse_asc">相似法 RMSE</th>
+                    <th class="version-sort-head" data-version-sort="final_mae_asc">融合 MAE</th>
+                    <th class="version-sort-head" data-version-sort="final_rmse_asc">融合 RMSE</th>
                     <th>状态</th>
                   </tr>
                 </thead>

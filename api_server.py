@@ -33,8 +33,11 @@ from dayahead_core import (
     list_model_versions,
     load_current_metadata,
     load_training_log,
+    load_training_preferences,
+    normalize_similarity_weights,
     predict_prices_compare,
     rollback_to_previous,
+    save_training_preferences,
     train_and_register,
 )
 
@@ -48,6 +51,22 @@ MODEL_ROOT = Path(DEFAULT_MODEL_ROOT)
 FORECAST_FILE = Path(DEFAULT_FORECAST_FILE)
 HISTORY_DIR = Path(DEFAULT_HISTORY_DIR)
 OUTPUT_FILE = Path(DEFAULT_OUTPUT_FILE)
+
+
+def parse_similarity_weights_payload(payload: dict[str, Any]) -> dict[str, float] | None:
+    raw_weights = payload.get("similarity_weights")
+    if raw_weights is None:
+        return None
+    if not isinstance(raw_weights, dict):
+        raise ValueError("similarity_weights 必须是对象")
+    return dict(normalize_similarity_weights(raw_weights))
+
+
+def resolve_training_similarity_weights(payload: dict[str, Any], model_root: Path = MODEL_ROOT) -> dict[str, float]:
+    parsed_weights = parse_similarity_weights_payload(payload)
+    if parsed_weights is not None:
+        return parsed_weights
+    return dict(load_training_preferences(model_root)["similarity_weights"])
 
 
 def now_text() -> str:
@@ -369,14 +388,20 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
     def worker(job_id: str) -> dict[str, Any]:
         STATE.append_log(job_id, "收到手动重训请求", 1)
         STATE.raise_if_cancelled(job_id)
+        model_root = Path(payload.get("model_root") or MODEL_ROOT)
+        similarity_weights = resolve_training_similarity_weights(payload, model_root)
+        save_training_preferences(model_root, {"similarity_weights": similarity_weights})
         result = train_and_register(
             TrainConfig(
                 history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
-                model_root=Path(payload.get("model_root") or MODEL_ROOT),
+                model_root=model_root,
                 valid_days=int(payload.get("valid_days") or 14),
                 num_boost_round=int(payload.get("num_boost_round") or 400),
                 start_date=(payload.get("start_date") or None) if payload.get("enable_start", True) else None,
                 end_date=(payload.get("end_date") or None) if payload.get("enable_end", True) else None,
+                similarity_reference_days=int(payload.get("similarity_reference_days") or 100),
+                use_lag_96=bool(payload.get("use_lag_96", True)),
+                similarity_weights=similarity_weights,
             ),
             progress_callback=build_progress_callback(job_id),
         )
@@ -435,6 +460,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self.send_json(self.get_versions())
             if path == "/api/training/logs":
                 return self.send_json(self.get_training_logs())
+            if path == "/api/training/preferences":
+                return self.send_json({"preferences": load_training_preferences(MODEL_ROOT)})
             if path == "/api/data-quality/reports":
                 return self.send_json({"reports": list_quality_reports()})
             if path == "/api/data-quality/reports/latest":
@@ -479,6 +506,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return self.send_error_json(HTTPStatus.NOT_FOUND, "未找到任务")
             if path == "/api/train":
                 return self.send_json(start_background_job("train", build_train_worker(payload)), HTTPStatus.ACCEPTED)
+            if path == "/api/training/preferences":
+                preferences = save_training_preferences(MODEL_ROOT, {"similarity_weights": resolve_training_similarity_weights(payload, MODEL_ROOT)})
+                return self.send_json({"preferences": preferences})
             if path == "/api/predict":
                 return self.send_json(start_background_job("predict", build_predict_worker(payload)), HTTPStatus.ACCEPTED)
             if path == "/api/forecast/template/save":
@@ -522,6 +552,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             "price_floor": PRICE_FLOOR,
             "price_cap": PRICE_CAP,
             "default_reference_days": 1,
+            "max_reference_days": 100,
+            "default_use_lag_96": True,
+            "default_similarity_weights": dict(load_training_preferences(MODEL_ROOT)["similarity_weights"]),
+            "training_preferences": load_training_preferences(MODEL_ROOT),
             "reference_strategy_options": [
                 {"key": "recent_n_days", "label": "最近 N 天"},
                 {"key": "recent_same_type_days", "label": "最近 N 个同类型日"},

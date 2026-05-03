@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from dayahead_core import (
@@ -55,6 +56,12 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--num-boost-round", type=int, default=400, help="XGBoost 训练轮数")
     parser.add_argument("--start-date", help="训练起始日期，格式 YYYY-MM-DD")
     parser.add_argument("--end-date", help="训练结束日期，格式 YYYY-MM-DD")
+    parser.add_argument("--similarity-reference-days", type=int, default=100, help="相似法训练参考最近天数")
+    parser.add_argument(
+        "--similarity-weights",
+        help='相似法权重 JSON，例如 {"thermal_space":0.45,"renewable_power":0.15,"thermal_on_capacity":0.2,"day_type":0.1,"thermal_space_load_ratio":0.1}',
+    )
+    parser.add_argument("--no-lag-96", action="store_true", help="训练时不使用昨日/参考日同点价格 lag_96 特征")
 
 
 def build_train_config(args: argparse.Namespace) -> TrainConfig:
@@ -66,6 +73,9 @@ def build_train_config(args: argparse.Namespace) -> TrainConfig:
         num_boost_round=args.num_boost_round,
         start_date=args.start_date,
         end_date=args.end_date,
+        similarity_reference_days=args.similarity_reference_days,
+        use_lag_96=not args.no_lag_96,
+        similarity_weights=json.loads(args.similarity_weights) if args.similarity_weights else None,
     )
 
 

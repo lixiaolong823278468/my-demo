@@ -34,18 +34,21 @@ const columnTitleMap = {
   period: "时段",
   segment: "分时段",
   hour: "小时",
-  net_load: "净负荷",
+  net_load: "火电空间",
   thermal_on_capacity: "火电开机容量(MW)",
   lag_96: "昨日同点日前价格",
-  similar_price: "相似法基线价格",
+  similar_price: "多条件相似基线",
+  net_load_only_similar_price: "仅火电空间相似基线",
   residual_pred: "模型残差修正值",
-  predicted_price: "预测价格",
-  recent_n_days_similar_price: "最近 N 天相似基线",
+  predicted_price: "最终预测价格",
+  recent_n_days_similar_price: "最近 N 天多条件相似基线",
+  recent_n_days_net_load_only_similar_price: "最近 N 天仅火电空间基线",
   recent_n_days_residual_pred: "最近 N 天残差修正",
-  recent_n_days_predicted_price: "最近 N 天预测价",
-  recent_same_type_days_similar_price: "同类型日相似基线",
+  recent_n_days_predicted_price: "最近 N 天最终预测价格",
+  recent_same_type_days_similar_price: "同类型日多条件相似基线",
+  recent_same_type_days_net_load_only_similar_price: "同类型日仅火电空间基线",
   recent_same_type_days_residual_pred: "同类型日残差修正",
-  recent_same_type_days_predicted_price: "同类型日预测价",
+  recent_same_type_days_predicted_price: "同类型日最终预测价格",
   prediction_price_diff: "两策略价差",
 };
 
@@ -69,14 +72,16 @@ const predictionSeriesNameMap = {
 const predictionChartConfigMap = {
   recent_n_days: {
     elementId: "prediction-chart-recent-n-days",
-    predictedName: "最近 N 天预测价格",
-    similarName: "最近 N 天相似基线",
+    predictedName: "最终预测价格",
+    similarName: "多条件相似基线",
+    netLoadOnlyName: "仅火电空间相似基线",
     residualName: "最近 N 天模型残差修正",
   },
   recent_same_type_days: {
     elementId: "prediction-chart-same-type-days",
-    predictedName: "同类型日预测价格",
-    similarName: "同类型日相似基线",
+    predictedName: "最终预测价格",
+    similarName: "多条件相似基线",
+    netLoadOnlyName: "仅火电空间相似基线",
     residualName: "同类型日模型残差修正",
   },
 };
@@ -222,24 +227,89 @@ function syncSelectAllVersionsState() {
   selectAll.indeterminate = checkedCount > 0 && checkedCount < checks.length;
 }
 
+function currentVersionSort() {
+  return $("#version-sort")?.value || "created_at_desc";
+}
+
+function setVersionSort(sortKey) {
+  const select = $("#version-sort");
+  if (select) {
+    select.value = sortKey;
+  }
+}
+
+function formatMetricCell(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return "-";
+  return numericValue.toFixed(2);
+}
+
+function formatChartTooltipValue(value) {
+  const rawValue = Array.isArray(value) ? value[value.length - 1] : value;
+  const numericValue = Number(rawValue);
+  if (!Number.isFinite(numericValue)) return rawValue ?? "-";
+  return new Intl.NumberFormat("zh-CN", {
+    maximumFractionDigits: 2,
+  }).format(numericValue);
+}
+
+function sortVersionsForDisplay(versions) {
+  const sortKey = currentVersionSort();
+  const list = [...versions];
+  const metricKeyMap = {
+    baseline_mae_asc: "baseline_mae",
+    baseline_rmse_asc: "baseline_rmse",
+    final_mae_asc: "final_mae",
+    final_rmse_asc: "final_rmse",
+  };
+
+  if (sortKey === "created_at_desc") {
+    return list.sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || "")));
+  }
+
+  const metricKey = metricKeyMap[sortKey];
+  if (!metricKey) return list;
+  return list.sort((left, right) => {
+    const leftValue = Number(left?.[metricKey]);
+    const rightValue = Number(right?.[metricKey]);
+    const leftRank = Number.isFinite(leftValue) ? leftValue : Number.POSITIVE_INFINITY;
+    const rightRank = Number.isFinite(rightValue) ? rightValue : Number.POSITIVE_INFINITY;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    return String(right.created_at || "").localeCompare(String(left.created_at || ""));
+  });
+}
+
+function updateVersionSortHeaders() {
+  const activeSort = currentVersionSort();
+  $$("#versions-table th[data-version-sort]").forEach((cell) => {
+    const isActive = cell.dataset.versionSort === activeSort;
+    cell.classList.add("sortable-head");
+    cell.classList.toggle("active-sort", isActive);
+    cell.dataset.sortState = isActive ? (activeSort === "created_at_desc" ? "desc" : "asc") : "";
+    cell.title = isActive ? "当前排序列" : "点击按此列排序";
+  });
+}
+
 function renderVersions(versions) {
   const selectedKeys = new Set(selectedVersionKeys());
   const currentVersionKey = $("#version-select")?.value || "";
-  App.versions = versions;
-  $("#version-select").innerHTML = versions.length
-    ? versions.map((item) => `<option value="${htmlEscape(item.version_key)}">${htmlEscape(item.label || item.version_key)}</option>`).join("")
+  const displayVersions = sortVersionsForDisplay(versions);
+  App.versions = displayVersions;
+  setVersionSort(currentVersionSort());
+  $("#version-select").innerHTML = displayVersions.length
+    ? displayVersions.map((item) => `<option value="${htmlEscape(item.version_key)}">${htmlEscape(item.label || item.version_key)}</option>`).join("")
     : `<option value="">暂无历史模型</option>`;
-  if (versions.some((item) => String(item.version_key) === currentVersionKey)) {
+  if (displayVersions.some((item) => String(item.version_key) === currentVersionKey)) {
     $("#version-select").value = currentVersionKey;
   }
 
   const tbody = $("#versions-table tbody");
-  if (!versions.length) {
-    tbody.innerHTML = `<tr><td colspan="6">暂无历史模型版本</td></tr>`;
+  if (!displayVersions.length) {
+    tbody.innerHTML = `<tr><td colspan="10">暂无历史模型版本</td></tr>`;
     syncSelectAllVersionsState();
     return;
   }
-  tbody.innerHTML = versions
+  tbody.innerHTML = displayVersions
     .map((item) => {
       const tags = [];
       if (item.is_default) tags.push(`<span class="status-tag default">默认模型</span>`);
@@ -252,12 +322,17 @@ function renderVersions(versions) {
           <td>${htmlEscape(item.created_at || "-")}</td>
           <td>${htmlEscape(item.train_start_date || "-")} ~ ${htmlEscape(item.train_end_date || "-")}</td>
           <td>${htmlEscape(item.sample_rows ?? "-")}</td>
+          <td>${formatMetricCell(item.baseline_mae)}</td>
+          <td>${formatMetricCell(item.baseline_rmse)}</td>
+          <td>${formatMetricCell(item.final_mae)}</td>
+          <td>${formatMetricCell(item.final_rmse)}</td>
           <td>${tags.join(" ") || "-"}</td>
         </tr>
       `;
     })
     .join("");
   syncSelectAllVersionsState();
+  updateVersionSortHeaders();
 }
 
 function renderTrainingLogs(logs) {
@@ -487,7 +562,8 @@ function orderedPredictionComparisons(prediction) {
 
 function currentReferenceDays() {
   const value = Number($("#reference-days")?.value || App.config?.default_reference_days || 1);
-  return Number.isFinite(value) && value >= 1 ? value : 1;
+  const maxValue = Number(App.config?.max_reference_days || 100);
+  return Number.isFinite(value) && value >= 1 ? Math.min(value, maxValue) : 1;
 }
 
 function formatReferenceStrategyLabel(strategyKey, label, referenceDays = currentReferenceDays()) {
@@ -566,9 +642,11 @@ function renderPredictionTable(prediction) {
     "date",
     "period",
     "recent_n_days_similar_price",
+    "recent_n_days_net_load_only_similar_price",
     "recent_n_days_residual_pred",
     "recent_n_days_predicted_price",
     "recent_same_type_days_similar_price",
+    "recent_same_type_days_net_load_only_similar_price",
     "recent_same_type_days_residual_pred",
     "recent_same_type_days_predicted_price",
     "prediction_price_diff",
@@ -585,9 +663,11 @@ function renderPredictionTable(prediction) {
       date: row.date,
       period: row.period,
       recent_n_days_similar_price: recentRow ? Number(recentRow.similar_price || 0).toFixed(2) : "",
+      recent_n_days_net_load_only_similar_price: recentRow ? Number(recentRow.net_load_only_similar_price || 0).toFixed(2) : "",
       recent_n_days_residual_pred: recentRow ? Number(recentRow.residual_pred || 0).toFixed(2) : "",
       recent_n_days_predicted_price: recentPrice === null ? "" : recentPrice.toFixed(2),
       recent_same_type_days_similar_price: sameTypeRow ? Number(sameTypeRow.similar_price || 0).toFixed(2) : "",
+      recent_same_type_days_net_load_only_similar_price: sameTypeRow ? Number(sameTypeRow.net_load_only_similar_price || 0).toFixed(2) : "",
       recent_same_type_days_residual_pred: sameTypeRow ? Number(sameTypeRow.residual_pred || 0).toFixed(2) : "",
       recent_same_type_days_predicted_price: sameTypePrice === null ? "" : sameTypePrice.toFixed(2),
       prediction_price_diff: recentPrice === null || sameTypePrice === null ? "" : (sameTypePrice - recentPrice).toFixed(2),
@@ -698,16 +778,21 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
   const periods = rows.map((row) => row.period);
   const predicted = rows.map((row) => Number(row.predicted_price || 0));
   const similar = rows.map((row) => Number(row.similar_price || 0));
+  const netLoadOnlySimilar = rows.map((row) => {
+    const value = Number(row.net_load_only_similar_price);
+    return Number.isFinite(value) ? value : null;
+  });
   const residual = rows.map((row) => Number(row.residual_pred || 0));
   const predictedName = formatReferenceStrategyLabel(strategyKey, config.predictedName, referenceDays);
   const similarName = formatReferenceStrategyLabel(strategyKey, config.similarName, referenceDays);
+  const netLoadOnlyName = formatReferenceStrategyLabel(strategyKey, config.netLoadOnlyName, referenceDays);
   const residualName = formatReferenceStrategyLabel(strategyKey, config.residualName, referenceDays);
 
   chart.setOption(
     {
       backgroundColor: "transparent",
       animationDuration: 500,
-      color: ["#1677ff", "#52c41a", "#fa8c16"],
+      color: ["#1677ff", "#52c41a", "#722ed1", "#fa8c16"],
       tooltip: {
         trigger: "axis",
         triggerOn: "mousemove|click",
@@ -717,11 +802,23 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
         confine: true,
         hideDelay: 120,
         textStyle: { color: "#ffffff" },
+        formatter(params) {
+          const items = Array.isArray(params) ? params : [params];
+          const title = items[0]?.axisValueLabel ?? items[0]?.name ?? "";
+          const lines = items
+            .filter((item) => item?.value !== null && item?.value !== undefined && item?.value !== "")
+            .map(
+              (item) =>
+                `${item.marker || ""}<span style="margin-right:12px;">${item.seriesName}</span><strong>${formatChartTooltipValue(item.value)}</strong>`,
+            )
+            .join("<br/>");
+          return `<div style="font-weight:800;margin-bottom:6px;">${title}</div>${lines}`;
+        },
       },
       legend: {
         top: 8,
         textStyle: { color: "#4e5969" },
-        data: [predictedName, similarName, residualName],
+        data: [predictedName, similarName, netLoadOnlyName, residualName],
       },
       grid: [
         { left: 54, right: 38, top: 52, height: 210 },
@@ -762,7 +859,7 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
         },
       ],
       dataZoom: [
-        { type: "inside", xAxisIndex: [0, 1], start: 0, end: 100 },
+        { type: "inside", xAxisIndex: [0, 1], start: 0, end: 100, zoomOnMouseWheel: false, moveOnMouseWheel: false },
         { type: "slider", xAxisIndex: [0, 1], bottom: 0, height: 18, borderColor: "transparent" },
       ],
       series: [
@@ -783,6 +880,14 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
           symbol: "none",
           lineStyle: { width: 2, type: "dashed" },
           data: similar,
+        },
+        {
+          name: netLoadOnlyName,
+          type: "line",
+          smooth: true,
+          symbol: "none",
+          lineStyle: { width: 2, type: "dotted" },
+          data: netLoadOnlySimilar,
         },
         {
           name: residualName,
@@ -942,7 +1047,39 @@ async function loadConfig() {
   if ($("#reference-days") && App.config?.default_reference_days && !$("#reference-days").value) {
     $("#reference-days").value = App.config.default_reference_days;
   }
+  if ($("#use-lag-96") && typeof App.config?.default_use_lag_96 === "boolean") {
+    $("#use-lag-96").checked = App.config.default_use_lag_96;
+  }
+  const weights = App.config?.default_similarity_weights || {};
+  [
+    ["#similarity-weight-net-load", "thermal_space"],
+    ["#similarity-weight-renewable-power", "renewable_power"],
+    ["#similarity-weight-thermal-on-capacity", "thermal_on_capacity"],
+    ["#similarity-weight-day-type", "day_type"],
+    ["#similarity-weight-ratio", "thermal_space_load_ratio"],
+  ].forEach(([selector, key]) => {
+    if ($(selector) && weights[key] !== undefined) {
+      $(selector).value = weights[key];
+    }
+  });
   renderConfigPaths();
+}
+
+function collectSimilarityWeights() {
+  return {
+    thermal_space: Number($("#similarity-weight-net-load")?.value || 0),
+    renewable_power: Number($("#similarity-weight-renewable-power")?.value || 0),
+    thermal_on_capacity: Number($("#similarity-weight-thermal-on-capacity")?.value || 0),
+    day_type: Number($("#similarity-weight-day-type")?.value || 0),
+    thermal_space_load_ratio: Number($("#similarity-weight-ratio")?.value || 0),
+  };
+}
+
+async function saveTrainingPreferences() {
+  await request("/api/training/preferences", {
+    method: "POST",
+    body: JSON.stringify({ similarity_weights: collectSimilarityWeights() }),
+  });
 }
 
 async function refreshSummary() {
@@ -999,6 +1136,7 @@ async function saveTemplate() {
 async function startTrain() {
   const btn = $("#train-btn");
   const originalText = btn?.textContent || "手动重训模型";
+  const similarityWeights = collectSimilarityWeights();
   try {
     setButtonLoading(btn, true, originalText);
     setPendingState("train", "正在提交训练任务...");
@@ -1011,6 +1149,8 @@ async function startTrain() {
         enable_end: $("#enable-end").checked,
         valid_days: Number($("#valid-days").value || 14),
         num_boost_round: Number($("#num-boost-round").value || 400),
+        use_lag_96: $("#use-lag-96")?.checked !== false,
+        similarity_weights: similarityWeights,
       }),
     });
     App.activeJobIds.train = data.job_id;
@@ -1069,7 +1209,7 @@ async function startPredict() {
     const data = await request("/api/predict", {
       method: "POST",
       body: JSON.stringify({
-        reference_days: Number($("#reference-days").value || App.config?.default_reference_days || 1),
+        reference_days: currentReferenceDays(),
       }),
     });
     App.activeJobIds.predict = data.job_id;
@@ -1524,6 +1664,13 @@ function bindEvents() {
   $("#activate-version-btn").addEventListener("click", () => activateVersion().catch((error) => showToast(error.message, "error")));
   $("#rollback-btn").addEventListener("click", () => rollbackVersion().catch((error) => showToast(error.message, "error")));
   $("#delete-versions-btn").addEventListener("click", () => deleteSelectedVersions().catch((error) => showToast(error.message, "error")));
+  $("#version-sort").addEventListener("change", () => renderVersions(App.versions || []));
+  $("#versions-table").addEventListener("click", (event) => {
+    const header = event.target.closest("th[data-version-sort]");
+    if (!header) return;
+    setVersionSort(header.dataset.versionSort);
+    renderVersions(App.versions || []);
+  });
   $("#select-all-versions").addEventListener("change", (event) => {
     $$(".version-check").forEach((item) => {
       item.checked = event.target.checked;
@@ -1540,6 +1687,17 @@ function bindEvents() {
   });
   $("#enable-end").addEventListener("change", (event) => {
     setDatePickerDisabled("train-end-picker", !event.target.checked);
+  });
+  [
+    "#similarity-weight-net-load",
+    "#similarity-weight-renewable-power",
+    "#similarity-weight-thermal-on-capacity",
+    "#similarity-weight-day-type",
+    "#similarity-weight-ratio",
+  ].forEach((selector) => {
+    $(selector)?.addEventListener("change", () => {
+      saveTrainingPreferences().catch((error) => showToast(error.message, "error"));
+    });
   });
   $("#hide-status-btn").addEventListener("click", () => toggleStatusPanel(true));
   $("#status-fab").addEventListener("click", () => toggleStatusPanel(false));

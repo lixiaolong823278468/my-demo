@@ -38,7 +38,35 @@ HISTORY_CACHE_VERSION = 2
 TARGET_COLUMN = "日前出清价格(元/MWh)"
 SIMILAR_PRICE_COLUMN = "similar_price"
 SIMILAR_GAP_COLUMN = "similar_gap"
+NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN = "net_load_only_similar_price"
+NET_LOAD_ONLY_SIMILAR_GAP_COLUMN = "net_load_only_similar_gap"
 RESIDUAL_TARGET_COLUMN = "residual_target"
+TOTAL_LOAD_COLUMN = "total_load"
+RENEWABLE_POWER_COLUMN = "renewable_power"
+DAY_TYPE_COLUMN = "day_type"
+THERMAL_SPACE_WEIGHT_KEY = "thermal_space"
+THERMAL_SPACE_LOAD_RATIO_COLUMN = "thermal_space_load_ratio"
+DEFAULT_SIMILARITY_REFERENCE_DAYS = 100
+MULTICONDITION_SIMILARITY_WEIGHTS = OrderedDict(
+    [
+        (THERMAL_SPACE_WEIGHT_KEY, 0.45),
+        (RENEWABLE_POWER_COLUMN, 0.15),
+        ("thermal_on_capacity", 0.20),
+        (DAY_TYPE_COLUMN, 0.10),
+        (THERMAL_SPACE_LOAD_RATIO_COLUMN, 0.10),
+    ]
+)
+SIMILARITY_WEIGHT_COLUMN_MAP = {
+    THERMAL_SPACE_WEIGHT_KEY: "net_load",
+    RENEWABLE_POWER_COLUMN: RENEWABLE_POWER_COLUMN,
+    "thermal_on_capacity": "thermal_on_capacity",
+    DAY_TYPE_COLUMN: DAY_TYPE_COLUMN,
+    THERMAL_SPACE_LOAD_RATIO_COLUMN: THERMAL_SPACE_LOAD_RATIO_COLUMN,
+}
+SIMILARITY_WEIGHT_ALIASES = {
+    "net_load": THERMAL_SPACE_WEIGHT_KEY,
+    "thermal_space": THERMAL_SPACE_WEIGHT_KEY,
+}
 FEATURE_COLUMNS = [
     "net_load",
     "thermal_on_capacity",
@@ -52,6 +80,7 @@ FEATURE_COLUMNS = [
     SIMILAR_PRICE_COLUMN,
     SIMILAR_GAP_COLUMN,
 ]
+LAG_96_COLUMN = "lag_96"
 REFERENCE_STRATEGIES = OrderedDict(
     [
         ("recent_n_days", "最近 N 天"),
@@ -88,6 +117,9 @@ class TrainConfig:
     num_boost_round: int = 400
     start_date: str | None = None
     end_date: str | None = None
+    similarity_reference_days: int = DEFAULT_SIMILARITY_REFERENCE_DAYS
+    use_lag_96: bool = True
+    similarity_weights: dict[str, float] | None = None
 
 
 @dataclass
@@ -154,6 +186,40 @@ def normalize_reference_strategy(reference_strategy: str | None) -> str:
     if strategy_key not in REFERENCE_STRATEGIES:
         raise ValueError(f"不支持的参考日策略: {strategy_key}")
     return strategy_key
+
+
+def training_feature_columns(config: TrainConfig | None = None) -> list[str]:
+    use_lag_96 = True if config is None else bool(config.use_lag_96)
+    if use_lag_96:
+        return list(FEATURE_COLUMNS)
+    return [column for column in FEATURE_COLUMNS if column != LAG_96_COLUMN]
+
+
+def model_requires_lag_96(metadata: dict) -> bool:
+    return LAG_96_COLUMN in (metadata.get("feature_columns") or FEATURE_COLUMNS)
+
+
+def normalize_similarity_weights(
+    similarity_weights: dict[str, object] | None = None,
+    fill_missing_with_defaults: bool = True,
+) -> OrderedDict[str, float]:
+    if similarity_weights is None:
+        return OrderedDict((key, float(value)) for key, value in MULTICONDITION_SIMILARITY_WEIGHTS.items())
+    weights = OrderedDict(
+        (key, float(value) if fill_missing_with_defaults else 0.0)
+        for key, value in MULTICONDITION_SIMILARITY_WEIGHTS.items()
+    )
+    for raw_key, value in similarity_weights.items():
+        key = SIMILARITY_WEIGHT_ALIASES.get(str(raw_key), str(raw_key))
+        if key not in weights:
+            raise ValueError(f"不支持的相似法权重字段: {raw_key}")
+        numeric_value = float(value)
+        if not np.isfinite(numeric_value) or numeric_value < 0:
+            raise ValueError(f"相似法权重 {key} 必须是大于等于 0 的数字")
+        weights[key] = numeric_value
+    if sum(weights.values()) <= 0:
+        raise ValueError("相似法权重总和必须大于 0")
+    return weights
 
 
 def normalize_text(text: object) -> str:
@@ -356,7 +422,7 @@ def load_cached_history_collection(
     end_date: str | pd.Timestamp | None = None,
     leading_days: int = 0,
 ) -> tuple[pd.DataFrame, list[str], set[pd.Timestamp], dict, list[DataQualityIssue]]:
-    holiday_dates = load_holiday_dates(holiday_file)
+    holiday_dates = load_holiday_calendar(holiday_file)
     scoped_files = list_excel_files_for_date_window(history_dir, start_date, end_date, leading_days=leading_days)
     scope = {
         "start_date": str(parse_optional_date(start_date).date()) if parse_optional_date(start_date) is not None else None,
@@ -401,9 +467,14 @@ def to_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
-def load_holiday_dates(holiday_file: str | Path | None) -> set[pd.Timestamp]:
+def calculate_thermal_space_load_ratio(thermal_space: pd.Series, total_load: pd.Series) -> pd.Series:
+    ratio = pd.to_numeric(thermal_space, errors="coerce") / pd.to_numeric(total_load, errors="coerce").replace(0, np.nan)
+    return ratio.replace([np.inf, -np.inf], np.nan)
+
+
+def load_holiday_calendar(holiday_file: str | Path | None) -> dict[pd.Timestamp, str]:
     if not holiday_file:
-        return set()
+        return {}
     holiday_path = Path(holiday_file)
     if not holiday_path.exists():
         raise FileNotFoundError(f"节假日文件不存在: {holiday_path}")
@@ -412,14 +483,36 @@ def load_holiday_dates(holiday_file: str | Path | None) -> set[pd.Timestamp]:
     else:
         holiday_df = pd.read_excel(holiday_path)
     if holiday_df.empty:
-        return set()
+        return {}
     date_series = holiday_df["date"] if "date" in holiday_df.columns else holiday_df.iloc[:, 0]
-    return set(pd.to_datetime(date_series, errors="coerce").dropna().dt.normalize().tolist())
+    parsed_dates = pd.to_datetime(date_series, errors="coerce").dt.normalize()
+    if "type" in holiday_df.columns:
+        type_series = holiday_df["type"].astype(str).str.strip().str.lower()
+    else:
+        type_series = pd.Series(["holiday"] * len(holiday_df), index=holiday_df.index)
+    calendar: dict[pd.Timestamp, str] = {}
+    for date_value, type_value in zip(parsed_dates, type_series):
+        if pd.isna(date_value):
+            continue
+        normalized_type = str(type_value).strip().lower()
+        if normalized_type in {"holiday", "节假日", "法定节假日", "休息日"}:
+            calendar[pd.Timestamp(date_value)] = "holiday"
+        elif normalized_type in {"workday", "working_day", "调休上班", "工作日"}:
+            calendar[pd.Timestamp(date_value)] = "workday"
+    return calendar
 
 
-def day_type_of(date_value: pd.Timestamp, holiday_dates: set[pd.Timestamp]) -> str:
+def load_holiday_dates(holiday_file: str | Path | None) -> set[pd.Timestamp]:
+    return {date_value for date_value, day_type in load_holiday_calendar(holiday_file).items() if day_type == "holiday"}
+
+
+def day_type_of(date_value: pd.Timestamp, holiday_dates: set[pd.Timestamp] | dict[pd.Timestamp, str]) -> str:
     normalized = pd.Timestamp(date_value).normalize()
-    if normalized in holiday_dates:
+    if isinstance(holiday_dates, dict):
+        override = holiday_dates.get(normalized)
+        if override in {"holiday", "workday"}:
+            return override
+    elif normalized in holiday_dates:
         return "holiday"
     if normalized.weekday() >= 5:
         return "weekend"
@@ -627,6 +720,10 @@ class DayAheadDataBuilder:
 
         periods = np.arange(1, 97)
         date_value = trade_date.normalize()
+        day_type = day_type_of(date_value, self.holiday_dates)
+        total_load = to_numeric(day_df[total_power_col])
+        renewable_power = to_numeric(day_df[power_col])
+        thermal_space = total_load - renewable_power
         result = pd.DataFrame(
             {
                 "date": date_value,
@@ -634,9 +731,13 @@ class DayAheadDataBuilder:
                 "hour": ((periods - 1) // 4).astype(int),
                 "weekday": int(date_value.weekday()),
                 "month": int(date_value.month),
-                "is_weekend": int(date_value.weekday() >= 5),
-                "is_holiday": int(date_value in self.holiday_dates),
-                "net_load": to_numeric(day_df[total_power_col]) - to_numeric(day_df[power_col]),
+                "is_weekend": int(day_type == "weekend"),
+                "is_holiday": int(day_type == "holiday"),
+                DAY_TYPE_COLUMN: day_type,
+                TOTAL_LOAD_COLUMN: total_load,
+                "net_load": thermal_space,
+                RENEWABLE_POWER_COLUMN: renewable_power,
+                THERMAL_SPACE_LOAD_RATIO_COLUMN: calculate_thermal_space_load_ratio(thermal_space, total_load),
                 "thermal_on_capacity": to_numeric(thermal_series),
                 "overview_text": overview_series,
                 "sheet_name": sheet_name,
@@ -687,6 +788,102 @@ def nearest_similarity_price(target_loads: np.ndarray, ref_loads: np.ndarray, re
     return weighted_price, min_gap
 
 
+def normalize_similarity_reference_days(reference_days: int | None) -> int:
+    value = int(reference_days or DEFAULT_SIMILARITY_REFERENCE_DAYS)
+    if value <= 0:
+        raise ValueError("similarity_reference_days 必须大于等于 1")
+    return value
+
+
+def day_type_penalty(target_type: object, reference_types: pd.Series) -> pd.Series:
+    target_text = str(target_type or "").strip().lower()
+    reference_text = reference_types.astype(str).str.strip().str.lower()
+    return (reference_text != target_text).astype(float)
+
+
+def normalized_numeric_gap(target_value: object, reference_values: pd.Series) -> pd.Series:
+    numeric_reference = pd.to_numeric(reference_values, errors="coerce")
+    numeric_target = pd.to_numeric(pd.Series([target_value]), errors="coerce").iloc[0]
+    if pd.isna(numeric_target):
+        return pd.Series(np.nan, index=reference_values.index, dtype=float)
+    normalizer = max(float(abs(numeric_target)), float(numeric_reference.abs().median(skipna=True) or 0.0), 1.0)
+    return (numeric_reference - float(numeric_target)).abs() / normalizer
+
+
+def ensure_similarity_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if TOTAL_LOAD_COLUMN not in result.columns:
+        result[TOTAL_LOAD_COLUMN] = np.nan
+    if RENEWABLE_POWER_COLUMN not in result.columns:
+        result[RENEWABLE_POWER_COLUMN] = np.nan
+    if "thermal_on_capacity" not in result.columns:
+        result["thermal_on_capacity"] = np.nan
+    if THERMAL_SPACE_LOAD_RATIO_COLUMN not in result.columns:
+        thermal_space = result["net_load"] if "net_load" in result.columns else pd.Series([np.nan] * len(result), index=result.index)
+        result[THERMAL_SPACE_LOAD_RATIO_COLUMN] = calculate_thermal_space_load_ratio(thermal_space, result[TOTAL_LOAD_COLUMN])
+    if DAY_TYPE_COLUMN not in result.columns:
+        if "date" in result.columns:
+            result[DAY_TYPE_COLUMN] = pd.to_datetime(result["date"], errors="coerce").map(lambda value: day_type_of(value, set()) if pd.notna(value) else "")
+        else:
+            result[DAY_TYPE_COLUMN] = ""
+    return result
+
+
+def nearest_multicondition_similarity_price(
+    target_df: pd.DataFrame,
+    reference_df: pd.DataFrame,
+    k: int = 3,
+    similarity_weights: dict[str, object] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    target_frame = ensure_similarity_columns(target_df)
+    reference_frame = ensure_similarity_columns(reference_df)
+    weights = normalize_similarity_weights(similarity_weights)
+    similar_prices: list[float] = []
+    similar_gaps: list[float] = []
+    for _, target_row in target_frame.iterrows():
+        candidates = reference_frame[reference_frame["period"].astype(int) == int(target_row["period"])].copy()
+        candidates = candidates.dropna(subset=[TARGET_COLUMN])
+        if candidates.empty:
+            similar_prices.append(np.nan)
+            similar_gaps.append(np.nan)
+            continue
+        score = pd.Series(0.0, index=candidates.index)
+        used_weight = pd.Series(0.0, index=candidates.index)
+        for weight_key, weight in weights.items():
+            column = SIMILARITY_WEIGHT_COLUMN_MAP[weight_key]
+            if column == DAY_TYPE_COLUMN:
+                gap = day_type_penalty(target_row.get(DAY_TYPE_COLUMN), candidates[DAY_TYPE_COLUMN])
+            else:
+                gap = normalized_numeric_gap(target_row.get(column), candidates[column])
+            valid = gap.notna()
+            score.loc[valid] += gap.loc[valid] * weight
+            used_weight.loc[valid] += weight
+        score = score.where(used_weight <= 0, score / used_weight.clip(lower=1e-9))
+        score = score.replace([np.inf, -np.inf], np.nan).fillna(float("inf"))
+        top_k = min(k, len(candidates))
+        selected_index = score.nsmallest(top_k).index
+        selected_score = score.loc[selected_index].to_numpy(dtype=float)
+        selected_prices = candidates.loc[selected_index, TARGET_COLUMN].to_numpy(dtype=float)
+        weights = 1.0 / (selected_score + 1e-6)
+        similar_prices.append(float(np.sum(weights * selected_prices) / np.sum(weights)))
+        similar_gaps.append(float(np.min(selected_score)))
+    return np.asarray(similar_prices), np.asarray(similar_gaps)
+
+
+def attach_multicondition_similarity_features(
+    target_df: pd.DataFrame,
+    reference_df: pd.DataFrame,
+    k: int = 3,
+    similarity_weights: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    result = ensure_similarity_columns(target_df)
+    reference_frame = ensure_similarity_columns(reference_df)
+    similar_price, similar_gap = nearest_multicondition_similarity_price(result, reference_frame, k=k, similarity_weights=similarity_weights)
+    result[SIMILAR_PRICE_COLUMN] = similar_price
+    result[SIMILAR_GAP_COLUMN] = similar_gap
+    return result
+
+
 def attach_lag_96(base_df: pd.DataFrame, history_df: pd.DataFrame) -> pd.DataFrame:
     history_price = history_df[["date", "period", TARGET_COLUMN]].copy()
     history_price["lag_date"] = history_price["date"] + pd.Timedelta(days=1)
@@ -694,24 +891,34 @@ def attach_lag_96(base_df: pd.DataFrame, history_df: pd.DataFrame) -> pd.DataFra
     return base_df.merge(history_price[["lag_date", "period", "lag_96"]], left_on=["date", "period"], right_on=["lag_date", "period"], how="left").drop(columns=["lag_date"])
 
 
-def attach_similarity_features(history_df: pd.DataFrame) -> pd.DataFrame:
-    result = history_df.copy()
+def attach_similarity_features(
+    history_df: pd.DataFrame,
+    reference_days: int | None = None,
+    similarity_weights: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    result = ensure_similarity_columns(history_df)
     result[SIMILAR_PRICE_COLUMN] = np.nan
     result[SIMILAR_GAP_COLUMN] = np.nan
+    result[NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN] = np.nan
+    result[NET_LOAD_ONLY_SIMILAR_GAP_COLUMN] = np.nan
     unique_dates = sorted(pd.to_datetime(result["date"]).drop_duplicates().tolist())
+    reference_days = normalize_similarity_reference_days(reference_days)
     for index in range(1, len(unique_dates)):
         current_date = unique_dates[index]
-        ref_date = unique_dates[index - 1]
-        ref_day = result[result["date"] == ref_date]
+        ref_dates = unique_dates[max(0, index - reference_days):index]
+        ref_day = result[result["date"].isin(ref_dates)]
         current_mask = result["date"] == current_date
         current_day = result.loc[current_mask]
+        multi_price, multi_gap = nearest_multicondition_similarity_price(current_day, ref_day, similarity_weights=similarity_weights)
         similar_price, similar_gap = nearest_similarity_price(
             current_day["net_load"].to_numpy(dtype=float),
             ref_day["net_load"].to_numpy(dtype=float),
             ref_day[TARGET_COLUMN].to_numpy(dtype=float),
         )
-        result.loc[current_mask, SIMILAR_PRICE_COLUMN] = similar_price
-        result.loc[current_mask, SIMILAR_GAP_COLUMN] = similar_gap
+        result.loc[current_mask, SIMILAR_PRICE_COLUMN] = multi_price
+        result.loc[current_mask, SIMILAR_GAP_COLUMN] = multi_gap
+        result.loc[current_mask, NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN] = similar_price
+        result.loc[current_mask, NET_LOAD_ONLY_SIMILAR_GAP_COLUMN] = similar_gap
     result[RESIDUAL_TARGET_COLUMN] = result[TARGET_COLUMN] - result[SIMILAR_PRICE_COLUMN]
     return result
 
@@ -767,22 +974,32 @@ def build_training_frame(
             "end_date": config.end_date,
         },
     )
-    feature_cache_key = derived_cache_key(history_signature["cache_key"], "training_features")
+    similarity_reference_days = normalize_similarity_reference_days(config.similarity_reference_days)
+    similarity_weights = normalize_similarity_weights(config.similarity_weights)
+    weights_cache_key = json.dumps(dict(similarity_weights), ensure_ascii=False, sort_keys=True)
+    feature_cache_key = derived_cache_key(
+        history_signature["cache_key"],
+        f"training_features_{similarity_reference_days}_lag_{int(config.use_lag_96)}_weights_{weights_cache_key}",
+    )
     feature_cache_dir = config.model_root / "cache"
     cached_features = load_dataframe_cache(feature_cache_dir, "training_features", feature_cache_key)
     if cached_features is not None:
         history_df, _ = cached_features
         emit_progress(progress_callback, "训练特征未变化，已复用缓存", 21)
     else:
-        emit_progress(progress_callback, "正在构建 lag_96 特征", 19)
-        history_df = attach_lag_96(history_df, history_df)
+        if config.use_lag_96:
+            emit_progress(progress_callback, "正在构建 lag_96 特征", 19)
+            history_df = attach_lag_96(history_df, history_df)
         emit_progress(progress_callback, "正在构建相似法特征", 20)
-        history_df = attach_similarity_features(history_df)
+        history_df = attach_similarity_features(history_df, similarity_reference_days, similarity_weights=similarity_weights)
         save_dataframe_cache(feature_cache_dir, "training_features", feature_cache_key, history_df, skipped_sheets)
         emit_progress(progress_callback, "相似法特征构建完成", 21)
     history_df = filter_date_range(history_df, config.start_date, config.end_date)
     emit_progress(progress_callback, "正在过滤日期范围", 22)
-    history_df = history_df.dropna(subset=[TARGET_COLUMN, "lag_96", SIMILAR_PRICE_COLUMN, RESIDUAL_TARGET_COLUMN]).reset_index(drop=True)
+    required_columns = [TARGET_COLUMN, SIMILAR_PRICE_COLUMN, RESIDUAL_TARGET_COLUMN]
+    if config.use_lag_96:
+        required_columns.append(LAG_96_COLUMN)
+    history_df = history_df.dropna(subset=required_columns).reset_index(drop=True)
     if history_df.empty:
         raise ValueError("数据加载后经清洗为空，请检查历史数据文件是否包含有效数据。")
     return history_df, skipped_sheets, quality_report_path
@@ -808,6 +1025,7 @@ def train_segment_models(
     output_dir: Path,
     valid_days: int,
     num_boost_round: int,
+    feature_columns: list[str],
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[dict[str, dict[str, float | int | None]], list[str], list[str]]:
     import xgboost as xgb
@@ -825,7 +1043,7 @@ def train_segment_models(
         if segment_df.empty:
             raise ValueError(f"时段 {segment_name} 无训练数据")
         train_df, valid_df = split_train_valid(segment_df, valid_days)
-        dtrain = make_dmatrix(train_df, FEATURE_COLUMNS, RESIDUAL_TARGET_COLUMN)
+        dtrain = make_dmatrix(train_df, feature_columns, RESIDUAL_TARGET_COLUMN)
         evals = [(dtrain, "train")]
         train_kwargs = {
             "params": DEFAULT_XGB_PARAMS,
@@ -835,7 +1053,7 @@ def train_segment_models(
             "verbose_eval": False,
         }
         if not valid_df.empty:
-            dvalid = make_dmatrix(valid_df, FEATURE_COLUMNS, RESIDUAL_TARGET_COLUMN)
+            dvalid = make_dmatrix(valid_df, feature_columns, RESIDUAL_TARGET_COLUMN)
             evals.append((dvalid, "valid"))
             train_kwargs["early_stopping_rounds"] = 50
         booster = xgb.train(**train_kwargs)
@@ -883,6 +1101,37 @@ def append_jsonl(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+def training_preferences_path(model_root: str | Path = DEFAULT_MODEL_ROOT) -> Path:
+    return Path(model_root) / "training_preferences.json"
+
+
+def default_training_preferences() -> dict:
+    return {"similarity_weights": dict(normalize_similarity_weights())}
+
+
+def load_training_preferences(model_root: str | Path = DEFAULT_MODEL_ROOT) -> dict:
+    path = training_preferences_path(model_root)
+    if not path.exists():
+        return default_training_preferences()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default_training_preferences()
+    preferences = default_training_preferences()
+    if isinstance(data, dict) and isinstance(data.get("similarity_weights"), dict):
+        preferences["similarity_weights"] = dict(normalize_similarity_weights(data["similarity_weights"]))
+    return preferences
+
+
+def save_training_preferences(model_root: str | Path, preferences: dict) -> dict:
+    current = load_training_preferences(model_root)
+    if isinstance(preferences.get("similarity_weights"), dict):
+        current["similarity_weights"] = dict(normalize_similarity_weights(preferences["similarity_weights"]))
+    path = training_preferences_path(model_root)
+    write_json(path, current)
+    return current
 
 
 def default_model_pointer_path(model_root: Path) -> Path:
@@ -961,11 +1210,14 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     staging_dir = config.model_root / "_staging" / run_id
     staging_dir.mkdir(parents=True, exist_ok=True)
+    feature_columns = training_feature_columns(config)
+    similarity_weights = normalize_similarity_weights(config.similarity_weights)
     metrics_summary, train_dates, valid_dates = train_segment_models(
         history_df,
         staging_dir,
         config.valid_days,
         config.num_boost_round,
+        feature_columns,
         progress_callback=progress_callback,
     )
 
@@ -973,10 +1225,13 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "target_column": TARGET_COLUMN,
-        "feature_columns": FEATURE_COLUMNS,
+        "feature_columns": feature_columns,
         "segments": [{"name": name, "start": start, "end": end} for name, (start, end) in SEGMENTS.items()],
         "valid_days": config.valid_days,
         "num_boost_round": config.num_boost_round,
+        "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
+        "similarity_weights": dict(similarity_weights),
+        "use_lag_96": bool(config.use_lag_96),
         "xgboost_params": DEFAULT_XGB_PARAMS,
         "train_start_date": train_dates[0] if train_dates else None,
         "train_end_date": train_dates[-1] if train_dates else None,
@@ -990,6 +1245,9 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
             "holiday_file": str(config.holiday_file) if config.holiday_file else None,
             "start_date": config.start_date,
             "end_date": config.end_date,
+            "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
+            "similarity_weights": dict(similarity_weights),
+            "use_lag_96": bool(config.use_lag_96),
         },
         "blend_method": "similarity_baseline_plus_xgboost_residual",
         "metrics": metrics_summary,
@@ -1012,6 +1270,9 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "sample_rows": metadata["sample_rows"],
         "start_date_filter": config.start_date,
         "end_date_filter": config.end_date,
+        "use_lag_96": bool(config.use_lag_96),
+        "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
+        "similarity_weights": dict(similarity_weights),
         "metrics": metrics_summary,
     }
     append_jsonl(config.model_root / "training_runs.jsonl", log_entry)
@@ -1086,7 +1347,12 @@ def resolve_forecast_template_column(columns: Iterable[object], target_date: pd.
     return resolve_column(names, candidates, required=required)
 
 
-def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.Timestamp], default_year: int) -> tuple[pd.DataFrame | None, pd.DataFrame | None, list[DataQualityIssue]]:
+def try_load_forecast_template(
+    forecast_file: str | Path,
+    holiday_dates: set[pd.Timestamp],
+    default_year: int,
+    require_lag_96: bool = True,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None, list[DataQualityIssue]]:
     workbook = pd.read_excel(forecast_file, sheet_name=None)
     non_empty_sheets = [(str(name), df) for name, df in workbook.items() if not df.empty and len(df.columns) > 0]
     if not non_empty_sheets:
@@ -1109,23 +1375,24 @@ def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.
         file_path=Path(forecast_file),
         sheet_name=template_sheet_name,
         default_year=default_year,
+        require_reference_price=require_lag_96,
     )
     if has_blocking_issues(quality_issues):
         raise DataQualityValidationError("预测文件关键字段异常，已停止预测", quality_issues)
 
     target_date = unique_dates[-1]
     reference_date = unique_dates[-2]
-    target_net_load_col = resolve_forecast_template_column(raw_df.columns, target_date, ["剩余电力值(MW)", "剩余电力值"], required=False)
+    target_net_load_col = resolve_forecast_template_column(raw_df.columns, target_date, ["剩余电力值(MW)", "剩余电力值", "火电空间", "火电剩余空间"], required=False)
     target_total_col = resolve_forecast_template_column(raw_df.columns, target_date, ["总加电力值(MW)", "总加电力值"], required=False)
     target_power_col = resolve_forecast_template_column(raw_df.columns, target_date, ["风光电力值(MW)", "风光电力值", "电力值(MW)", "电力值"], required=False)
-    reference_net_load_col = resolve_forecast_template_column(raw_df.columns, reference_date, ["剩余电力值(MW)", "剩余电力值"], required=False)
+    reference_net_load_col = resolve_forecast_template_column(raw_df.columns, reference_date, ["剩余电力值(MW)", "剩余电力值", "火电空间", "火电剩余空间"], required=False)
     reference_total_col = resolve_forecast_template_column(raw_df.columns, reference_date, ["总加电力值(MW)", "总加电力值"], required=False)
     reference_power_col = resolve_forecast_template_column(raw_df.columns, reference_date, ["风光电力值(MW)", "风光电力值", "电力值(MW)", "电力值"], required=False)
     reference_price_col = resolve_forecast_template_column(
         raw_df.columns,
         reference_date,
         ["日前出清价格(元/MWh)", "日前-出清价格(元/MWh)", "日前出清价格", "出清价格"],
-        required=True,
+        required=require_lag_96,
     )
     thermal_col = resolve_column(raw_df.columns, ["火电开机容量(MW)", "火电开机容量", "运行机组容量"], required=False)
     period_col = resolve_column(raw_df.columns, ["序号", "时段", "period"], required=False)
@@ -1135,10 +1402,19 @@ def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.
             return to_numeric(df[net_col])
         if total_col and power_col:
             return to_numeric(df[total_col]) - to_numeric(df[power_col])
-        raise KeyError("预测文件缺少净负荷相关字段")
+        raise KeyError("预测文件缺少火电空间相关字段")
+
+    def build_total_load(df: pd.DataFrame, total_col: str | None) -> pd.Series:
+        if total_col:
+            return to_numeric(df[total_col])
+        return pd.Series([np.nan] * len(df), index=df.index)
 
     target_net_load = build_net_load(raw_df, target_net_load_col, target_total_col, target_power_col)
     reference_net_load = build_net_load(raw_df, reference_net_load_col, reference_total_col, reference_power_col)
+    target_total_load = build_total_load(raw_df, target_total_col)
+    reference_total_load = build_total_load(raw_df, reference_total_col)
+    target_renewable_power = to_numeric(raw_df[target_power_col]) if target_power_col else pd.Series([np.nan] * len(raw_df))
+    reference_renewable_power = to_numeric(raw_df[reference_power_col]) if reference_power_col else pd.Series([np.nan] * len(raw_df))
     thermal_series = pd.Series([np.nan] * len(raw_df))
     if thermal_col:
         thermal_series = to_numeric(raw_df[thermal_col]).ffill().bfill()
@@ -1147,6 +1423,7 @@ def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.
         raise ValueError("预测文件有效行数不足 96")
     periods = periods[:96]
     target_date = target_date.normalize()
+    target_day_type = day_type_of(target_date, holiday_dates)
     forecast_df = pd.DataFrame(
         {
             "date": target_date,
@@ -1154,31 +1431,48 @@ def try_load_forecast_template(forecast_file: str | Path, holiday_dates: set[pd.
             "hour": ((periods - 1) // 4).astype(int),
             "weekday": int(target_date.weekday()),
             "month": int(target_date.month),
-            "is_weekend": int(target_date.weekday() >= 5),
-            "is_holiday": int(target_date in holiday_dates),
+            "is_weekend": int(target_day_type == "weekend"),
+            "is_holiday": int(target_day_type == "holiday"),
+            DAY_TYPE_COLUMN: target_day_type,
+            TOTAL_LOAD_COLUMN: target_total_load.iloc[:96].to_numpy(),
             "net_load": target_net_load.iloc[:96].to_numpy(),
+            RENEWABLE_POWER_COLUMN: target_renewable_power.iloc[:96].to_numpy(),
+            THERMAL_SPACE_LOAD_RATIO_COLUMN: calculate_thermal_space_load_ratio(target_net_load, target_total_load).iloc[:96].to_numpy(),
             "thermal_on_capacity": thermal_series.iloc[:96].to_numpy(),
-            "lag_96": to_numeric(raw_df[reference_price_col]).iloc[:96].to_numpy(),
             "sheet_name": "forecast_template",
             "source_file": str(forecast_file),
         }
     )
+    if reference_price_col:
+        forecast_df[LAG_96_COLUMN] = to_numeric(raw_df[reference_price_col]).iloc[:96].to_numpy()
     forecast_df["segment"] = assign_segments(forecast_df["period"])
 
-    reference_df = pd.DataFrame(
-        {
-            "date": reference_date.normalize(),
-            "period": periods,
-            "net_load": reference_net_load.iloc[:96].to_numpy(),
-            TARGET_COLUMN: to_numeric(raw_df[reference_price_col]).iloc[:96].to_numpy(),
-        }
-    )
+    reference_df = None
+    if reference_price_col:
+        reference_df = pd.DataFrame(
+            {
+                "date": reference_date.normalize(),
+                "period": periods,
+                TOTAL_LOAD_COLUMN: reference_total_load.iloc[:96].to_numpy(),
+                "net_load": reference_net_load.iloc[:96].to_numpy(),
+                RENEWABLE_POWER_COLUMN: reference_renewable_power.iloc[:96].to_numpy(),
+                THERMAL_SPACE_LOAD_RATIO_COLUMN: calculate_thermal_space_load_ratio(reference_net_load, reference_total_load).iloc[:96].to_numpy(),
+                "thermal_on_capacity": thermal_series.iloc[:96].to_numpy(),
+                DAY_TYPE_COLUMN: day_type_of(reference_date, holiday_dates),
+                TARGET_COLUMN: to_numeric(raw_df[reference_price_col]).iloc[:96].to_numpy(),
+            }
+        )
     return forecast_df, reference_df, quality_issues
 
 
-def load_forecast_generic(history_df: pd.DataFrame, forecast_file: str | Path, holiday_dates: set[pd.Timestamp]) -> tuple[pd.DataFrame, pd.DataFrame | None, list[DataQualityIssue]]:
+def load_forecast_generic(
+    history_df: pd.DataFrame,
+    forecast_file: str | Path,
+    holiday_dates: set[pd.Timestamp],
+    require_lag_96: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame | None, list[DataQualityIssue]]:
     default_year = int(pd.to_datetime(history_df["date"]).max().year)
-    template_df, template_reference, quality_issues = try_load_forecast_template(forecast_file, holiday_dates, default_year)
+    template_df, template_reference, quality_issues = try_load_forecast_template(forecast_file, holiday_dates, default_year, require_lag_96=require_lag_96)
     if template_df is not None:
         return template_df, template_reference, quality_issues
 
@@ -1228,6 +1522,10 @@ def load_forecast_generic(history_df: pd.DataFrame, forecast_file: str | Path, h
         if thermal_col:
             thermal_series = to_numeric(day_df[thermal_col]).combine_first(to_numeric(thermal_series))
         periods = np.arange(1, 97)
+        day_type = day_type_of(trade_date.normalize(), holiday_dates)
+        total_load = to_numeric(day_df[total_power_col])
+        renewable_power = to_numeric(day_df[power_col])
+        thermal_space = total_load - renewable_power
         result = pd.DataFrame(
             {
                 "date": trade_date.normalize(),
@@ -1235,9 +1533,13 @@ def load_forecast_generic(history_df: pd.DataFrame, forecast_file: str | Path, h
                 "hour": ((periods - 1) // 4).astype(int),
                 "weekday": int(trade_date.weekday()),
                 "month": int(trade_date.month),
-                "is_weekend": int(trade_date.weekday() >= 5),
-                "is_holiday": int(trade_date.normalize() in holiday_dates),
-                "net_load": to_numeric(day_df[total_power_col]) - to_numeric(day_df[power_col]),
+                "is_weekend": int(day_type == "weekend"),
+                "is_holiday": int(day_type == "holiday"),
+                DAY_TYPE_COLUMN: day_type,
+                TOTAL_LOAD_COLUMN: total_load,
+                "net_load": thermal_space,
+                RENEWABLE_POWER_COLUMN: renewable_power,
+                THERMAL_SPACE_LOAD_RATIO_COLUMN: calculate_thermal_space_load_ratio(thermal_space, total_load),
                 "thermal_on_capacity": to_numeric(thermal_series),
                 "sheet_name": sheet_name,
                 "source_file": str(forecast_file),
@@ -1315,8 +1617,22 @@ def build_reference_frame(
             return True
         return day_type_of(ref_date, holiday_dates) == forecast_day_type
 
+    def reference_columns(frame: pd.DataFrame) -> list[str]:
+        desired = [
+            "date",
+            "period",
+            TOTAL_LOAD_COLUMN,
+            "net_load",
+            RENEWABLE_POWER_COLUMN,
+            THERMAL_SPACE_LOAD_RATIO_COLUMN,
+            "thermal_on_capacity",
+            DAY_TYPE_COLUMN,
+            TARGET_COLUMN,
+        ]
+        return [column for column in desired if column in frame.columns]
+
     if template_reference_df is not None and not template_reference_df.empty and len(selected_dates) < reference_days:
-        template_reference = template_reference_df[["date", "period", "net_load", TARGET_COLUMN]].copy()
+        template_reference = template_reference_df[reference_columns(template_reference_df)].copy()
         template_reference["date"] = pd.to_datetime(template_reference["date"], errors="coerce").dt.normalize()
         template_date = pd.to_datetime(template_reference["date"]).iloc[0].normalize()
         if is_eligible_reference(template_date):
@@ -1332,7 +1648,7 @@ def build_reference_frame(
     for ref_date in recent_history_dates:
         if len(selected_dates) >= reference_days:
             break
-        history_reference = history_df.loc[history_dates == ref_date, ["date", "period", "net_load", TARGET_COLUMN]].copy()
+        history_reference = history_df.loc[history_dates == ref_date, reference_columns(history_df)].copy()
         if history_reference.empty:
             continue
         selected_frames.append(history_reference)
@@ -1348,27 +1664,44 @@ def build_reference_frame(
 
     reference_df = pd.concat(selected_frames, ignore_index=True)
     reference_df["date"] = pd.to_datetime(reference_df["date"], errors="coerce").dt.normalize()
+    reference_df = ensure_similarity_columns(reference_df)
     reference_df = reference_df.dropna(subset=["net_load", TARGET_COLUMN]).reset_index(drop=True)
     if reference_df.empty:
-        raise ValueError("参考日样本缺少有效净负荷或价格数据，无法构造相似法特征")
+        raise ValueError("参考日样本缺少有效火电空间或价格数据，无法构造相似法特征")
     reference_dates = [pd.Timestamp(ref_date).strftime("%Y-%m-%d") for ref_date in selected_dates]
     return reference_df, reference_dates
 
 
-def attach_forecast_similarity_features(forecast_df: pd.DataFrame, reference_df: pd.DataFrame) -> pd.DataFrame:
-    result = forecast_df.copy()
+def attach_forecast_similarity_features(
+    forecast_df: pd.DataFrame,
+    reference_df: pd.DataFrame,
+    similarity_weights: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    result = attach_multicondition_similarity_features(forecast_df, reference_df, similarity_weights=similarity_weights)
     similar_price, similar_gap = nearest_similarity_price(
         result["net_load"].to_numpy(dtype=float),
         reference_df["net_load"].to_numpy(dtype=float),
         reference_df[TARGET_COLUMN].to_numpy(dtype=float),
     )
-    result[SIMILAR_PRICE_COLUMN] = similar_price
-    result[SIMILAR_GAP_COLUMN] = similar_gap
+    result[NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN] = similar_price
+    result[NET_LOAD_ONLY_SIMILAR_GAP_COLUMN] = similar_gap
     return result
 
 
 def clip_price_series(values: pd.Series | np.ndarray) -> pd.Series | np.ndarray:
     return np.clip(values, PRICE_FLOOR, PRICE_CAP)
+
+
+def ensure_prediction_lag_96(forecast_df: pd.DataFrame, history_df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+    if not model_requires_lag_96(metadata):
+        return forecast_df
+    result = forecast_df
+    if LAG_96_COLUMN not in result.columns:
+        result = attach_lag_96(result, history_df)
+    if result[LAG_96_COLUMN].isna().any():
+        missing = result.loc[result[LAG_96_COLUMN].isna(), ["date", "period"]].head(10)
+        raise ValueError(f"Missing lag_96 for date/period:\n{missing.to_string(index=False)}")
+    return result
 
 
 def prepare_prediction_inputs(
@@ -1406,9 +1739,16 @@ def prepare_prediction_inputs(
         exc.report_path = report_path
         raise
     emit_progress(progress_callback, "历史数据加载完成，正在加载预测文件", 20)
+    emit_progress(progress_callback, "正在加载当前默认模型", 21)
+    metadata, models, _ = load_models(model_root)
     quality_issues = list(history_quality_issues)
     try:
-        forecast_df, template_reference_df, forecast_quality_issues = load_forecast_generic(history_df, forecast_file, holiday_dates)
+        forecast_df, template_reference_df, forecast_quality_issues = load_forecast_generic(
+            history_df,
+            forecast_file,
+            holiday_dates,
+            require_lag_96=model_requires_lag_96(metadata),
+        )
         quality_issues.extend(forecast_quality_issues)
     except DataQualityValidationError as exc:
         quality_issues.extend(exc.issues)
@@ -1420,13 +1760,8 @@ def prepare_prediction_inputs(
         )
         exc.report_path = report_path
         raise
-    if "lag_96" not in forecast_df.columns:
-        forecast_df = attach_lag_96(forecast_df, history_df)
-    if forecast_df["lag_96"].isna().any():
-        missing = forecast_df.loc[forecast_df["lag_96"].isna(), ["date", "period"]].head(10)
-        raise ValueError(f"Missing lag_96 for date/period:\n{missing.to_string(index=False)}")
-    emit_progress(progress_callback, "正在加载当前默认模型", 45)
-    metadata, models, _ = load_models(model_root)
+    forecast_df = ensure_prediction_lag_96(forecast_df, history_df, metadata)
+    emit_progress(progress_callback, "预测输入准备完成", 45)
     report_path = save_quality_report(
         task_type="predict",
         status=quality_report_status(quality_issues),
@@ -1459,7 +1794,9 @@ def run_prediction_with_strategy(
         reference_strategy=strategy_key,
         holiday_dates=holiday_dates,
     )
-    strategy_forecast_df = attach_forecast_similarity_features(forecast_df, reference_df)
+    metadata_weights = metadata.get("similarity_weights")
+    model_similarity_weights = normalize_similarity_weights(metadata_weights, fill_missing_with_defaults=False) if metadata_weights else None
+    strategy_forecast_df = attach_forecast_similarity_features(forecast_df, reference_df, similarity_weights=model_similarity_weights)
 
     prediction_frames: list[pd.DataFrame] = []
     total_segments = len(metadata["segments"])
@@ -1619,20 +1956,22 @@ def predict_prices_compare(
 
 def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:
     output_path = Path(output_file)
-    export_df = result_df[
-        [
-            "date",
-            "period",
-            "segment",
-            "hour",
-            "net_load",
-            "thermal_on_capacity",
-            "lag_96",
-            SIMILAR_PRICE_COLUMN,
-            "residual_pred",
-            "predicted_price",
-        ]
-    ].copy()
+    export_columns = [
+        "date",
+        "period",
+        "segment",
+        "hour",
+        "net_load",
+        RENEWABLE_POWER_COLUMN,
+        "thermal_on_capacity",
+        DAY_TYPE_COLUMN,
+        LAG_96_COLUMN,
+        SIMILAR_PRICE_COLUMN,
+        NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN,
+        "residual_pred",
+        "predicted_price",
+    ]
+    export_df = result_df[[column for column in export_columns if column in result_df.columns]].copy()
     export_df["date"] = pd.to_datetime(export_df["date"]).dt.strftime("%Y-%m-%d")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.suffix.lower() == ".csv":
@@ -1686,6 +2025,71 @@ def read_model_metadata(model_dir: Path) -> dict | None:
     return json.loads(metadata_path.read_text(encoding="utf-8"))
 
 
+def summarize_model_quality_metrics(metrics: dict | None) -> dict[str, float | None]:
+    if not isinstance(metrics, dict) or not metrics:
+        return {
+            "baseline_mae": None,
+            "baseline_rmse": None,
+            "final_mae": None,
+            "final_rmse": None,
+        }
+
+    total_valid_rows = 0.0
+    baseline_mae_weighted = 0.0
+    baseline_rmse_squared_weighted = 0.0
+    final_mae_weighted = 0.0
+    final_rmse_squared_weighted = 0.0
+
+    for segment_metrics in metrics.values():
+        if not isinstance(segment_metrics, dict):
+            continue
+        valid_rows = segment_metrics.get("valid_rows")
+        if valid_rows is None:
+            continue
+        try:
+            valid_rows_value = float(valid_rows)
+        except (TypeError, ValueError):
+            continue
+        if valid_rows_value <= 0:
+            continue
+
+        baseline_mae = segment_metrics.get("baseline_mae")
+        baseline_rmse = segment_metrics.get("baseline_rmse")
+        final_mae = segment_metrics.get("final_mae")
+        final_rmse = segment_metrics.get("final_rmse")
+        if any(value is None for value in (baseline_mae, baseline_rmse, final_mae, final_rmse)):
+            continue
+
+        try:
+            baseline_mae_value = float(baseline_mae)
+            baseline_rmse_value = float(baseline_rmse)
+            final_mae_value = float(final_mae)
+            final_rmse_value = float(final_rmse)
+        except (TypeError, ValueError):
+            continue
+
+        total_valid_rows += valid_rows_value
+        baseline_mae_weighted += valid_rows_value * baseline_mae_value
+        baseline_rmse_squared_weighted += valid_rows_value * (baseline_rmse_value**2)
+        final_mae_weighted += valid_rows_value * final_mae_value
+        final_rmse_squared_weighted += valid_rows_value * (final_rmse_value**2)
+
+    if total_valid_rows <= 0:
+        return {
+            "baseline_mae": None,
+            "baseline_rmse": None,
+            "final_mae": None,
+            "final_rmse": None,
+        }
+
+    return {
+        "baseline_mae": round(baseline_mae_weighted / total_valid_rows, 4),
+        "baseline_rmse": round(float(np.sqrt(baseline_rmse_squared_weighted / total_valid_rows)), 4),
+        "final_mae": round(final_mae_weighted / total_valid_rows, 4),
+        "final_rmse": round(float(np.sqrt(final_rmse_squared_weighted / total_valid_rows)), 4),
+    }
+
+
 def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
     current_dir, previous_dir, history_dir = ensure_model_dirs(model_root)
     current_metadata = read_model_metadata(current_dir)
@@ -1703,6 +2107,7 @@ def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
         metadata = read_model_metadata(run_dir)
         if metadata is None:
             continue
+        quality_metrics = summarize_model_quality_metrics(metadata.get("metrics"))
         rows.append(
             {
                 "version_key": run_dir.name,
@@ -1714,6 +2119,10 @@ def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
                 "is_default": metadata.get("run_id") == current_run_id,
                 "is_previous": metadata.get("run_id") == previous_run_id,
                 "is_pinned_default": run_dir.name == pinned_version_key,
+                "baseline_mae": quality_metrics.get("baseline_mae"),
+                "baseline_rmse": quality_metrics.get("baseline_rmse"),
+                "final_mae": quality_metrics.get("final_mae"),
+                "final_rmse": quality_metrics.get("final_rmse"),
                 "path": str(run_dir),
             }
         )
