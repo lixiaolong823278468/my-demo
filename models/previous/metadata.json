@@ -1,7 +1,7 @@
 {
-  "run_id": "run_20260503_234308",
-  "created_at": "2026-05-03T23:43:10",
-  "model_type": "direct_price_xgboost",
+  "run_id": "run_20260504_222425",
+  "created_at": "2026-05-04T22:27:13",
+  "model_type": "direct_price_multi_model",
   "target_column": "日前出清价格(元/MWh)",
   "feature_columns": [
     "total_load",
@@ -14,29 +14,10 @@
     "weekday",
     "month",
     "is_weekend",
-    "is_holiday",
-    "lag_96"
+    "is_holiday"
   ],
   "model_variants": {
-    "with_lag_96": {
-      "feature_columns": [
-        "total_load",
-        "net_load",
-        "renewable_power",
-        "thermal_space_load_ratio",
-        "thermal_on_capacity",
-        "hour",
-        "period",
-        "weekday",
-        "month",
-        "is_weekend",
-        "is_holiday",
-        "lag_96"
-      ],
-      "model_dir": "with_lag_96",
-      "requires_lag_96": true
-    },
-    "no_lag_96": {
+    "no_lag_96_xgboost": {
       "feature_columns": [
         "total_load",
         "net_load",
@@ -50,8 +31,180 @@
         "is_weekend",
         "is_holiday"
       ],
-      "model_dir": "no_lag_96",
-      "requires_lag_96": false
+      "model_dir": "no_lag_96_xgboost",
+      "model_backend": "xgboost",
+      "model_backend_label": "XGBoost",
+      "base_variant": "no_lag_96"
+    },
+    "no_lag_96_lightgbm": {
+      "feature_columns": [
+        "total_load",
+        "net_load",
+        "renewable_power",
+        "thermal_space_load_ratio",
+        "thermal_on_capacity",
+        "hour",
+        "period",
+        "weekday",
+        "month",
+        "is_weekend",
+        "is_holiday"
+      ],
+      "model_dir": "no_lag_96_lightgbm",
+      "model_backend": "lightgbm",
+      "model_backend_label": "LightGBM",
+      "base_variant": "no_lag_96"
+    },
+    "no_lag_96_catboost": {
+      "feature_columns": [
+        "total_load",
+        "net_load",
+        "renewable_power",
+        "thermal_space_load_ratio",
+        "thermal_on_capacity",
+        "hour",
+        "period",
+        "weekday",
+        "month",
+        "is_weekend",
+        "is_holiday"
+      ],
+      "model_dir": "no_lag_96_catboost",
+      "model_backend": "catboost",
+      "model_backend_label": "CatBoost",
+      "base_variant": "no_lag_96"
+    }
+  },
+  "selected_model_key": "no_lag_96_catboost",
+  "selected_model_backend": "catboost",
+  "selected_model_backend_label": "CatBoost",
+  "model_backend_candidates": {
+    "xgboost": "XGBoost",
+    "lightgbm": "LightGBM",
+    "catboost": "CatBoost"
+  },
+  "variant_quality_metrics": {
+    "no_lag_96_xgboost": {
+      "baseline_mae": null,
+      "baseline_rmse": null,
+      "final_mae": 33.0435,
+      "final_rmse": 53.2552
+    },
+    "no_lag_96_lightgbm": {
+      "baseline_mae": null,
+      "baseline_rmse": null,
+      "final_mae": 34.9893,
+      "final_rmse": 56.9059
+    },
+    "no_lag_96_catboost": {
+      "baseline_mae": null,
+      "baseline_rmse": null,
+      "final_mae": 29.6864,
+      "final_rmse": 45.1864
+    }
+  },
+  "rolling_backtest_metrics": {
+    "14": {
+      "rows": 1344,
+      "test_date_start": "2026-04-17",
+      "test_date_end": "2026-04-30",
+      "overall": {
+        "rows": 1344,
+        "mae": 37.8977,
+        "rmse": 61.4487
+      },
+      "segments": {
+        "evening_peak": {
+          "rows": 280,
+          "mae": 60.304,
+          "rmse": 91.0102
+        },
+        "late_night": {
+          "rows": 224,
+          "mae": 48.108,
+          "rmse": 74.7839
+        },
+        "midday": {
+          "rows": 280,
+          "mae": 15.7201,
+          "rmse": 28.8728
+        },
+        "morning_peak": {
+          "rows": 224,
+          "mae": 38.0761,
+          "rmse": 55.0125
+        },
+        "night": {
+          "rows": 336,
+          "mae": 30.7814,
+          "rmse": 41.9607
+        }
+      },
+      "spike_errors": {
+        "high_threshold": 339.4,
+        "high": {
+          "rows": 135,
+          "mae": 91.3388,
+          "rmse": 117.913
+        },
+        "low_threshold": 0.0,
+        "low": {
+          "rows": 316,
+          "mae": 20.8175,
+          "rmse": 40.4393
+        }
+      }
+    },
+    "30": {
+      "rows": 2880,
+      "test_date_start": "2026-04-01",
+      "test_date_end": "2026-04-30",
+      "overall": {
+        "rows": 2880,
+        "mae": 55.4319,
+        "rmse": 106.9928
+      },
+      "segments": {
+        "evening_peak": {
+          "rows": 600,
+          "mae": 66.7478,
+          "rmse": 105.5972
+        },
+        "late_night": {
+          "rows": 480,
+          "mae": 79.63,
+          "rmse": 173.3643
+        },
+        "midday": {
+          "rows": 600,
+          "mae": 20.5191,
+          "rmse": 38.349
+        },
+        "morning_peak": {
+          "rows": 480,
+          "mae": 48.1431,
+          "rmse": 65.2178
+        },
+        "night": {
+          "rows": 720,
+          "mae": 63.8232,
+          "rmse": 111.3535
+        }
+      },
+      "spike_errors": {
+        "high_threshold": 380.0,
+        "high": {
+          "rows": 299,
+          "mae": 182.3583,
+          "rmse": 275.5422
+        },
+        "low_threshold": 0.0,
+        "low": {
+          "rows": 593,
+          "mae": 23.5114,
+          "rmse": 46.047
+        }
+      }
     }
   },
   "segments": [
@@ -82,7 +235,7 @@
     }
   ],
   "valid_days": 14,
-  "training_window_days": 60,
+  "training_window_days": 55,
   "training_mode": "rolling_window",
   "num_boost_round": 400,
   "similarity_reference_days": 100,
@@ -93,7 +246,6 @@
     "day_type": 0.1,
     "thermal_space_load_ratio": 0.1
   },
-  "use_lag_96": "dual",
   "xgboost_params": {
     "objective": "reg:squarederror",
     "eval_metric": "rmse",
@@ -104,14 +256,9 @@
     "colsample_bytree": 0.85,
     "seed": 42
   },
-  "train_start_date": "2026-02-08",
+  "train_start_date": "2026-02-13",
   "train_end_date": "2026-04-16",
   "train_dates": [
-    "2026-02-08",
-    "2026-02-09",
-    "2026-02-10",
-    "2026-02-11",
-    "2026-02-12",
     "2026-02-13",
     "2026-02-14",
     "2026-02-15",
@@ -184,7 +331,7 @@
     "2026-04-29",
     "2026-04-30"
   ],
-  "sample_rows": 7104,
+  "sample_rows": 6624,
   "skipped_sheets": [
     "10月.xlsx | Sheet | Sheet 名称无法识别为日期",
     "10月.xlsx | 2024年10月29日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
@@ -238,13 +385,13 @@
     "4月.xlsx | 2025年4月11日 | 日前-出清概况中无法提取“运行机组容量”，该字段是火电开机容量的关键来源",
     "8月.xlsx | 2025年8月28日 | 日前-出清概况中无法提取“运行机组容量”，该字段是火电开机容量的关键来源"
   ],
-  "quality_report_path": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\data_quality_reports\\train_20260503_234307_905309.json",
+  "quality_report_path": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\data_quality_reports\\train_20260504_222425_212150.json",
   "train_config": {
     "history_dir": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\数据",
     "holiday_file": null,
     "start_date": null,
     "end_date": null,
-    "training_window_days": 60,
+    "training_window_days": 55,
     "training_mode": "rolling_window",
     "valid_days": 14,
     "num_boost_round": 400,
@@ -255,152 +402,198 @@
       "thermal_on_capacity": 0.2,
       "day_type": 0.1,
       "thermal_space_load_ratio": 0.1
-    },
-    "use_lag_96": "dual"
+    }
   },
-  "prediction_method": "direct_price_xgboost",
+  "prediction_method": "direct_price_multi_model",
   "similarity_usage": "prediction_reference_only",
-  "blend_method": "direct_price_xgboost",
+  "blend_method": "direct_price_multi_model",
   "metrics": {
     "night": {
-      "train_rows": 1416,
+      "train_rows": 1320,
       "valid_rows": 336,
-      "best_iteration": 27,
-      "final_mae": 12.1008,
-      "final_rmse": 18.9064,
-      "direct_mae": 12.1008,
-      "direct_rmse": 18.9064
+      "best_iteration": 11,
+      "final_mae": 13.1901,
+      "final_rmse": 21.6436,
+      "direct_mae": 13.1901,
+      "direct_rmse": 21.6436
     },
     "morning_peak": {
-      "train_rows": 944,
+      "train_rows": 880,
       "valid_rows": 224,
-      "best_iteration": 60,
-      "final_mae": 38.165,
-      "final_rmse": 54.3462,
-      "direct_mae": 38.165,
-      "direct_rmse": 54.3462
+      "best_iteration": 92,
+      "final_mae": 41.425,
+      "final_rmse": 55.3927,
+      "direct_mae": 41.425,
+      "direct_rmse": 55.3927
     },
     "midday": {
-      "train_rows": 1180,
+      "train_rows": 1100,
       "valid_rows": 280,
-      "best_iteration": 72,
-      "final_mae": 13.3852,
-      "final_rmse": 28.452,
-      "direct_mae": 13.3852,
-      "direct_rmse": 28.452
+      "best_iteration": 90,
+      "final_mae": 15.1046,
+      "final_rmse": 28.0231,
+      "direct_mae": 15.1046,
+      "direct_rmse": 28.0231
     },
     "evening_peak": {
-      "train_rows": 1180,
+      "train_rows": 1100,
       "valid_rows": 280,
-      "best_iteration": 32,
-      "final_mae": 56.4241,
-      "final_rmse": 74.0033,
-      "direct_mae": 56.4241,
-      "direct_rmse": 74.0033
+      "best_iteration": 64,
+      "final_mae": 51.4894,
+      "final_rmse": 64.4875,
+      "direct_mae": 51.4894,
+      "direct_rmse": 64.4875
     },
     "late_night": {
-      "train_rows": 944,
+      "train_rows": 880,
       "valid_rows": 224,
-      "best_iteration": 9,
-      "final_mae": 36.3605,
-      "final_rmse": 51.2871,
-      "direct_mae": 36.3605,
-      "direct_rmse": 51.2871
+      "best_iteration": 21,
+      "final_mae": 33.6658,
+      "final_rmse": 47.9575,
+      "direct_mae": 33.6658,
+      "direct_rmse": 47.9575
     }
   },
   "variant_metrics": {
-    "with_lag_96": {
+    "no_lag_96_xgboost": {
       "night": {
-        "train_rows": 1416,
-        "valid_rows": 336,
-        "best_iteration": 27,
-        "final_mae": 12.1008,
-        "final_rmse": 18.9064,
-        "direct_mae": 12.1008,
-        "direct_rmse": 18.9064
-      },
-      "morning_peak": {
-        "train_rows": 944,
-        "valid_rows": 224,
-        "best_iteration": 60,
-        "final_mae": 38.165,
-        "final_rmse": 54.3462,
-        "direct_mae": 38.165,
-        "direct_rmse": 54.3462
-      },
-      "midday": {
-        "train_rows": 1180,
-        "valid_rows": 280,
-        "best_iteration": 72,
-        "final_mae": 13.3852,
-        "final_rmse": 28.452,
-        "direct_mae": 13.3852,
-        "direct_rmse": 28.452
-      },
-      "evening_peak": {
-        "train_rows": 1180,
-        "valid_rows": 280,
-        "best_iteration": 32,
-        "final_mae": 56.4241,
-        "final_rmse": 74.0033,
-        "direct_mae": 56.4241,
-        "direct_rmse": 74.0033
-      },
-      "late_night": {
-        "train_rows": 944,
-        "valid_rows": 224,
-        "best_iteration": 9,
-        "final_mae": 36.3605,
-        "final_rmse": 51.2871,
-        "direct_mae": 36.3605,
-        "direct_rmse": 51.2871
-      }
-    },
-    "no_lag_96": {
-      "night": {
-        "train_rows": 1440,
+        "train_rows": 1320,
         "valid_rows": 336,
         "best_iteration": 10,
-        "final_mae": 17.9785,
-        "final_rmse": 27.1024,
-        "direct_mae": 17.9785,
-        "direct_rmse": 27.1024
+        "final_mae": 17.5203,
+        "final_rmse": 25.4034,
+        "direct_mae": 17.5203,
+        "direct_rmse": 25.4034
       },
       "morning_peak": {
-        "train_rows": 960,
+        "train_rows": 880,
         "valid_rows": 224,
-        "best_iteration": 67,
-        "final_mae": 41.9905,
-        "final_rmse": 60.9285,
-        "direct_mae": 41.9905,
-        "direct_rmse": 60.9285
+        "best_iteration": 54,
+        "final_mae": 41.2571,
+        "final_rmse": 60.2577,
+        "direct_mae": 41.2571,
+        "direct_rmse": 60.2577
       },
       "midday": {
-        "train_rows": 1200,
+        "train_rows": 1100,
         "valid_rows": 280,
         "best_iteration": 65,
-        "final_mae": 16.1634,
-        "final_rmse": 29.7038,
-        "direct_mae": 16.1634,
-        "direct_rmse": 29.7038
+        "final_mae": 16.241,
+        "final_rmse": 29.2335,
+        "direct_mae": 16.241,
+        "direct_rmse": 29.2335
       },
       "evening_peak": {
-        "train_rows": 1200,
+        "train_rows": 1100,
         "valid_rows": 280,
-        "best_iteration": 27,
-        "final_mae": 61.6994,
-        "final_rmse": 84.1878,
-        "direct_mae": 61.6994,
-        "direct_rmse": 84.1878
+        "best_iteration": 31,
+        "final_mae": 60.1789,
+        "final_rmse": 84.6251,
+        "direct_mae": 60.1789,
+        "direct_rmse": 84.6251
       },
       "late_night": {
-        "train_rows": 960,
+        "train_rows": 880,
         "valid_rows": 224,
-        "best_iteration": 12,
-        "final_mae": 35.7357,
-        "final_rmse": 50.6605,
-        "direct_mae": 35.7357,
-        "direct_rmse": 50.6605
+        "best_iteration": 8,
+        "final_mae": 35.1986,
+        "final_rmse": 48.9663,
+        "direct_mae": 35.1986,
+        "direct_rmse": 48.9663
+      }
+    },
+    "no_lag_96_lightgbm": {
+      "night": {
+        "train_rows": 1320,
+        "valid_rows": 336,
+        "best_iteration": 11,
+        "final_mae": 14.2706,
+        "final_rmse": 21.689,
+        "direct_mae": 14.2706,
+        "direct_rmse": 21.689
+      },
+      "morning_peak": {
+        "train_rows": 880,
+        "valid_rows": 224,
+        "best_iteration": 53,
+        "final_mae": 42.9136,
+        "final_rmse": 61.6746,
+        "direct_mae": 42.9136,
+        "direct_rmse": 61.6746
+      },
+      "midday": {
+        "train_rows": 1100,
+        "valid_rows": 280,
+        "best_iteration": 45,
+        "final_mae": 20.3086,
+        "final_rmse": 30.3858,
+        "direct_mae": 20.3086,
+        "direct_rmse": 30.3858
+      },
+      "evening_peak": {
+        "train_rows": 1100,
+        "valid_rows": 280,
+        "best_iteration": 20,
+        "final_mae": 67.0537,
+        "final_rmse": 93.7498,
+        "direct_mae": 67.0537,
+        "direct_rmse": 93.7498
+      },
+      "late_night": {
+        "train_rows": 880,
+        "valid_rows": 224,
+        "best_iteration": 7,
+        "final_mae": 36.4132,
+        "final_rmse": 52.7249,
+        "direct_mae": 36.4132,
+        "direct_rmse": 52.7249
+      }
+    },
+    "no_lag_96_catboost": {
+      "night": {
+        "train_rows": 1320,
+        "valid_rows": 336,
+        "best_iteration": 11,
+        "final_mae": 13.1901,
+        "final_rmse": 21.6436,
+        "direct_mae": 13.1901,
+        "direct_rmse": 21.6436
+      },
+      "morning_peak": {
+        "train_rows": 880,
+        "valid_rows": 224,
+        "best_iteration": 92,
+        "final_mae": 41.425,
+        "final_rmse": 55.3927,
+        "direct_mae": 41.425,
+        "direct_rmse": 55.3927
+      },
+      "midday": {
+        "train_rows": 1100,
+        "valid_rows": 280,
+        "best_iteration": 90,
+        "final_mae": 15.1046,
+        "final_rmse": 28.0231,
+        "direct_mae": 15.1046,
+        "direct_rmse": 28.0231
+      },
+      "evening_peak": {
+        "train_rows": 1100,
+        "valid_rows": 280,
+        "best_iteration": 64,
+        "final_mae": 51.4894,
+        "final_rmse": 64.4875,
+        "direct_mae": 51.4894,
+        "direct_rmse": 64.4875
+      },
+      "late_night": {
+        "train_rows": 880,
+        "valid_rows": 224,
+        "best_iteration": 21,
+        "final_mae": 33.6658,
+        "final_rmse": 47.9575,
+        "direct_mae": 33.6658,
+        "direct_rmse": 47.9575
       }
     }
   }

@@ -265,24 +265,104 @@ function renderRollingBacktest(metadata = {}) {
   const backtests = metadata.rolling_backtest_metrics || {};
   const rows = Object.entries(backtests);
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="6">暂无滚动回测数据</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10">暂无滚动回测数据</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
     .map(([days, row]) => {
       const overall = row.overall || {};
+      const baseline = row.baseline || {};
       const high = row.spike_errors?.high || {};
+      const evening = row.segments?.evening_peak || {};
+      const compare = row.model_vs_similarity || {};
       return `
         <tr>
           <td>最近 ${htmlEscape(days)} 天</td>
-          <td>${overall.mae ?? "-"}</td>
-          <td>${overall.rmse ?? "-"}</td>
-          <td>${high.mae ?? "-"}</td>
-          <td>${high.rmse ?? "-"}</td>
+          <td>${formatMetricCell(overall.mae)}</td>
+          <td>${formatMetricCell(overall.rmse)}</td>
+          <td>${formatMetricCell(baseline.mae)}</td>
+          <td>${formatMetricCell(compare.mae_improvement)}</td>
+          <td>${formatPercentCell(overall.direction_accuracy)}</td>
+          <td>${formatMetricCell(high.mae)}</td>
+          <td>${formatMetricCell(evening.mae)}</td>
+          <td>${formatMetricCell(overall.max_abs_error)}</td>
           <td>${row.rows ?? "-"}</td>
         </tr>
       `;
     })
+    .join("");
+}
+
+function healthText(value, goodLimit, warnLimit, lowerIsBetter = true) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return "暂无数据";
+  if (lowerIsBetter) {
+    if (numericValue <= goodLimit) return "较好";
+    if (numericValue <= warnLimit) return "一般";
+    return "需关注";
+  }
+  if (numericValue >= goodLimit) return "较好";
+  if (numericValue >= warnLimit) return "一般";
+  return "需关注";
+}
+
+function renderModelHealth(metadata = {}) {
+  const tbody = $("#model-health-table tbody");
+  if (!tbody) return;
+  const rolling = metadata.rolling_backtest_metrics || {};
+  const backtest14 = rolling["14"] || {};
+  const backtest30 = rolling["30"] || {};
+  const overall14 = backtest14.overall || {};
+  const overall30 = backtest30.overall || {};
+  const high30 = backtest30.spike_errors?.high || backtest14.spike_errors?.high || {};
+  const evening30 = backtest30.segments?.evening_peak || backtest14.segments?.evening_peak || {};
+  const compare30 = backtest30.model_vs_similarity || backtest14.model_vs_similarity || {};
+  const similarityImprovement = Number(compare30.mae_improvement);
+  const rows = [
+    ["最近14天整体", overall14.mae, "平均每个点差多少钱", healthText(overall14.mae, 35, 55)],
+    ["最近30天整体", overall30.mae, "更接近真实长期使用", healthText(overall30.mae, 45, 70)],
+    ["高价尖峰", high30.mae, "价格冲高时能不能跟上", healthText(high30.mae, 80, 150)],
+    ["晚高峰", evening30.mae, "最容易影响交易判断的时段", healthText(evening30.mae, 50, 80)],
+    ["方向判断", overall30.direction_accuracy ?? overall14.direction_accuracy, "上涨/下跌方向是否判断对", healthText(overall30.direction_accuracy ?? overall14.direction_accuracy, 65, 55, false)],
+    ["相似法对比", compare30.mae_improvement, "正数表示模型比相似法平均误差更小", Number.isFinite(similarityImprovement) ? (similarityImprovement > 0 ? "模型更好" : "相似法更好或持平") : "暂无数据"],
+  ];
+  tbody.innerHTML = rows
+    .map(
+      ([name, value, meaning, status]) => `
+        <tr>
+          <td>${htmlEscape(name)}</td>
+          <td>${formatMetricCell(value)}</td>
+          <td>${htmlEscape(meaning)}</td>
+          <td>${htmlEscape(status)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+}
+
+function renderDailyErrorRank(metadata = {}) {
+  const tbody = $("#daily-error-table tbody");
+  if (!tbody) return;
+  const rolling = metadata.rolling_backtest_metrics || {};
+  const rank = rolling["30"]?.daily_error_rank || rolling["14"]?.daily_error_rank || {};
+  const worst = rank.worst || [];
+  if (!worst.length) {
+    tbody.innerHTML = `<tr><td colspan="5">暂无每日误差排行</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = worst
+    .slice(0, 5)
+    .map(
+      (row) => `
+        <tr>
+          <td>${htmlEscape(row.date || "-")}</td>
+          <td>${formatMetricCell(row.mae)}</td>
+          <td>${formatMetricCell(row.rmse)}</td>
+          <td>${formatMetricCell(row.max_abs_error)}</td>
+          <td>${formatPercentCell(row.direction_accuracy)}</td>
+        </tr>
+      `,
+    )
     .join("");
 }
 
@@ -310,6 +390,11 @@ function formatMetricCell(value) {
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue)) return "-";
   return numericValue.toFixed(2);
+}
+
+function formatPercentCell(value) {
+  const formatted = formatMetricCell(value);
+  return formatted === "-" ? "-" : `${formatted}%`;
 }
 
 function formatChartTooltipValue(value) {
@@ -1252,6 +1337,8 @@ async function refreshSummary() {
   renderMetrics(currentModel.metadata?.metrics || {});
   renderModelComparison(currentModel.metadata || {});
   renderRollingBacktest(currentModel.metadata || {});
+  renderModelHealth(currentModel.metadata || {});
+  renderDailyErrorRank(currentModel.metadata || {});
   if (App.predictSessionStarted && statusData.last_prediction?.rows?.length) {
     renderPredictionBundle(statusData.last_prediction);
   }

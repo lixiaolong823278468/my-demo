@@ -1277,12 +1277,28 @@ def train_segment_models(
         if not valid_df.empty and final_pred is not None:
             actual = valid_df[TARGET_COLUMN].to_numpy(dtype=float)
             computed_metrics = calculate_metrics(actual, final_pred)
+            validation_error_summary = summarize_prediction_errors(
+                pd.DataFrame(
+                    {
+                        "date": pd.to_datetime(valid_df["date"]).dt.strftime("%Y-%m-%d").to_numpy(),
+                        "period": valid_df["period"].to_numpy(),
+                        "actual": actual,
+                        "predicted": final_pred,
+                    }
+                )
+            )
             segment_metrics.update(
                 {
                     "final_mae": computed_metrics["mae"],
                     "final_rmse": computed_metrics["rmse"],
                     "direct_mae": computed_metrics["mae"],
                     "direct_rmse": computed_metrics["rmse"],
+                    "bias": validation_error_summary["bias"],
+                    "max_abs_error": validation_error_summary["max_abs_error"],
+                    "p90_abs_error": validation_error_summary["p90_abs_error"],
+                    "direction_accuracy": validation_error_summary["direction_accuracy"],
+                    "over_rate": validation_error_summary["over_rate"],
+                    "under_rate": validation_error_summary["under_rate"],
                 }
             )
         metrics_summary[segment_name] = segment_metrics
@@ -1290,13 +1306,111 @@ def train_segment_models(
     return metrics_summary, train_dates, valid_dates
 
 
-def summarize_prediction_errors(error_df: pd.DataFrame) -> dict:
-    if error_df.empty:
-        return {"rows": 0, "mae": None, "rmse": None}
-    actual = error_df["actual"].to_numpy(dtype=float)
-    predicted = error_df["predicted"].to_numpy(dtype=float)
+def direction_accuracy(frame: pd.DataFrame, predicted_column: str = "predicted") -> float | None:
+    if frame.empty or "date" not in frame.columns or "period" not in frame.columns:
+        return None
+    ordered = frame.sort_values(["date", "period"]).copy()
+    actual_diff = ordered.groupby("date")["actual"].diff()
+    predicted_diff = ordered.groupby("date")[predicted_column].diff()
+    valid = actual_diff.notna() & predicted_diff.notna() & (actual_diff != 0)
+    if not bool(valid.any()):
+        return None
+    actual_direction = np.sign(actual_diff[valid].to_numpy(dtype=float))
+    predicted_direction = np.sign(predicted_diff[valid].to_numpy(dtype=float))
+    return round(float(np.mean(actual_direction == predicted_direction) * 100), 2)
+
+
+def summarize_prediction_errors(error_df: pd.DataFrame, predicted_column: str = "predicted") -> dict:
+    if error_df.empty or predicted_column not in error_df.columns:
+        return {
+            "rows": 0,
+            "mae": None,
+            "rmse": None,
+            "bias": None,
+            "max_abs_error": None,
+            "p90_abs_error": None,
+            "direction_accuracy": None,
+            "over_rate": None,
+            "under_rate": None,
+        }
+    clean_df = error_df.dropna(subset=["actual", predicted_column]).copy()
+    if clean_df.empty:
+        return {
+            "rows": 0,
+            "mae": None,
+            "rmse": None,
+            "bias": None,
+            "max_abs_error": None,
+            "p90_abs_error": None,
+            "direction_accuracy": None,
+            "over_rate": None,
+            "under_rate": None,
+        }
+    actual = clean_df["actual"].to_numpy(dtype=float)
+    predicted = clean_df[predicted_column].to_numpy(dtype=float)
+    errors = predicted - actual
+    abs_errors = np.abs(errors)
     metrics = calculate_metrics(actual, predicted)
-    return {"rows": int(len(error_df)), "mae": metrics["mae"], "rmse": metrics["rmse"]}
+    return {
+        "rows": int(len(clean_df)),
+        "mae": metrics["mae"],
+        "rmse": metrics["rmse"],
+        "bias": round(float(np.mean(errors)), 4),
+        "max_abs_error": round(float(np.max(abs_errors)), 4),
+        "p90_abs_error": round(float(np.quantile(abs_errors, 0.9)), 4),
+        "direction_accuracy": direction_accuracy(clean_df, predicted_column),
+        "over_rate": round(float(np.mean(errors > 0) * 100), 2),
+        "under_rate": round(float(np.mean(errors < 0) * 100), 2),
+    }
+
+
+def summarize_model_vs_baseline(error_df: pd.DataFrame, baseline_column: str = "similar_predicted") -> dict:
+    if error_df.empty or baseline_column not in error_df.columns:
+        return {
+            "model": summarize_prediction_errors(error_df),
+            "baseline": summarize_prediction_errors(pd.DataFrame()),
+            "mae_improvement": None,
+            "mae_improvement_pct": None,
+        }
+    model_summary = summarize_prediction_errors(error_df)
+    baseline_summary = summarize_prediction_errors(error_df, baseline_column)
+    model_mae = model_summary.get("mae")
+    baseline_mae = baseline_summary.get("mae")
+    if model_mae is None or baseline_mae is None or float(baseline_mae) == 0:
+        improvement = None
+        improvement_pct = None
+    else:
+        improvement = round(float(baseline_mae) - float(model_mae), 4)
+        improvement_pct = round(improvement / float(baseline_mae) * 100, 2)
+    return {
+        "model": model_summary,
+        "baseline": baseline_summary,
+        "mae_improvement": improvement,
+        "mae_improvement_pct": improvement_pct,
+    }
+
+
+def top_daily_error_days(error_df: pd.DataFrame, limit: int = 5) -> dict[str, list[dict]]:
+    if error_df.empty or "date" not in error_df.columns:
+        return {"best": [], "worst": []}
+    rows: list[dict] = []
+    for date_value, date_df in error_df.groupby("date"):
+        summary = summarize_prediction_errors(date_df)
+        if summary.get("mae") is None:
+            continue
+        rows.append(
+            {
+                "date": str(date_value),
+                "mae": summary.get("mae"),
+                "rmse": summary.get("rmse"),
+                "max_abs_error": summary.get("max_abs_error"),
+                "direction_accuracy": summary.get("direction_accuracy"),
+            }
+        )
+    return {
+        "best": sorted(rows, key=lambda item: float(item["mae"]))[:limit],
+        "worst": sorted(rows, key=lambda item: float(item["mae"]), reverse=True)[:limit],
+    }
 
 
 def rolling_backtest_selected_model(
@@ -1306,11 +1420,18 @@ def rolling_backtest_selected_model(
     training_window_days: int | None,
     num_boost_round: int,
     horizons: tuple[int, ...] = (14, 30),
+    similarity_reference_days: int = DEFAULT_SIMILARITY_REFERENCE_DAYS,
+    similarity_weights: dict[str, object] | None = None,
 ) -> dict:
     unique_dates = sorted(pd.to_datetime(history_df["date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique().tolist())
     results: dict[str, dict] = {}
     if len(unique_dates) < 3:
         return results
+    baseline_history_df = attach_similarity_features(
+        history_df,
+        reference_days=similarity_reference_days,
+        similarity_weights=similarity_weights,
+    )
 
     for horizon in horizons:
         test_dates = unique_dates[-min(horizon, len(unique_dates) - 1):]
@@ -1321,8 +1442,8 @@ def rolling_backtest_selected_model(
                 previous_dates = previous_dates[-int(training_window_days):]
             if not previous_dates:
                 continue
-            train_pool = history_df[history_df["date"].dt.strftime("%Y-%m-%d").isin(previous_dates)].copy()
-            test_pool = history_df[history_df["date"].dt.strftime("%Y-%m-%d") == test_date].copy()
+            train_pool = baseline_history_df[baseline_history_df["date"].dt.strftime("%Y-%m-%d").isin(previous_dates)].copy()
+            test_pool = baseline_history_df[baseline_history_df["date"].dt.strftime("%Y-%m-%d") == test_date].copy()
             for segment_name in SEGMENTS:
                 train_df = train_pool[train_pool["segment"] == segment_name].dropna(subset=[TARGET_COLUMN]).copy()
                 test_df = test_pool[test_pool["segment"] == segment_name].dropna(subset=[TARGET_COLUMN]).copy()
@@ -1346,6 +1467,9 @@ def rolling_backtest_selected_model(
                             "period": test_df["period"].to_numpy(),
                             "actual": test_df[TARGET_COLUMN].to_numpy(dtype=float),
                             "predicted": pred,
+                            "similar_predicted": test_df[SIMILAR_PRICE_COLUMN].to_numpy(dtype=float)
+                            if SIMILAR_PRICE_COLUMN in test_df.columns
+                            else np.full(len(test_df), np.nan),
                         }
                     )
                 )
@@ -1357,21 +1481,33 @@ def rolling_backtest_selected_model(
             segment_name: summarize_prediction_errors(segment_df)
             for segment_name, segment_df in error_df.groupby("segment")
         }
+        segment_baseline_metrics = {
+            segment_name: summarize_prediction_errors(segment_df, "similar_predicted")
+            for segment_name, segment_df in error_df.groupby("segment")
+        }
         high_threshold = float(error_df["actual"].quantile(0.9))
         low_threshold = float(error_df["actual"].quantile(0.1))
         high_spike_df = error_df[error_df["actual"] >= high_threshold]
         low_spike_df = error_df[error_df["actual"] <= low_threshold]
+        model_vs_baseline = summarize_model_vs_baseline(error_df)
         results[str(horizon)] = {
             "rows": int(len(error_df)),
             "test_date_start": min(test_dates) if test_dates else None,
             "test_date_end": max(test_dates) if test_dates else None,
             "overall": summarize_prediction_errors(error_df),
+            "baseline": summarize_prediction_errors(error_df, "similar_predicted"),
+            "model_vs_similarity": model_vs_baseline,
             "segments": segment_metrics,
+            "segment_baseline": segment_baseline_metrics,
+            "daily_error_rank": top_daily_error_days(error_df),
             "spike_errors": {
                 "high_threshold": round(high_threshold, 4),
                 "high": summarize_prediction_errors(high_spike_df),
+                "high_baseline": summarize_prediction_errors(high_spike_df, "similar_predicted"),
+                "high_model_vs_similarity": summarize_model_vs_baseline(high_spike_df),
                 "low_threshold": round(low_threshold, 4),
                 "low": summarize_prediction_errors(low_spike_df),
+                "low_baseline": summarize_prediction_errors(low_spike_df, "similar_predicted"),
             },
         }
     return results
@@ -1597,6 +1733,8 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
             str(selected_variant_meta["model_backend"]),
             config.training_window_days,
             config.num_boost_round,
+            similarity_reference_days=normalize_similarity_reference_days(config.similarity_reference_days),
+            similarity_weights=dict(similarity_weights),
         )
     else:
         rolling_backtest_metrics = {}

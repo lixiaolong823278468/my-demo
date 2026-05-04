@@ -60,6 +60,7 @@ AUTO_WINDOW_FINE_RADIUS = 15
 AUTO_WINDOW_MAX_HISTORY_DAYS = 100
 AUTO_WINDOW_VALID_DAYS = 14
 AUTO_WINDOW_NUM_BOOST_ROUND = 400
+AUTO_WINDOW_RERANK_TOP_N = 3
 AUTO_WINDOW_CHECK_INTERVAL_SECONDS = 60
 LAST_AUTO_WINDOW_CHECK_AT: datetime | None = None
 
@@ -413,6 +414,60 @@ def window_score(summary: dict[str, Any]) -> float:
     return float(mae) + 0.2 * float(rmse)
 
 
+def rolling_metric_score(metric: dict[str, Any] | None) -> float | None:
+    if not isinstance(metric, dict):
+        return None
+    mae = metric.get("mae")
+    rmse = metric.get("rmse")
+    if mae is None or rmse is None:
+        return None
+    return float(mae) + 0.2 * float(rmse)
+
+
+def business_window_score(static_metrics: dict[str, Any], rolling_metrics: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    parts: list[tuple[str, float, float]] = []
+    static_score = window_score(static_metrics)
+    if math.isfinite(static_score):
+        parts.append(("static_validation", 0.2, static_score))
+
+    rolling_14 = rolling_metrics.get("14") or {}
+    rolling_30 = rolling_metrics.get("30") or {}
+    rolling_14_score = rolling_metric_score(rolling_14.get("overall"))
+    rolling_30_score = rolling_metric_score(rolling_30.get("overall"))
+    if rolling_14_score is not None:
+        parts.append(("rolling_14_days", 0.3, rolling_14_score))
+    if rolling_30_score is not None:
+        parts.append(("rolling_30_days", 0.2, rolling_30_score))
+
+    high_scores = [
+        rolling_metric_score((rolling_14.get("spike_errors") or {}).get("high")),
+        rolling_metric_score((rolling_30.get("spike_errors") or {}).get("high")),
+    ]
+    high_scores = [value for value in high_scores if value is not None]
+    if high_scores:
+        parts.append(("high_price_spike", 0.2, sum(high_scores) / len(high_scores)))
+
+    evening_scores = [
+        rolling_metric_score((rolling_14.get("segments") or {}).get("evening_peak")),
+        rolling_metric_score((rolling_30.get("segments") or {}).get("evening_peak")),
+    ]
+    evening_scores = [value for value in evening_scores if value is not None]
+    if evening_scores:
+        parts.append(("evening_peak", 0.1, sum(evening_scores) / len(evening_scores)))
+
+    if not parts:
+        return float("inf"), {"parts": [], "basis": "none"}
+    total_weight = sum(weight for _, weight, _ in parts)
+    score = sum(weight * value for _, weight, value in parts) / total_weight
+    return score, {
+        "basis": "rolling_backtest" if rolling_metrics else "static_validation",
+        "parts": [
+            {"name": name, "weight": weight, "score": round(value, 4)}
+            for name, weight, value in parts
+        ],
+    }
+
+
 def summarize_window_result(result: Any, model_root: Path, window_days: int, phase: str) -> dict[str, Any]:
     metadata = read_json_file(Path(result.current_model_dir) / "metadata.json")
     variant_metrics = metadata.get("variant_metrics") or {}
@@ -424,11 +479,15 @@ def summarize_window_result(result: Any, model_root: Path, window_days: int, pha
         or metadata.get("metrics")
         or {}
     )
-    score = window_score(direct_metrics)
+    static_score = window_score(direct_metrics)
+    rolling_metrics = metadata.get("rolling_backtest_metrics") or {}
+    score, score_detail = business_window_score(direct_metrics, rolling_metrics)
     return {
         "phase": phase,
         "window_days": int(window_days),
         "score": round(score, 4) if math.isfinite(score) else None,
+        "static_score": round(static_score, 4) if math.isfinite(static_score) else None,
+        "score_detail": score_detail,
         "run_id": result.run_id,
         "model_root": str(model_root),
         "train_start": result.train_dates[0] if result.train_dates else None,
@@ -441,6 +500,7 @@ def summarize_window_result(result: Any, model_root: Path, window_days: int, pha
         "selected_model_key": selected_key,
         "selected_model_backend": metadata.get("selected_model_backend"),
         "metrics": direct_metrics,
+        "rolling_backtest_metrics": rolling_metrics,
     }
 
 
@@ -610,7 +670,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
 
         results: list[dict[str, Any]] = []
 
-        def run_window(window_days: int, phase: str, index: int, total: int) -> dict[str, Any]:
+        def run_window(window_days: int, phase: str, index: int, total: int, enable_rolling_backtest: bool = False) -> dict[str, Any]:
             STATE.raise_if_cancelled(job_id)
             progress = 5 + int((index - 1) / max(total, 1) * 70)
             STATE.append_log(job_id, f"{phase}窗口回测 {index}/{total}：最近 {window_days} 天", progress)
@@ -622,7 +682,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
                     valid_days=valid_days,
                     training_window_days=window_days,
                     num_boost_round=num_boost_round,
-                    enable_rolling_backtest=False,
+                    enable_rolling_backtest=enable_rolling_backtest,
                 ),
                 progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
             )
@@ -647,7 +707,25 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
         finite_results = [item for item in results if item.get("score") is not None]
         if not finite_results:
             raise ValueError("所有候选训练窗口均未得到有效指标。")
-        best = min(finite_results, key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))))
+        static_top = sorted(
+            finite_results,
+            key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))),
+        )[:AUTO_WINDOW_RERANK_TOP_N]
+        rerank_results: list[dict[str, Any]] = []
+        for offset, candidate in enumerate(static_top, start=1):
+            window = int(candidate["window_days"])
+            STATE.append_log(job_id, f"严格滚动回测复核 {offset}/{len(static_top)}：最近 {window} 天", 76 + offset)
+            rerank_results.append(
+                run_window(
+                    window,
+                    "rerank",
+                    offset,
+                    max(len(static_top), 1),
+                    enable_rolling_backtest=True,
+                )
+            )
+        best_pool = [item for item in rerank_results if item.get("score") is not None] or finite_results
+        best = min(best_pool, key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))))
         best_window_days = int(best["window_days"])
         STATE.append_log(job_id, f"最优训练窗口为最近 {best_window_days} 天，正在训练正式模型", 86)
         final_result = train_and_register(
@@ -683,8 +761,13 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
             "coarse_candidates": candidate_windows,
             "fine_radius": fine_radius,
             "fine_candidates": fine_candidates,
+            "rerank_top_n": AUTO_WINDOW_RERANK_TOP_N,
+            "selection_method": "rolling_backtest_rerank",
             "best_window_days": best_window_days,
             "best_score": best.get("score"),
+            "best_static_score": best.get("static_score"),
+            "best_score_detail": best.get("score_detail"),
+            "best_rolling_backtest_metrics": best.get("rolling_backtest_metrics"),
             "best_metrics": {
                 "no_lag_96": best.get("metrics"),
             },

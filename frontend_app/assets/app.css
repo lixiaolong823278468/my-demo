@@ -2742,9 +2742,33 @@ body::after {
 }
 
 .train-metrics-section .subsection-title {
-  margin-top: 0;
+  margin: 0 0 14px;
   padding-bottom: 12px;
   border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.train-metrics-section > .table-shell + .subsection-title {
+  margin-top: 34px;
+}
+
+.train-metrics-section > .subsection-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.train-metrics-section > .subsection-title::before {
+  content: "";
+  width: 6px;
+  height: 18px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #0f6bff, #19c3d3);
+  box-shadow: 0 8px 18px rgba(15, 107, 255, 0.18);
+  flex: 0 0 auto;
+}
+
+.train-metrics-section > .table-shell {
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.055);
 }
 
 #tab-train .progress-grid,

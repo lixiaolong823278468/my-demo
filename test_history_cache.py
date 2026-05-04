@@ -26,6 +26,28 @@ class HistoryCacheTests(unittest.TestCase):
         self.assertNotIn(self.removed_previous_day_feature, variants["no_lag_96"])
         self.assertNotIn("similar_price", variants["no_lag_96"])
 
+    def test_prediction_error_summary_includes_plain_language_metrics(self) -> None:
+        from dayahead_core import summarize_model_vs_baseline, summarize_prediction_errors
+
+        frame = pd.DataFrame(
+            {
+                "date": ["2026-04-01"] * 4,
+                "period": [1, 2, 3, 4],
+                "actual": [100.0, 120.0, 90.0, 130.0],
+                "predicted": [105.0, 115.0, 95.0, 125.0],
+                "similar_predicted": [110.0, 100.0, 80.0, 120.0],
+            }
+        )
+
+        summary = summarize_prediction_errors(frame)
+        comparison = summarize_model_vs_baseline(frame)
+
+        self.assertEqual(summary["rows"], 4)
+        self.assertEqual(summary["mae"], 5.0)
+        self.assertEqual(summary["max_abs_error"], 5.0)
+        self.assertEqual(summary["direction_accuracy"], 100.0)
+        self.assertGreater(comparison["mae_improvement"], 0)
+
     def test_prediction_variant_prefers_no_lag_and_skips_legacy_lag(self) -> None:
         from dayahead_core import select_prediction_model_variant
 

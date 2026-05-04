@@ -261,11 +261,46 @@
               <thead>
                 <tr>
                   <th>窗口</th>
-                  <th>整体 MAE</th>
-                  <th>整体 RMSE</th>
+                  <th>模型 MAE</th>
+                  <th>模型 RMSE</th>
+                  <th>相似法 MAE</th>
+                  <th>较相似法提升</th>
+                  <th>方向准确率</th>
                   <th>高价尖峰 MAE</th>
-                  <th>高价尖峰 RMSE</th>
+                  <th>晚高峰 MAE</th>
+                  <th>最大误差</th>
                   <th>样本数</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="subsection-title">模型直观诊断</div>
+          <div class="table-shell table-frame table-frame-sm">
+            <table class="data-table" id="model-health-table">
+              <thead>
+                <tr>
+                  <th>观察角度</th>
+                  <th>数值</th>
+                  <th>怎么理解</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="subsection-title">误差最大日期</div>
+          <div class="table-shell table-frame table-frame-sm">
+            <table class="data-table" id="daily-error-table">
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>MAE</th>
+                  <th>RMSE</th>
+                  <th>最大误差</th>
+                  <th>方向准确率</th>
                 </tr>
               </thead>
               <tbody></tbody>
