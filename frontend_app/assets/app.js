@@ -231,6 +231,61 @@ function renderMetrics(metrics = {}) {
     .join("");
 }
 
+
+function renderModelComparison(metadata = {}) {
+  const tbody = $("#model-compare-table tbody");
+  if (!tbody) return;
+  const quality = metadata.variant_quality_metrics || {};
+  const variants = metadata.model_variants || {};
+  const selectedKey = metadata.selected_model_key;
+  const rows = Object.entries(quality);
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="4">暂无模型算法对比数据</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows
+    .map(([key, row]) => {
+      const variant = variants[key] || {};
+      const label = variant.model_backend_label || variant.model_backend || key;
+      return `
+        <tr>
+          <td>${htmlEscape(label)}</td>
+          <td>${key === selectedKey ? "当前最优" : "-"}</td>
+          <td>${row.final_mae ?? "-"}</td>
+          <td>${row.final_rmse ?? "-"}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function renderRollingBacktest(metadata = {}) {
+  const tbody = $("#rolling-backtest-table tbody");
+  if (!tbody) return;
+  const backtests = metadata.rolling_backtest_metrics || {};
+  const rows = Object.entries(backtests);
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="6">暂无滚动回测数据</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows
+    .map(([days, row]) => {
+      const overall = row.overall || {};
+      const high = row.spike_errors?.high || {};
+      return `
+        <tr>
+          <td>最近 ${htmlEscape(days)} 天</td>
+          <td>${overall.mae ?? "-"}</td>
+          <td>${overall.rmse ?? "-"}</td>
+          <td>${high.mae ?? "-"}</td>
+          <td>${high.rmse ?? "-"}</td>
+          <td>${row.rows ?? "-"}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
 function syncSelectAllVersionsState() {
   const selectAll = $("#select-all-versions");
   if (!selectAll) return;
@@ -1195,6 +1250,8 @@ async function refreshSummary() {
   renderVersions(versionsData.versions || []);
   renderModelSummary(versionsData.versions || [], currentModel.metadata || {});
   renderMetrics(currentModel.metadata?.metrics || {});
+  renderModelComparison(currentModel.metadata || {});
+  renderRollingBacktest(currentModel.metadata || {});
   if (App.predictSessionStarted && statusData.last_prediction?.rows?.length) {
     renderPredictionBundle(statusData.last_prediction);
   }

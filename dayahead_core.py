@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import hashlib
 import pickle
+import gc
 import re
 import shutil
+import time
 import warnings
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
@@ -105,6 +107,13 @@ DEFAULT_XGB_PARAMS = {
     "colsample_bytree": 0.85,
     "seed": 42,
 }
+MODEL_BACKENDS = OrderedDict(
+    [
+        ("xgboost", "XGBoost"),
+        ("lightgbm", "LightGBM"),
+        ("catboost", "CatBoost"),
+    ]
+)
 
 
 @dataclass
@@ -119,6 +128,7 @@ class TrainConfig:
     end_date: str | None = None
     similarity_reference_days: int = DEFAULT_SIMILARITY_REFERENCE_DAYS
     similarity_weights: dict[str, float] | None = None
+    enable_rolling_backtest: bool = True
 
 
 @dataclass
@@ -205,6 +215,9 @@ def metadata_has_direct_variants(metadata: dict) -> bool:
 
 def select_prediction_model_variant(metadata: dict, forecast_df: pd.DataFrame) -> str:
     variants = metadata.get("model_variants") or {}
+    selected_model_key = metadata.get("selected_model_key")
+    if selected_model_key in variants:
+        return str(selected_model_key)
     if "no_lag_96" in variants:
         return "no_lag_96"
     if "direct_price" in variants:
@@ -1079,6 +1092,146 @@ def best_iteration_range(booster) -> tuple[int, int] | None:
     return 0, int(best_iteration) + 1
 
 
+
+def available_model_backends() -> OrderedDict[str, str]:
+    available = OrderedDict()
+    for backend, label in MODEL_BACKENDS.items():
+        if backend == "xgboost":
+            ensure_xgboost_available()
+            available[backend] = label
+            continue
+        try:
+            __import__(backend)
+        except Exception:
+            continue
+        available[backend] = label
+    return available
+
+
+def model_file_name(segment_name: str, backend: str) -> str:
+    if backend == "lightgbm":
+        return f"{segment_name}.txt"
+    if backend == "catboost":
+        return f"{segment_name}.cbm"
+    return f"{segment_name}.json"
+
+
+def save_lightgbm_model(model, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(model.model_to_string(), encoding="utf-8")
+
+
+def load_lightgbm_model(model_path: Path):
+    import lightgbm as lgb
+
+    return lgb.Booster(model_str=model_path.read_text(encoding="utf-8"))
+
+
+def train_backend_model(
+    backend: str,
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    feature_columns: list[str],
+    label_column: str,
+    num_boost_round: int,
+    output_path: Path | None,
+) -> tuple[object, int | None, np.ndarray | None]:
+    train_x = train_df[feature_columns].astype(float)
+    train_y = train_df[label_column].astype(float)
+    valid_x = valid_df[feature_columns].astype(float) if not valid_df.empty else None
+    valid_y = valid_df[label_column].astype(float) if not valid_df.empty else None
+
+    if backend == "lightgbm":
+        import lightgbm as lgb
+
+        train_dataset = lgb.Dataset(train_x, label=train_y, feature_name=feature_columns)
+        valid_sets = [train_dataset]
+        valid_names = ["train"]
+        callbacks = []
+        if valid_x is not None:
+            valid_dataset = lgb.Dataset(valid_x, label=valid_y, feature_name=feature_columns, reference=train_dataset)
+            valid_sets.append(valid_dataset)
+            valid_names.append("valid")
+            callbacks.append(lgb.early_stopping(50, verbose=False))
+        model = lgb.train(
+            {
+                "objective": "regression",
+                "metric": "rmse",
+                "learning_rate": DEFAULT_XGB_PARAMS["eta"],
+                "max_depth": DEFAULT_XGB_PARAMS["max_depth"],
+                "min_data_in_leaf": DEFAULT_XGB_PARAMS["min_child_weight"],
+                "feature_fraction": DEFAULT_XGB_PARAMS["colsample_bytree"],
+                "bagging_fraction": DEFAULT_XGB_PARAMS["subsample"],
+                "bagging_freq": 1,
+                "seed": DEFAULT_XGB_PARAMS["seed"],
+                "verbosity": -1,
+            },
+            train_dataset,
+            num_boost_round=num_boost_round,
+            valid_sets=valid_sets,
+            valid_names=valid_names,
+            callbacks=callbacks,
+        )
+        best_iteration = int(model.best_iteration) if getattr(model, "best_iteration", 0) else None
+        prediction = model.predict(valid_x, num_iteration=best_iteration) if valid_x is not None else None
+        if output_path is not None:
+            save_lightgbm_model(model, output_path)
+        return model, best_iteration, prediction
+
+    if backend == "catboost":
+        from catboost import CatBoostRegressor
+
+        model = CatBoostRegressor(
+            iterations=num_boost_round,
+            learning_rate=DEFAULT_XGB_PARAMS["eta"],
+            depth=DEFAULT_XGB_PARAMS["max_depth"],
+            loss_function="RMSE",
+            random_seed=DEFAULT_XGB_PARAMS["seed"],
+            verbose=False,
+            allow_writing_files=False,
+        )
+        fit_kwargs = {}
+        if valid_x is not None:
+            fit_kwargs["eval_set"] = (valid_x, valid_y)
+            fit_kwargs["early_stopping_rounds"] = 50
+            fit_kwargs["use_best_model"] = True
+        model.fit(train_x, train_y, **fit_kwargs)
+        best_iteration = int(model.get_best_iteration()) if model.get_best_iteration() is not None else None
+        prediction = model.predict(valid_x) if valid_x is not None else None
+        if output_path is not None:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            model.save_model(str(output_path))
+        return model, best_iteration, prediction
+
+    import xgboost as xgb
+
+    dtrain = make_dmatrix(train_df, feature_columns, label_column)
+    evals = [(dtrain, "train")]
+    train_kwargs = {
+        "params": DEFAULT_XGB_PARAMS,
+        "dtrain": dtrain,
+        "num_boost_round": num_boost_round,
+        "evals": evals,
+        "verbose_eval": False,
+    }
+    dvalid = None
+    if valid_x is not None:
+        dvalid = make_dmatrix(valid_df, feature_columns, label_column)
+        evals.append((dvalid, "valid"))
+        train_kwargs["early_stopping_rounds"] = 50
+    booster = xgb.train(**train_kwargs)
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        booster.save_model(str(output_path))
+    best_iteration = int(booster.attr("best_iteration")) if booster.attr("best_iteration") else None
+    if dvalid is None:
+        prediction = None
+    else:
+        iteration_range = best_iteration_range(booster)
+        prediction = booster.predict(dvalid, iteration_range=iteration_range) if iteration_range else booster.predict(dvalid)
+    return booster, best_iteration, prediction
+
+
 def train_segment_models(
     history_df: pd.DataFrame,
     output_dir: Path,
@@ -1090,9 +1243,8 @@ def train_segment_models(
     progress_span: int = 45,
     progress_label: str = "正在训练分时段模型",
     label_column: str = TARGET_COLUMN,
+    model_backend: str = "xgboost",
 ) -> tuple[dict[str, dict[str, float | int | None]], list[str], list[str]]:
-    import xgboost as xgb
-
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_summary: dict[str, dict[str, float | int | None]] = {}
     unique_dates = sorted(pd.to_datetime(history_df["date"]).dt.strftime("%Y-%m-%d").unique().tolist())
@@ -1107,42 +1259,123 @@ def train_segment_models(
         if segment_df.empty:
             raise ValueError(f"时段 {segment_name} 无训练数据")
         train_df, valid_df = split_train_valid(segment_df, valid_days)
-        dtrain = make_dmatrix(train_df, feature_columns, label_column)
-        evals = [(dtrain, "train")]
-        train_kwargs = {
-            "params": DEFAULT_XGB_PARAMS,
-            "dtrain": dtrain,
-            "num_boost_round": num_boost_round,
-            "evals": evals,
-            "verbose_eval": False,
-        }
-        if not valid_df.empty:
-            dvalid = make_dmatrix(valid_df, feature_columns, label_column)
-            evals.append((dvalid, "valid"))
-            train_kwargs["early_stopping_rounds"] = 50
-        booster = xgb.train(**train_kwargs)
-        booster.save_model(str(output_dir / f"{segment_name}.json"))
+        _, best_iteration, final_pred = train_backend_model(
+            model_backend,
+            train_df,
+            valid_df,
+            feature_columns,
+            label_column,
+            num_boost_round,
+            output_dir / model_file_name(segment_name, model_backend),
+        )
 
         segment_metrics: dict[str, float | int | None] = {
             "train_rows": int(len(train_df)),
             "valid_rows": int(len(valid_df)),
-            "best_iteration": int(booster.attr("best_iteration")) if booster.attr("best_iteration") else None,
+            "best_iteration": best_iteration,
         }
-        if not valid_df.empty:
-            iteration_range = best_iteration_range(booster)
-            final_pred = booster.predict(dvalid, iteration_range=iteration_range) if iteration_range else booster.predict(dvalid)
+        if not valid_df.empty and final_pred is not None:
             actual = valid_df[TARGET_COLUMN].to_numpy(dtype=float)
+            computed_metrics = calculate_metrics(actual, final_pred)
             segment_metrics.update(
                 {
-                    "final_mae": calculate_metrics(actual, final_pred)["mae"],
-                    "final_rmse": calculate_metrics(actual, final_pred)["rmse"],
-                    "direct_mae": calculate_metrics(actual, final_pred)["mae"],
-                    "direct_rmse": calculate_metrics(actual, final_pred)["rmse"],
+                    "final_mae": computed_metrics["mae"],
+                    "final_rmse": computed_metrics["rmse"],
+                    "direct_mae": computed_metrics["mae"],
+                    "direct_rmse": computed_metrics["rmse"],
                 }
             )
         metrics_summary[segment_name] = segment_metrics
     emit_progress(progress_callback, "分时段模型训练完成", 75)
     return metrics_summary, train_dates, valid_dates
+
+
+def summarize_prediction_errors(error_df: pd.DataFrame) -> dict:
+    if error_df.empty:
+        return {"rows": 0, "mae": None, "rmse": None}
+    actual = error_df["actual"].to_numpy(dtype=float)
+    predicted = error_df["predicted"].to_numpy(dtype=float)
+    metrics = calculate_metrics(actual, predicted)
+    return {"rows": int(len(error_df)), "mae": metrics["mae"], "rmse": metrics["rmse"]}
+
+
+def rolling_backtest_selected_model(
+    history_df: pd.DataFrame,
+    feature_columns: list[str],
+    model_backend: str,
+    training_window_days: int | None,
+    num_boost_round: int,
+    horizons: tuple[int, ...] = (14, 30),
+) -> dict:
+    unique_dates = sorted(pd.to_datetime(history_df["date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique().tolist())
+    results: dict[str, dict] = {}
+    if len(unique_dates) < 3:
+        return results
+
+    for horizon in horizons:
+        test_dates = unique_dates[-min(horizon, len(unique_dates) - 1):]
+        predictions: list[pd.DataFrame] = []
+        for test_date in test_dates:
+            previous_dates = [item for item in unique_dates if item < test_date]
+            if training_window_days:
+                previous_dates = previous_dates[-int(training_window_days):]
+            if not previous_dates:
+                continue
+            train_pool = history_df[history_df["date"].dt.strftime("%Y-%m-%d").isin(previous_dates)].copy()
+            test_pool = history_df[history_df["date"].dt.strftime("%Y-%m-%d") == test_date].copy()
+            for segment_name in SEGMENTS:
+                train_df = train_pool[train_pool["segment"] == segment_name].dropna(subset=[TARGET_COLUMN]).copy()
+                test_df = test_pool[test_pool["segment"] == segment_name].dropna(subset=[TARGET_COLUMN]).copy()
+                if train_df.empty or test_df.empty:
+                    continue
+                model, _, _ = train_backend_model(
+                    model_backend,
+                    train_df,
+                    pd.DataFrame(columns=train_df.columns),
+                    feature_columns,
+                    TARGET_COLUMN,
+                    num_boost_round,
+                    None,
+                )
+                pred = predict_backend_model(model, model_backend, test_df, feature_columns)
+                predictions.append(
+                    pd.DataFrame(
+                        {
+                            "date": test_date,
+                            "segment": segment_name,
+                            "period": test_df["period"].to_numpy(),
+                            "actual": test_df[TARGET_COLUMN].to_numpy(dtype=float),
+                            "predicted": pred,
+                        }
+                    )
+                )
+        if not predictions:
+            results[str(horizon)] = {"rows": 0, "overall": summarize_prediction_errors(pd.DataFrame())}
+            continue
+        error_df = pd.concat(predictions, ignore_index=True)
+        segment_metrics = {
+            segment_name: summarize_prediction_errors(segment_df)
+            for segment_name, segment_df in error_df.groupby("segment")
+        }
+        high_threshold = float(error_df["actual"].quantile(0.9))
+        low_threshold = float(error_df["actual"].quantile(0.1))
+        high_spike_df = error_df[error_df["actual"] >= high_threshold]
+        low_spike_df = error_df[error_df["actual"] <= low_threshold]
+        results[str(horizon)] = {
+            "rows": int(len(error_df)),
+            "test_date_start": min(test_dates) if test_dates else None,
+            "test_date_end": max(test_dates) if test_dates else None,
+            "overall": summarize_prediction_errors(error_df),
+            "segments": segment_metrics,
+            "spike_errors": {
+                "high_threshold": round(high_threshold, 4),
+                "high": summarize_prediction_errors(high_spike_df),
+                "low_threshold": round(low_threshold, 4),
+                "low": summarize_prediction_errors(low_spike_df),
+            },
+        }
+    return results
+
 
 
 def ensure_model_dirs(model_root: Path) -> tuple[Path, Path, Path]:
@@ -1152,6 +1385,34 @@ def ensure_model_dirs(model_root: Path) -> tuple[Path, Path, Path]:
     model_root.mkdir(parents=True, exist_ok=True)
     history_dir.mkdir(parents=True, exist_ok=True)
     return current_dir, previous_dir, history_dir
+
+
+def retry_filesystem_operation(description: str, operation: Callable[[], object], retries: int = 10, delay_seconds: float = 0.3) -> object:
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return operation()
+        except (OSError, shutil.Error) as exc:
+            last_error = exc
+            gc.collect()
+            if attempt < retries - 1:
+                time.sleep(delay_seconds * (attempt + 1))
+    raise RuntimeError(f"{description}失败：{last_error}") from last_error
+
+
+def remove_tree_with_retry(path: Path) -> None:
+    if not path.exists():
+        return
+    retry_filesystem_operation(f"删除目录 {path}", lambda: shutil.rmtree(path))
+
+
+def copy_tree_with_retry(source: Path, target: Path) -> None:
+    def operation() -> None:
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(source, target)
+
+    retry_filesystem_operation(f"复制目录 {source} 到 {target}", operation)
 
 
 def write_json(path: Path, data: dict) -> None:
@@ -1253,14 +1514,14 @@ def finalize_model_version(model_root: Path, staging_dir: Path, run_id: str) -> 
     run_dir = history_dir / run_id
     if current_dir.exists():
         if previous_dir.exists():
-            shutil.rmtree(previous_dir)
-        shutil.copytree(current_dir, previous_dir)
-        shutil.rmtree(current_dir)
-    shutil.copytree(staging_dir, current_dir)
+            remove_tree_with_retry(previous_dir)
+        copy_tree_with_retry(current_dir, previous_dir)
+        remove_tree_with_retry(current_dir)
+    copy_tree_with_retry(staging_dir, current_dir)
     if run_dir.exists():
-        shutil.rmtree(run_dir)
-    shutil.copytree(staging_dir, run_dir)
-    shutil.rmtree(staging_dir)
+        remove_tree_with_retry(run_dir)
+    copy_tree_with_retry(staging_dir, run_dir)
+    remove_tree_with_retry(staging_dir)
     return current_dir, run_dir
 
 
@@ -1272,45 +1533,87 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     staging_dir = config.model_root / "_staging" / run_id
     staging_dir.mkdir(parents=True, exist_ok=True)
-    model_variants = direct_model_variants()
+    feature_variants = direct_model_variants()
+    model_backends = available_model_backends()
+    if not model_backends:
+        raise RuntimeError("没有可用的模型训练后端")
+    model_variants: OrderedDict[str, dict[str, object]] = OrderedDict()
     similarity_weights = normalize_similarity_weights(config.similarity_weights)
     variant_metrics: dict[str, dict[str, dict[str, float | int | None]]] = {}
     train_dates: list[str] = []
     valid_dates: list[str] = []
-    for variant_index, (variant_key, feature_columns) in enumerate(model_variants.items(), start=1):
-        variant_dir = staging_dir / variant_key
-        metrics_summary, variant_train_dates, variant_valid_dates = train_segment_models(
+    total_variants = max(1, len(feature_variants) * len(model_backends))
+    variant_index = 0
+    for feature_variant_key, feature_columns in feature_variants.items():
+        for backend_key, backend_label in model_backends.items():
+            variant_index += 1
+            variant_key = f"{feature_variant_key}_{backend_key}"
+            variant_dir = staging_dir / variant_key
+            progress_start = 25 + int((variant_index - 1) / total_variants * 50)
+            progress_span = max(8, int(45 / total_variants))
+            metrics_summary, variant_train_dates, variant_valid_dates = train_segment_models(
+                history_df,
+                variant_dir,
+                config.valid_days,
+                config.num_boost_round,
+                feature_columns,
+                progress_callback=progress_callback,
+                progress_start=progress_start,
+                progress_span=progress_span,
+                progress_label=f"正在训练 {backend_label} 直接价格模型",
+                label_column=TARGET_COLUMN,
+                model_backend=backend_key,
+            )
+            model_variants[variant_key] = {
+                "feature_columns": feature_columns,
+                "model_dir": variant_key,
+                "model_backend": backend_key,
+                "model_backend_label": backend_label,
+                "base_variant": feature_variant_key,
+            }
+            variant_metrics[variant_key] = metrics_summary
+            if not train_dates:
+                train_dates = variant_train_dates
+            if not valid_dates:
+                valid_dates = variant_valid_dates
+    variant_quality_metrics = {key: summarize_model_quality_metrics(metrics) for key, metrics in variant_metrics.items()}
+
+    def variant_score(item: tuple[str, dict[str, float | None]]) -> tuple[float, str]:
+        key, quality = item
+        mae = quality.get("final_mae")
+        rmse = quality.get("final_rmse")
+        if mae is None or rmse is None:
+            return float("inf"), key
+        return float(mae) + 0.2 * float(rmse), key
+
+    selected_model_key = min(variant_quality_metrics.items(), key=variant_score)[0]
+    metrics_summary = variant_metrics[selected_model_key]
+    selected_variant_meta = model_variants[selected_model_key]
+    if config.enable_rolling_backtest:
+        emit_progress(progress_callback, "正在执行最近 14/30 天滚动回测", 78)
+        rolling_backtest_metrics = rolling_backtest_selected_model(
             history_df,
-            variant_dir,
-            config.valid_days,
+            list(selected_variant_meta["feature_columns"]),
+            str(selected_variant_meta["model_backend"]),
+            config.training_window_days,
             config.num_boost_round,
-            feature_columns,
-            progress_callback=progress_callback,
-            progress_start=25 + (variant_index - 1) * 25,
-            progress_span=20,
-            progress_label=f"正在训练{variant_key}直接价格模型",
-            label_column=TARGET_COLUMN,
         )
-        variant_metrics[variant_key] = metrics_summary
-        if not train_dates:
-            train_dates = variant_train_dates
-        if not valid_dates:
-            valid_dates = variant_valid_dates
-    metrics_summary = variant_metrics.get("no_lag_96") or next(iter(variant_metrics.values()))
+    else:
+        rolling_backtest_metrics = {}
 
     metadata = {
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "model_type": "direct_price_xgboost",
+        "model_type": "direct_price_multi_model",
         "target_column": TARGET_COLUMN,
-        "feature_columns": model_variants["no_lag_96"],
-        "model_variants": {
-            key: {
-                "feature_columns": columns,
-                "model_dir": key,
-            }
-            for key, columns in model_variants.items()
-        },
+        "feature_columns": selected_variant_meta["feature_columns"],
+        "model_variants": dict(model_variants),
+        "selected_model_key": selected_model_key,
+        "selected_model_backend": selected_variant_meta["model_backend"],
+        "selected_model_backend_label": selected_variant_meta["model_backend_label"],
+        "model_backend_candidates": dict(model_backends),
+        "variant_quality_metrics": variant_quality_metrics,
+        "rolling_backtest_metrics": rolling_backtest_metrics,
         "segments": [{"name": name, "start": start, "end": end} for name, (start, end) in SEGMENTS.items()],
         "valid_days": config.valid_days,
         "training_window_days": config.training_window_days,
@@ -1338,11 +1641,12 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
             "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
             "similarity_weights": dict(similarity_weights),
         },
-        "prediction_method": "direct_price_xgboost",
+        "prediction_method": "direct_price_multi_model",
         "similarity_usage": "prediction_reference_only",
-        "blend_method": "direct_price_xgboost",
+        "blend_method": "direct_price_multi_model",
         "metrics": metrics_summary,
         "variant_metrics": variant_metrics,
+        "rolling_backtest_metrics": rolling_backtest_metrics,
     }
     metadata_path = staging_dir / "metadata.json"
     emit_progress(progress_callback, "正在写入模型元数据", 82)
@@ -1368,6 +1672,10 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "similarity_weights": dict(similarity_weights),
         "metrics": metrics_summary,
         "variant_metrics": variant_metrics,
+        "selected_model_key": selected_model_key,
+        "selected_model_backend": selected_variant_meta["model_backend"],
+        "variant_quality_metrics": variant_quality_metrics,
+        "rolling_backtest_metrics": rolling_backtest_metrics,
     }
     append_jsonl(config.model_root / "training_runs.jsonl", log_entry)
     emit_progress(progress_callback, f"训练完成，当前默认模型：{run_id}", 100)
@@ -1390,9 +1698,9 @@ def rollback_to_previous(model_root: Path = DEFAULT_MODEL_ROOT) -> Path:
         raise FileNotFoundError("未找到上一版模型，无法回退")
     rollback_backup = history_dir / datetime.now().strftime("rollback_backup_%Y%m%d_%H%M%S")
     if current_dir.exists():
-        shutil.copytree(current_dir, rollback_backup)
-        shutil.rmtree(current_dir)
-    shutil.copytree(previous_dir, current_dir)
+        copy_tree_with_retry(current_dir, rollback_backup)
+        remove_tree_with_retry(current_dir)
+    copy_tree_with_retry(previous_dir, current_dir)
     current_metadata = read_model_metadata(current_dir)
     write_pinned_default_version(model_root, find_version_key_by_run_id(model_root, current_metadata.get("run_id") if current_metadata else None))
     return current_dir
@@ -1410,27 +1718,54 @@ def resolve_active_model_dir(model_root: str | Path) -> Path:
     raise FileNotFoundError(f"未找到可用模型目录: {root}")
 
 
-def load_models(model_root: str | Path) -> tuple[dict, dict[str, object], Path]:
+
+def load_backend_model(model_path: Path, backend: str):
+    if backend == "lightgbm":
+        return load_lightgbm_model(model_path)
+    if backend == "catboost":
+        from catboost import CatBoostRegressor
+
+        model = CatBoostRegressor()
+        model.load_model(str(model_path))
+        return model
     import xgboost as xgb
 
+    booster = xgb.Booster()
+    booster.load_model(str(model_path))
+    return booster
+
+
+def predict_backend_model(model, backend: str, frame: pd.DataFrame, feature_columns: list[str]) -> np.ndarray:
+    if backend == "lightgbm":
+        return model.predict(frame[feature_columns].astype(float))
+    if backend == "catboost":
+        return model.predict(frame[feature_columns].astype(float))
+    dmatrix = make_dmatrix(frame, feature_columns)
+    iteration_range = best_iteration_range(model)
+    return model.predict(dmatrix, iteration_range=iteration_range) if iteration_range else model.predict(dmatrix)
+
+
+def load_models(model_root: str | Path) -> tuple[dict, dict[str, object], Path]:
     active_dir = resolve_active_model_dir(model_root)
     metadata = json.loads((active_dir / "metadata.json").read_text(encoding="utf-8"))
     models = {}
     if metadata_has_direct_variants(metadata):
         for variant_key, variant_meta in metadata["model_variants"].items():
             variant_dir = active_dir / variant_meta.get("model_dir", variant_key)
+            backend = str(variant_meta.get("model_backend") or "xgboost")
             models[variant_key] = {}
             for segment in metadata["segments"]:
                 segment_name = segment["name"]
-                booster = xgb.Booster()
-                booster.load_model(str(variant_dir / f"{segment_name}.json"))
-                models[variant_key][segment_name] = booster
+                model_path = variant_dir / model_file_name(segment_name, backend)
+                if not model_path.exists() and backend != "xgboost":
+                    model_path = variant_dir / f"{segment_name}.json"
+                    backend = "xgboost"
+                models[variant_key][segment_name] = {"backend": backend, "model": load_backend_model(model_path, backend)}
     else:
         for segment in metadata["segments"]:
             segment_name = segment["name"]
-            booster = xgb.Booster()
-            booster.load_model(str(active_dir / f"{segment_name}.json"))
-            models[segment_name] = booster
+            model_path = active_dir / f"{segment_name}.json"
+            models[segment_name] = {"backend": "xgboost", "model": load_backend_model(model_path, "xgboost")}
     return metadata, models, active_dir
 
 
@@ -1910,10 +2245,11 @@ def run_prediction_with_strategy(
         segment_df = strategy_forecast_df[strategy_forecast_df["segment"] == segment_name].copy()
         if segment_df.empty:
             continue
-        dmatrix = make_dmatrix(segment_df, feature_columns)
-        booster = variant_models[segment_name]
-        iteration_range = best_iteration_range(booster)
-        model_pred = booster.predict(dmatrix, iteration_range=iteration_range) if iteration_range else booster.predict(dmatrix)
+        model_entry = variant_models[segment_name]
+        if isinstance(model_entry, dict) and "model" in model_entry:
+            model_pred = predict_backend_model(model_entry["model"], str(model_entry.get("backend") or "xgboost"), segment_df, feature_columns)
+        else:
+            model_pred = predict_backend_model(model_entry, "xgboost", segment_df, feature_columns)
         if metadata_has_direct_variants(metadata):
             raw_predicted_price = model_pred
         else:
@@ -2255,10 +2591,10 @@ def activate_model_version(model_root: Path, version_key: str, persist_default: 
         raise FileNotFoundError(f"未找到指定模型版本: {version_key}")
     if current_dir.exists():
         if previous_dir.exists():
-            shutil.rmtree(previous_dir)
-        shutil.copytree(current_dir, previous_dir)
-        shutil.rmtree(current_dir)
-    shutil.copytree(selected_dir, current_dir)
+            remove_tree_with_retry(previous_dir)
+        copy_tree_with_retry(current_dir, previous_dir)
+        remove_tree_with_retry(current_dir)
+    copy_tree_with_retry(selected_dir, current_dir)
     if persist_default:
         write_pinned_default_version(model_root, version_key)
     return current_dir
@@ -2271,7 +2607,7 @@ def delete_model_versions(model_root: Path, version_keys: list[str]) -> list[str
     for version_key in version_keys:
         target_dir = history_dir / version_key
         if target_dir.exists():
-            shutil.rmtree(target_dir)
+            remove_tree_with_retry(target_dir)
             deleted.append(version_key)
     if pinned_version_key and pinned_version_key in deleted:
         write_pinned_default_version(model_root, None)

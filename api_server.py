@@ -416,8 +416,10 @@ def window_score(summary: dict[str, Any]) -> float:
 def summarize_window_result(result: Any, model_root: Path, window_days: int, phase: str) -> dict[str, Any]:
     metadata = read_json_file(Path(result.current_model_dir) / "metadata.json")
     variant_metrics = metadata.get("variant_metrics") or {}
+    selected_key = metadata.get("selected_model_key")
     direct_metrics = summarize_metric_rows(
-        variant_metrics.get("no_lag_96")
+        variant_metrics.get(selected_key)
+        or variant_metrics.get("no_lag_96")
         or variant_metrics.get("direct_price")
         or metadata.get("metrics")
         or {}
@@ -436,6 +438,8 @@ def summarize_window_result(result: Any, model_root: Path, window_days: int, pha
         "train_date_count": len(result.train_dates),
         "valid_date_count": len(result.valid_dates),
         "sample_rows": metadata.get("sample_rows"),
+        "selected_model_key": selected_key,
+        "selected_model_backend": metadata.get("selected_model_backend"),
         "metrics": direct_metrics,
     }
 
@@ -618,6 +622,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
                     valid_days=valid_days,
                     training_window_days=window_days,
                     num_boost_round=num_boost_round,
+                    enable_rolling_backtest=False,
                 ),
                 progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
             )
