@@ -19,7 +19,7 @@ from dayahead_core import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="日前电价预测模型（相似法基线 + XGBoost 残差修正版）")
+    parser = argparse.ArgumentParser(description="日前电价预测模型（XGBoost 直接价格预测 + 相似法参考）")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     train_parser = subparsers.add_parser("train", help="训练模型")
@@ -32,12 +32,14 @@ def parse_args() -> argparse.Namespace:
     predict_parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE), help="预测结果输出文件")
     predict_parser.add_argument("--holiday-file", help="节假日文件")
     predict_parser.add_argument("--reference-days", type=int, default=1, help="相似法参考最近天数")
+    add_prediction_similarity_args(predict_parser)
 
     train_predict_parser = subparsers.add_parser("train_predict", help="先训练后预测")
     add_train_args(train_predict_parser)
     train_predict_parser.add_argument("--forecast-file", default=str(DEFAULT_FORECAST_FILE), help="预测文件路径")
     train_predict_parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE), help="预测结果输出文件")
     train_predict_parser.add_argument("--reference-days", type=int, default=1, help="相似法参考最近天数")
+    add_prediction_similarity_args(train_predict_parser)
 
     rollback_parser = subparsers.add_parser("rollback", help="回退到上一版模型")
     rollback_parser.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT), help="模型根目录")
@@ -53,15 +55,18 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT), help="模型根目录")
     parser.add_argument("--holiday-file", help="节假日文件")
     parser.add_argument("--valid-days", type=int, default=14, help="验证集天数")
+    parser.add_argument("--training-window-days", type=int, help="按最近 N 天训练；会自动保留最后 valid-days 天作为验证集")
     parser.add_argument("--num-boost-round", type=int, default=400, help="XGBoost 训练轮数")
     parser.add_argument("--start-date", help="训练起始日期，格式 YYYY-MM-DD")
     parser.add_argument("--end-date", help="训练结束日期，格式 YYYY-MM-DD")
-    parser.add_argument("--similarity-reference-days", type=int, default=100, help="相似法训练参考最近天数")
+    parser.add_argument("--similarity-reference-days", type=int, default=100, help="记录到模型元数据的相似法参考天数")
+
+
+def add_prediction_similarity_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--similarity-weights",
-        help='相似法权重 JSON，例如 {"thermal_space":0.45,"renewable_power":0.15,"thermal_on_capacity":0.2,"day_type":0.1,"thermal_space_load_ratio":0.1}',
+        help='相似法参考曲线权重 JSON，例如 {"thermal_space":0.45,"renewable_power":0.15,"thermal_on_capacity":0.2,"day_type":0.1,"thermal_space_load_ratio":0.1}',
     )
-    parser.add_argument("--no-lag-96", action="store_true", help="训练时不使用昨日/参考日同点价格 lag_96 特征")
 
 
 def build_train_config(args: argparse.Namespace) -> TrainConfig:
@@ -70,12 +75,11 @@ def build_train_config(args: argparse.Namespace) -> TrainConfig:
         model_root=Path(args.model_root),
         holiday_file=Path(args.holiday_file) if args.holiday_file else None,
         valid_days=args.valid_days,
+        training_window_days=args.training_window_days,
         num_boost_round=args.num_boost_round,
         start_date=args.start_date,
         end_date=args.end_date,
         similarity_reference_days=args.similarity_reference_days,
-        use_lag_96=not args.no_lag_96,
-        similarity_weights=json.loads(args.similarity_weights) if args.similarity_weights else None,
     )
 
 
@@ -99,6 +103,7 @@ def main() -> None:
             output_file=args.output_file,
             holiday_file=args.holiday_file,
             reference_days=args.reference_days,
+            similarity_weights=json.loads(args.similarity_weights) if args.similarity_weights else None,
         )
         print(f"预测完成，预测日: {result.forecast_date}")
         print(f"结果文件: {result.output_file}")
@@ -116,6 +121,7 @@ def main() -> None:
             output_file=args.output_file,
             holiday_file=args.holiday_file,
             reference_days=args.reference_days,
+            similarity_weights=json.loads(args.similarity_weights) if args.similarity_weights else None,
         )
         print(f"预测完成，预测日: {predict_result.forecast_date}")
         print(f"结果文件: {predict_result.output_file}")

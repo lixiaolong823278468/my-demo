@@ -29,8 +29,10 @@ from dayahead_core import (
     PRICE_FLOOR,
     TrainConfig,
     activate_model_version,
+    build_history_source_signature,
     delete_model_versions,
     list_model_versions,
+    load_cached_history_collection,
     load_current_metadata,
     load_training_log,
     load_training_preferences,
@@ -51,6 +53,15 @@ MODEL_ROOT = Path(DEFAULT_MODEL_ROOT)
 FORECAST_FILE = Path(DEFAULT_FORECAST_FILE)
 HISTORY_DIR = Path(DEFAULT_HISTORY_DIR)
 OUTPUT_FILE = Path(DEFAULT_OUTPUT_FILE)
+WINDOW_OPTIMIZATION_STATE_FILE = MODEL_ROOT / "window_optimization.json"
+WINDOW_OPTIMIZATION_OUTPUT_ROOT = BASE_DIR / "output" / "window_optimization"
+AUTO_WINDOW_CANDIDATES = [30, 45, 60, 75, 90, 120, 150, 180, 240, 365]
+AUTO_WINDOW_FINE_RADIUS = 15
+AUTO_WINDOW_MAX_HISTORY_DAYS = 100
+AUTO_WINDOW_VALID_DAYS = 14
+AUTO_WINDOW_NUM_BOOST_ROUND = 400
+AUTO_WINDOW_CHECK_INTERVAL_SECONDS = 60
+LAST_AUTO_WINDOW_CHECK_AT: datetime | None = None
 
 
 def parse_similarity_weights_payload(payload: dict[str, Any]) -> dict[str, float] | None:
@@ -62,7 +73,7 @@ def parse_similarity_weights_payload(payload: dict[str, Any]) -> dict[str, float
     return dict(normalize_similarity_weights(raw_weights))
 
 
-def resolve_training_similarity_weights(payload: dict[str, Any], model_root: Path = MODEL_ROOT) -> dict[str, float]:
+def resolve_similarity_weights(payload: dict[str, Any], model_root: Path = MODEL_ROOT) -> dict[str, float]:
     parsed_weights = parse_similarity_weights_payload(payload)
     if parsed_weights is not None:
         return parsed_weights
@@ -131,6 +142,21 @@ def to_jsonable(data: Any) -> Any:
     if isinstance(data, pd.DataFrame):
         return dataframe_to_records(data)
     return sanitize_scalar(data)
+
+
+def read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_json_file(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(to_jsonable(data), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def read_first_sheet(file_path: Path) -> tuple[str, pd.DataFrame]:
@@ -328,8 +354,12 @@ def start_background_job(job_type: str, worker: Callable[[str], dict[str, Any]])
             result = worker(job.job_id)
             STATE.finish_job(job.job_id, result=result)
         except JobCancelledError:
+            if job.job_type == "optimize":
+                mark_window_optimization_attempt_status("cancelled", "任务已手动停止")
             STATE.finish_job(job.job_id, cancelled=True)
         except Exception as exc:  # noqa: BLE001
+            if job.job_type == "optimize":
+                mark_window_optimization_attempt_status("failed", str(exc))
             STATE.finish_job(job.job_id, error=f"{exc}\n{traceback.format_exc(limit=3)}")
 
     threading.Thread(target=runner, daemon=True).start()
@@ -347,6 +377,66 @@ def summarize_train_result(result: Any) -> dict[str, Any]:
         "skipped_sheets": result.skipped_sheets,
         "metadata_path": str(result.metadata_path),
         "quality_report_path": str(result.quality_report_path) if result.quality_report_path else None,
+    }
+
+
+def summarize_metric_rows(metrics: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    total_rows = 0.0
+    mae_sum = 0.0
+    rmse_sum = 0.0
+    rmse_square_sum = 0.0
+    for row in (metrics or {}).values():
+        valid_rows = float(row.get("valid_rows") or 0)
+        mae = row.get("final_mae")
+        rmse = row.get("final_rmse")
+        if valid_rows <= 0 or mae is None or rmse is None:
+            continue
+        mae_value = float(mae)
+        rmse_value = float(rmse)
+        total_rows += valid_rows
+        mae_sum += mae_value * valid_rows
+        rmse_sum += rmse_value * valid_rows
+        rmse_square_sum += rmse_value**2 * valid_rows
+    return {
+        "valid_rows": int(total_rows),
+        "mae": round(mae_sum / total_rows, 4) if total_rows else None,
+        "rmse": round(rmse_sum / total_rows, 4) if total_rows else None,
+        "rmse_true_weighted": round(math.sqrt(rmse_square_sum / total_rows), 4) if total_rows else None,
+    }
+
+
+def window_score(summary: dict[str, Any]) -> float:
+    mae = summary.get("mae")
+    rmse = summary.get("rmse")
+    if mae is None or rmse is None:
+        return float("inf")
+    return float(mae) + 0.2 * float(rmse)
+
+
+def summarize_window_result(result: Any, model_root: Path, window_days: int, phase: str) -> dict[str, Any]:
+    metadata = read_json_file(Path(result.current_model_dir) / "metadata.json")
+    variant_metrics = metadata.get("variant_metrics") or {}
+    direct_metrics = summarize_metric_rows(
+        variant_metrics.get("no_lag_96")
+        or variant_metrics.get("direct_price")
+        or metadata.get("metrics")
+        or {}
+    )
+    score = window_score(direct_metrics)
+    return {
+        "phase": phase,
+        "window_days": int(window_days),
+        "score": round(score, 4) if math.isfinite(score) else None,
+        "run_id": result.run_id,
+        "model_root": str(model_root),
+        "train_start": result.train_dates[0] if result.train_dates else None,
+        "train_end": result.train_dates[-1] if result.train_dates else None,
+        "valid_start": result.valid_dates[0] if result.valid_dates else None,
+        "valid_end": result.valid_dates[-1] if result.valid_dates else None,
+        "train_date_count": len(result.train_dates),
+        "valid_date_count": len(result.valid_dates),
+        "sample_rows": metadata.get("sample_rows"),
+        "metrics": direct_metrics,
     }
 
 
@@ -389,19 +479,18 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
         STATE.append_log(job_id, "收到手动重训请求", 1)
         STATE.raise_if_cancelled(job_id)
         model_root = Path(payload.get("model_root") or MODEL_ROOT)
-        similarity_weights = resolve_training_similarity_weights(payload, model_root)
-        save_training_preferences(model_root, {"similarity_weights": similarity_weights})
+        training_mode = str(payload.get("training_mode") or "rolling_window")
+        training_window_days = int(payload.get("training_window_days") or 60) if training_mode == "rolling_window" else None
         result = train_and_register(
             TrainConfig(
                 history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
                 model_root=model_root,
                 valid_days=int(payload.get("valid_days") or 14),
+                training_window_days=training_window_days,
                 num_boost_round=int(payload.get("num_boost_round") or 400),
-                start_date=(payload.get("start_date") or None) if payload.get("enable_start", True) else None,
-                end_date=(payload.get("end_date") or None) if payload.get("enable_end", True) else None,
+                start_date=(payload.get("start_date") or None) if training_mode != "rolling_window" and payload.get("enable_start", True) else None,
+                end_date=(payload.get("end_date") or None) if training_mode != "rolling_window" and payload.get("enable_end", True) else None,
                 similarity_reference_days=int(payload.get("similarity_reference_days") or 100),
-                use_lag_96=bool(payload.get("use_lag_96", True)),
-                similarity_weights=similarity_weights,
             ),
             progress_callback=build_progress_callback(job_id),
         )
@@ -414,18 +503,239 @@ def build_predict_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, A
     def worker(job_id: str) -> dict[str, Any]:
         STATE.append_log(job_id, "收到预测请求", 1)
         STATE.raise_if_cancelled(job_id)
+        model_root = Path(payload.get("model_root") or MODEL_ROOT)
+        similarity_weights = resolve_similarity_weights(payload, model_root)
+        save_training_preferences(model_root, {"similarity_weights": similarity_weights})
         result = predict_prices_compare(
             history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
             forecast_file=Path(payload.get("forecast_file") or FORECAST_FILE),
-            model_root=Path(payload.get("model_root") or MODEL_ROOT),
+            model_root=model_root,
             output_file=Path(payload.get("output_file") or OUTPUT_FILE),
             reference_days=int(payload.get("reference_days") or 1),
             selected_strategy=str(payload.get("selected_strategy") or "recent_n_days"),
+            similarity_weights=similarity_weights,
             progress_callback=build_progress_callback(job_id),
         )
         return summarize_predict_result(result)
 
     return worker
+
+
+def current_history_signature() -> dict[str, Any]:
+    return build_history_source_signature(HISTORY_DIR, None, True)
+
+
+def window_optimization_state() -> dict[str, Any]:
+    return read_json_file(WINDOW_OPTIMIZATION_STATE_FILE)
+
+
+def save_window_optimization_state(state: dict[str, Any]) -> None:
+    write_json_file(WINDOW_OPTIMIZATION_STATE_FILE, state)
+
+
+def mark_window_optimization_attempt(
+    signature: dict[str, Any],
+    reason: str,
+    force: bool = False,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    state = window_optimization_state()
+    max_history_days = resolve_window_optimization_max_history_days(payload)
+    state.update(
+        {
+            "enabled": True,
+            "last_attempt_at": now_text(),
+            "last_attempt_reason": reason,
+            "last_attempt_status": "running",
+            "last_attempt_force": bool(force),
+            "last_attempted_history_cache_key": signature.get("cache_key"),
+            "max_search_history_days": max_history_days,
+        }
+    )
+    save_window_optimization_state(state)
+
+
+def resolve_window_optimization_max_history_days(payload: dict[str, Any] | None = None) -> int:
+    payload = payload or {}
+    state = window_optimization_state()
+    raw_value = payload.get("max_history_days", state.get("max_search_history_days", AUTO_WINDOW_MAX_HISTORY_DAYS))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        value = AUTO_WINDOW_MAX_HISTORY_DAYS
+    return max(1, value)
+
+
+def mark_window_optimization_attempt_status(status: str, message: str | None = None) -> None:
+    state = window_optimization_state()
+    state["last_attempt_status"] = status
+    state["last_attempt_finished_at"] = now_text()
+    if message:
+        state["last_attempt_message"] = message
+    save_window_optimization_state(state)
+
+
+def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> Callable[[str], dict[str, Any]]:
+    payload = payload or {}
+
+    def worker(job_id: str) -> dict[str, Any]:
+        valid_days = int(payload.get("valid_days") or AUTO_WINDOW_VALID_DAYS)
+        num_boost_round = int(payload.get("num_boost_round") or AUTO_WINDOW_NUM_BOOST_ROUND)
+        fine_radius = int(payload.get("fine_radius") or AUTO_WINDOW_FINE_RADIUS)
+        max_history_days = resolve_window_optimization_max_history_days(payload)
+        STATE.append_log(job_id, "开始自动训练窗口寻优", 1)
+        STATE.raise_if_cancelled(job_id)
+
+        history_signature = current_history_signature()
+        history_df, _, _, _, _ = load_cached_history_collection(HISTORY_DIR, None, True, MODEL_ROOT, leading_days=0)
+        unique_dates = sorted(pd.to_datetime(history_df["date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique().tolist())
+        if len(unique_dates) <= valid_days + 1:
+            raise ValueError("历史数据天数不足，无法执行训练窗口寻优。")
+        available_train_days = len(unique_dates) - valid_days
+        max_train_days = min(available_train_days, max_history_days)
+        requested_candidates = payload.get("candidate_windows")
+        if requested_candidates:
+            candidate_windows = sorted({max(1, min(max_train_days, int(item))) for item in requested_candidates})
+        else:
+            candidate_windows = sorted({item for item in AUTO_WINDOW_CANDIDATES if item <= max_train_days} | {max_train_days})
+            if max_train_days < 30:
+                candidate_windows = sorted({1, max_train_days})
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        search_root = WINDOW_OPTIMIZATION_OUTPUT_ROOT / run_stamp
+        search_root.mkdir(parents=True, exist_ok=True)
+
+        results: list[dict[str, Any]] = []
+
+        def run_window(window_days: int, phase: str, index: int, total: int) -> dict[str, Any]:
+            STATE.raise_if_cancelled(job_id)
+            progress = 5 + int((index - 1) / max(total, 1) * 70)
+            STATE.append_log(job_id, f"{phase}窗口回测 {index}/{total}：最近 {window_days} 天", progress)
+            window_model_root = search_root / f"{phase}_{window_days}"
+            result = train_and_register(
+                TrainConfig(
+                    history_dir=HISTORY_DIR,
+                    model_root=window_model_root,
+                    valid_days=valid_days,
+                    training_window_days=window_days,
+                    num_boost_round=num_boost_round,
+                ),
+                progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
+            )
+            summary = summarize_window_result(result, window_model_root, window_days, phase)
+            results.append(summary)
+            return summary
+
+        total_estimated = len(candidate_windows) + fine_radius * 2 + 1
+        coarse_summaries = [run_window(window, "coarse", idx, total_estimated) for idx, window in enumerate(candidate_windows, start=1)]
+        finite_coarse = [item for item in coarse_summaries if item.get("score") is not None]
+        if not finite_coarse:
+            raise ValueError("所有候选训练窗口均未得到有效指标。")
+        best_coarse = min(finite_coarse, key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))))
+        best_coarse_window = int(best_coarse["window_days"])
+        fine_start = max(1 if max_train_days < 30 else 30, best_coarse_window - fine_radius)
+        fine_end = min(max_train_days, best_coarse_window + fine_radius)
+        searched_windows = {int(row["window_days"]) for row in results}
+        fine_candidates = [item for item in range(fine_start, fine_end + 1) if item not in searched_windows]
+        for offset, window in enumerate(fine_candidates, start=1):
+            run_window(window, "fine", len(candidate_windows) + offset, len(candidate_windows) + len(fine_candidates))
+
+        finite_results = [item for item in results if item.get("score") is not None]
+        if not finite_results:
+            raise ValueError("所有候选训练窗口均未得到有效指标。")
+        best = min(finite_results, key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))))
+        best_window_days = int(best["window_days"])
+        STATE.append_log(job_id, f"最优训练窗口为最近 {best_window_days} 天，正在训练正式模型", 86)
+        final_result = train_and_register(
+            TrainConfig(
+                history_dir=HISTORY_DIR,
+                model_root=MODEL_ROOT,
+                valid_days=valid_days,
+                training_window_days=best_window_days,
+                num_boost_round=num_boost_round,
+            ),
+            progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
+        )
+        activate_model_version(MODEL_ROOT, final_result.run_id, persist_default=True)
+        final_summary = summarize_train_result(final_result)
+        state = {
+            "enabled": True,
+            "last_run_at": now_text(),
+            "last_attempt_at": now_text(),
+            "last_attempt_status": "success",
+            "last_attempt_finished_at": now_text(),
+            "last_attempted_history_cache_key": history_signature.get("cache_key"),
+            "history_cache_key": history_signature.get("cache_key"),
+            "history_date_start": unique_dates[0],
+            "history_date_end": unique_dates[-1],
+            "history_date_count": len(unique_dates),
+            "available_train_days": available_train_days,
+            "max_search_history_days": max_history_days,
+            "valid_days": valid_days,
+            "num_boost_round": num_boost_round,
+            "candidate_window_start": candidate_windows[0] if candidate_windows else None,
+            "candidate_window_end": candidate_windows[-1] if candidate_windows else None,
+            "candidate_window_count": len(candidate_windows),
+            "coarse_candidates": candidate_windows,
+            "fine_radius": fine_radius,
+            "fine_candidates": fine_candidates,
+            "best_window_days": best_window_days,
+            "best_score": best.get("score"),
+            "best_metrics": {
+                "no_lag_96": best.get("metrics"),
+            },
+            "search_root": str(search_root),
+            "results": sorted(results, key=lambda item: (float(item.get("score") or float("inf")), int(item.get("window_days") or 0))),
+            "final_model": final_summary,
+        }
+        save_window_optimization_state(state)
+        STATE.append_log(job_id, f"窗口寻优完成，已启用最近 {best_window_days} 天模型", 100)
+        return {"window_optimization": state, "train_result": final_summary}
+
+    return worker
+
+
+def maybe_start_window_optimization(reason: str = "startup", payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    state = window_optimization_state()
+    try:
+        signature = current_history_signature()
+    except Exception as exc:  # noqa: BLE001
+        return {"started": False, "reason": f"history_signature_failed: {exc}", "state": state}
+    if STATE.has_running_job():
+        return {"started": False, "reason": "job_running", "state": state}
+    if state.get("history_cache_key") == signature.get("cache_key"):
+        return {"started": False, "reason": "history_unchanged", "state": state}
+    if (
+        state.get("last_attempted_history_cache_key") == signature.get("cache_key")
+        and state.get("last_attempt_status") == "failed"
+    ):
+        return {"started": False, "reason": "last_attempt_failed", "state": state}
+    worker_payload = {"reason": reason, "max_history_days": resolve_window_optimization_max_history_days(payload)}
+    mark_window_optimization_attempt(signature, reason, payload=worker_payload)
+    job = start_background_job("optimize", build_window_optimization_worker(worker_payload))
+    return {"started": True, "job": job, "state": state}
+
+
+def check_window_optimization(reason: str = "status_check", force: bool = False, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    global LAST_AUTO_WINDOW_CHECK_AT
+    if not force:
+        checked_at = LAST_AUTO_WINDOW_CHECK_AT
+        now = datetime.now()
+        if checked_at and (now - checked_at).total_seconds() < AUTO_WINDOW_CHECK_INTERVAL_SECONDS:
+            return {"started": False, "reason": "throttled", "state": window_optimization_state()}
+        LAST_AUTO_WINDOW_CHECK_AT = now
+        return maybe_start_window_optimization(reason, payload)
+    if STATE.has_running_job():
+        return {"started": False, "reason": "job_running", "state": window_optimization_state()}
+    LAST_AUTO_WINDOW_CHECK_AT = datetime.now()
+    worker_payload = {"reason": reason, "force": True, "max_history_days": resolve_window_optimization_max_history_days(payload)}
+    try:
+        mark_window_optimization_attempt(current_history_signature(), reason, force=True, payload=worker_payload)
+    except Exception:
+        pass
+    job = start_background_job("optimize", build_window_optimization_worker(worker_payload))
+    return {"started": True, "job": job, "state": window_optimization_state()}
 
 
 def protected_versions() -> set[str]:
@@ -454,13 +764,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self.send_json(self.get_config())
             if path == "/api/status":
                 return self.send_json(self.get_status())
+            if path == "/api/window-optimization/status":
+                return self.send_json({"state": window_optimization_state(), "current_job": STATE.snapshot()})
             if path == "/api/model/current":
                 return self.send_json({"metadata": load_current_metadata(MODEL_ROOT) or {}})
             if path == "/api/model/versions":
                 return self.send_json(self.get_versions())
             if path == "/api/training/logs":
                 return self.send_json(self.get_training_logs())
-            if path == "/api/training/preferences":
+            if path in {"/api/training/preferences", "/api/prediction/preferences"}:
                 return self.send_json({"preferences": load_training_preferences(MODEL_ROOT)})
             if path == "/api/data-quality/reports":
                 return self.send_json({"reports": list_quality_reports()})
@@ -506,8 +818,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return self.send_error_json(HTTPStatus.NOT_FOUND, "未找到任务")
             if path == "/api/train":
                 return self.send_json(start_background_job("train", build_train_worker(payload)), HTTPStatus.ACCEPTED)
-            if path == "/api/training/preferences":
-                preferences = save_training_preferences(MODEL_ROOT, {"similarity_weights": resolve_training_similarity_weights(payload, MODEL_ROOT)})
+            if path == "/api/window-optimization/run":
+                return self.send_json(check_window_optimization("manual", force=bool(payload.get("force", True)), payload=payload), HTTPStatus.ACCEPTED)
+            if path in {"/api/training/preferences", "/api/prediction/preferences"}:
+                preferences = save_training_preferences(MODEL_ROOT, {"similarity_weights": resolve_similarity_weights(payload, MODEL_ROOT)})
                 return self.send_json({"preferences": preferences})
             if path == "/api/predict":
                 return self.send_json(start_background_job("predict", build_predict_worker(payload)), HTTPStatus.ACCEPTED)
@@ -552,9 +866,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             "price_floor": PRICE_FLOOR,
             "price_cap": PRICE_CAP,
             "default_reference_days": 1,
+            "default_training_mode": "rolling_window",
+            "default_training_window_days": 60,
+            "default_window_optimization_max_history_days": resolve_window_optimization_max_history_days(),
             "max_reference_days": 100,
-            "default_use_lag_96": True,
             "default_similarity_weights": dict(load_training_preferences(MODEL_ROOT)["similarity_weights"]),
+            "prediction_preferences": load_training_preferences(MODEL_ROOT),
             "training_preferences": load_training_preferences(MODEL_ROOT),
             "reference_strategy_options": [
                 {"key": "recent_n_days", "label": "最近 N 天"},
@@ -565,8 +882,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         }
 
     def get_status(self) -> dict[str, Any]:
+        auto_check = check_window_optimization("status_check")
         status = STATE.status()
         status["current_model"] = load_current_metadata(MODEL_ROOT) or {}
+        status["window_optimization"] = window_optimization_state()
+        status["window_optimization_auto_check"] = auto_check
         return status
 
     def get_versions(self) -> dict[str, Any]:
@@ -671,6 +991,7 @@ def main() -> None:
     print(f"模型目录：{MODEL_ROOT}")
     if args.open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    threading.Timer(1.0, lambda: check_window_optimization("startup")).start()
     server.serve_forever()
 
 

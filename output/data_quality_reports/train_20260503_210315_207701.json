@@ -1,0 +1,27 @@
+{
+  "report_id": "train_20260503_210315_207701",
+  "task_type": "train",
+  "status": "clean",
+  "created_at": "2026-05-03 21:03:15",
+  "summary": {
+    "total_issues": 0,
+    "errors": 0,
+    "warnings": 0,
+    "skipped_sheets": 0,
+    "blocked_issues": 0,
+    "recorded_issues": 0
+  },
+  "metadata": {
+    "history_dir": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\数据",
+    "skipped_sheets": [
+      "12月.xlsx | 2024年12月16日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
+      "2月.xlsx | Sheet2 | Sheet 名称无法识别为日期",
+      "2月.xlsx | Sheet3 | Sheet 名称无法识别为日期",
+      "4月.xlsx | 2025年4月11日 | 日前-出清概况中无法提取“运行机组容量”，该字段是火电开机容量的关键来源",
+      "8月.xlsx | 2025年8月28日 | 日前-出清概况中无法提取“运行机组容量”，该字段是火电开机容量的关键来源"
+    ],
+    "start_date": "2025-01-01",
+    "end_date": "2026-03-31"
+  },
+  "issues": []
+}

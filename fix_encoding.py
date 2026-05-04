@@ -33,12 +33,7 @@ for i, line in enumerate(lines):
         original = line
 
         # 基于上下文确定正确的文本
-        if "lag_96" in line:
-            line = line.replace(
-                re.findall(r'"([^"]*\?{4,}[^"]*)"', line)[0],
-                "正在构建 lag_96 特征"
-            )
-        elif "progress_label" in line and "????????" in line:
+        if "progress_label" in line and "????????" in line:
             line = line.replace(
                 re.findall(r'"([^"]*\?{4,}[^"]*)"', line)[0],
                 "正在读取数据"
@@ -79,7 +74,7 @@ for i, line in enumerate(lines):
                     line
                 )
                 if line == original:  # 如果正则没匹配上
-                    line = re.sub(r'f"(\?+)\s*\{', 'f"正在执行 {\}', line)
+                    line = re.sub(r'f"(\?+)\s*\{', 'f"???? {', line)
             elif "strategy_index" in line:
                 line = re.sub(r'f"(\?+)\s*\{', 'f"正在对比策略 {', line)
             elif "selected_result" in line:

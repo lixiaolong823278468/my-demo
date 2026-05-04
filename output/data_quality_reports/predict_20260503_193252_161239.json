@@ -1,0 +1,33 @@
+{
+  "report_id": "predict_20260503_193252_161239",
+  "task_type": "predict",
+  "status": "blocked",
+  "created_at": "2026-05-03 19:32:52",
+  "summary": {
+    "total_issues": 1,
+    "errors": 1,
+    "warnings": 0,
+    "skipped_sheets": 0,
+    "blocked_issues": 1,
+    "recorded_issues": 0
+  },
+  "metadata": {
+    "forecast_file": ".test_tmp\\direct_predict_smoke_1777807971391143100\\forecast.xlsx",
+    "history_dir": ".test_tmp\\direct_predict_smoke_1777807971391143100\\history"
+  },
+  "issues": [
+    {
+      "task_type": "predict",
+      "severity": "error",
+      "action": "blocked",
+      "issue_type": "missing_required_field",
+      "file_path": ".test_tmp\\direct_predict_smoke_1777807971391143100\\forecast.xlsx",
+      "sheet_name": "2026-01-08",
+      "message": "缺少必要字段，可识别字段名：火电开机容量(MW), 火电开机容量, 运行机组容量",
+      "date": "2026-01-08",
+      "period": null,
+      "field": "火电开机容量",
+      "value": null
+    }
+  ]
+}

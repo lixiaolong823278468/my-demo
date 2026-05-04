@@ -437,34 +437,9 @@ def test_core_functions() -> None:
 def test_prediction_pipeline_units() -> None:
     print("\n--- 7. 预测流程模块测试 ---")
     from dayahead_core import (
-        attach_lag_96,
         day_type_of,
         attach_similarity_features,
     )
-
-    # --- attach_lag_96 ---
-    base = pd.DataFrame({
-        "date": pd.to_datetime(["2025-01-02"] * 3),
-        "period": [1, 2, 3],
-    })
-    history = pd.DataFrame({
-        "date": pd.to_datetime(["2025-01-01"] * 3 + ["2025-01-02"] * 3),
-        "period": [1, 2, 3, 1, 2, 3],
-        "日前出清价格(元/MWh)": [300.0, 310.0, 320.0, 350.0, 360.0, 370.0],
-    })
-    result = attach_lag_96(base, history)
-    has_lag = "lag_96" in result.columns
-    record("attach_lag_96 列存在", has_lag, "", "pipeline")
-    if has_lag:
-        record("attach_lag_96 值正确", result["lag_96"].iloc[0] == 300.0, f"lag={result['lag_96'].tolist()}", "pipeline")
-
-    # 无历史数据时 lag_96 为 NaN
-    base_empty = pd.DataFrame({
-        "date": pd.to_datetime(["2025-01-01"] * 3),
-        "period": [1, 2, 3],
-    })
-    result2 = attach_lag_96(base_empty, history)
-    record("attach_lag_96 无前日数据则 NaN", result2["lag_96"].isna().all(), f"lag={result2['lag_96'].tolist()}", "pipeline")
 
     # --- day_type_of ---
     workday = pd.Timestamp("2025-01-02")  # Thursday

@@ -1,0 +1,59 @@
+{
+  "report_id": "predict_20260503_193216_624689",
+  "task_type": "predict",
+  "status": "blocked",
+  "created_at": "2026-05-03 19:32:16",
+  "summary": {
+    "total_issues": 3,
+    "errors": 3,
+    "warnings": 0,
+    "skipped_sheets": 0,
+    "blocked_issues": 3,
+    "recorded_issues": 0
+  },
+  "metadata": {
+    "forecast_file": ".test_tmp\\direct_predict_smoke_1777807935817499800\\forecast.xlsx",
+    "history_dir": ".test_tmp\\direct_predict_smoke_1777807935817499800\\history"
+  },
+  "issues": [
+    {
+      "task_type": "predict",
+      "severity": "error",
+      "action": "blocked",
+      "issue_type": "missing_required_field",
+      "file_path": ".test_tmp\\direct_predict_smoke_1777807935817499800\\forecast.xlsx",
+      "sheet_name": "Sheet1",
+      "message": "缺少必要字段，可识别字段名：剩余电力值(MW), 剩余电力值, 火电空间, 火电剩余空间, 总加电力值(MW), 总加电力值, 电力值(MW), 电力值, 风光电力值(MW), 风光电力值",
+      "date": "2026-01-07",
+      "period": null,
+      "field": "预测日火电空间",
+      "value": null
+    },
+    {
+      "task_type": "predict",
+      "severity": "error",
+      "action": "blocked",
+      "issue_type": "missing_required_field",
+      "file_path": ".test_tmp\\direct_predict_smoke_1777807935817499800\\forecast.xlsx",
+      "sheet_name": "Sheet1",
+      "message": "缺少必要字段，可识别字段名：剩余电力值(MW), 剩余电力值, 火电空间, 火电剩余空间, 总加电力值(MW), 总加电力值, 电力值(MW), 电力值, 风光电力值(MW), 风光电力值",
+      "date": "2026-01-06",
+      "period": null,
+      "field": "参考日火电空间",
+      "value": null
+    },
+    {
+      "task_type": "predict",
+      "severity": "error",
+      "action": "blocked",
+      "issue_type": "missing_required_field",
+      "file_path": ".test_tmp\\direct_predict_smoke_1777807935817499800\\forecast.xlsx",
+      "sheet_name": "Sheet1",
+      "message": "缺少必要字段，可识别字段名：火电开机容量(MW), 火电开机容量, 运行机组容量",
+      "date": "2026-01-07",
+      "period": null,
+      "field": "火电开机容量",
+      "value": null
+    }
+  ]
+}

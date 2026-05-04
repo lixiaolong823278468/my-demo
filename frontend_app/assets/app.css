@@ -991,6 +991,17 @@ select {
   font-size: 13px;
 }
 
+#quality-issues-table {
+  min-width: 1500px;
+}
+
+.quality-location {
+  min-width: 260px;
+  max-width: 420px;
+  white-space: normal;
+  line-height: 1.55;
+}
+
 .editable-table {
   min-width: 1300px;
 }
@@ -2591,6 +2602,149 @@ body::after {
   border: 1px solid #eef2f6;
   border-radius: 22px;
   background: #fbfcfe;
+}
+
+#tab-train.train-page {
+  gap: 18px;
+}
+
+.train-workflow-card,
+.train-metrics-section {
+  position: relative;
+  overflow: hidden;
+  padding: 22px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 28px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(248, 251, 255, 0.88)),
+    radial-gradient(circle at 0 0, rgba(15, 107, 255, 0.08), transparent 34%);
+  box-shadow:
+    0 18px 48px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.train-workflow-card::before,
+.train-metrics-section::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: linear-gradient(180deg, var(--primary), var(--cyan));
+}
+
+.train-workflow-card-auto {
+  background:
+    radial-gradient(circle at 92% 8%, rgba(46, 229, 157, 0.18), transparent 28%),
+    linear-gradient(135deg, #f8fbff, #eef8ff);
+  border-color: rgba(15, 107, 255, 0.16);
+}
+
+.train-workflow-card-manual {
+  background:
+    radial-gradient(circle at 92% 12%, rgba(250, 173, 20, 0.14), transparent 30%),
+    linear-gradient(135deg, #fffdf8, #fbfcfe);
+  border-color: rgba(250, 173, 20, 0.2);
+}
+
+.train-workflow-card-progress {
+  padding: 18px;
+  background: linear-gradient(135deg, #ffffff, #f7faff);
+}
+
+.embedded-progress-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.embedded-progress-row .progress-card {
+  margin: 0;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow:
+    0 10px 28px rgba(15, 23, 42, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.progress-card-optimize .progress-fill {
+  background: linear-gradient(90deg, #0f6bff, #2ee59d);
+}
+
+.progress-card-train .progress-fill {
+  background: linear-gradient(90deg, #fa8c16, #ffd166);
+}
+
+.train-card-accent {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(15, 107, 255, 0.08);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.train-section-divider {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.train-section-divider::before,
+.train-section-divider::after {
+  content: "";
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(15, 107, 255, 0.24), transparent);
+}
+
+.train-section-divider span {
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 107, 255, 0.12);
+  background: #fff;
+}
+
+#tab-train .train-workflow-card .section-header {
+  padding-right: 96px;
+}
+
+#tab-train .train-workflow-card .form-grid {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(15, 23, 42, 0.07);
+}
+
+#tab-train .train-workflow-card-progress .progress-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-top: 0;
+}
+
+#tab-train .train-workflow-card-progress .progress-card {
+  margin: 0;
+}
+
+.train-metrics-section {
+  padding-top: 18px;
+}
+
+.train-metrics-section .subsection-title {
+  margin-top: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
 }
 
 #tab-train .progress-grid,

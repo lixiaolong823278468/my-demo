@@ -16,10 +16,12 @@ const App = {
   activeJobIds: {
     train: null,
     predict: null,
+    optimize: null,
   },
   jobStates: {
     train: null,
     predict: null,
+    optimize: null,
   },
   statusFocus: null,
   predictSessionStarted: false,
@@ -36,19 +38,19 @@ const columnTitleMap = {
   hour: "小时",
   net_load: "火电空间",
   thermal_on_capacity: "火电开机容量(MW)",
-  lag_96: "昨日同点日前价格",
-  similar_price: "多条件相似基线",
-  net_load_only_similar_price: "仅火电空间相似基线",
-  residual_pred: "模型残差修正值",
-  predicted_price: "最终预测价格",
-  recent_n_days_similar_price: "最近 N 天多条件相似基线",
-  recent_n_days_net_load_only_similar_price: "最近 N 天仅火电空间基线",
-  recent_n_days_residual_pred: "最近 N 天残差修正",
-  recent_n_days_predicted_price: "最近 N 天最终预测价格",
-  recent_same_type_days_similar_price: "同类型日多条件相似基线",
-  recent_same_type_days_net_load_only_similar_price: "同类型日仅火电空间基线",
-  recent_same_type_days_residual_pred: "同类型日残差修正",
-  recent_same_type_days_predicted_price: "同类型日最终预测价格",
+  similar_price: "多条件相似参考",
+  net_load_only_similar_price: "仅火电空间相似参考",
+  residual_pred: "模型与相似法差值",
+  model_similarity_diff: "模型与相似法差值",
+  predicted_price: "模型预测价格",
+  recent_n_days_similar_price: "最近 N 天多条件相似参考",
+  recent_n_days_net_load_only_similar_price: "最近 N 天仅火电空间参考",
+  recent_n_days_residual_pred: "最近 N 天模型与相似法差值",
+  recent_n_days_predicted_price: "最近 N 天模型预测价格",
+  recent_same_type_days_similar_price: "同类型日多条件相似参考",
+  recent_same_type_days_net_load_only_similar_price: "同类型日仅火电空间参考",
+  recent_same_type_days_residual_pred: "同类型日模型与相似法差值",
+  recent_same_type_days_predicted_price: "同类型日模型预测价格",
   prediction_price_diff: "两策略价差",
 };
 
@@ -72,17 +74,17 @@ const predictionSeriesNameMap = {
 const predictionChartConfigMap = {
   recent_n_days: {
     elementId: "prediction-chart-recent-n-days",
-    predictedName: "最终预测价格",
-    similarName: "多条件相似基线",
-    netLoadOnlyName: "仅火电空间相似基线",
-    residualName: "最近 N 天模型残差修正",
+    predictedName: "模型预测价格",
+    similarName: "多条件相似参考",
+    netLoadOnlyName: "仅火电空间相似参考",
+    residualName: "最近 N 天模型与相似法差值",
   },
   recent_same_type_days: {
     elementId: "prediction-chart-same-type-days",
-    predictedName: "最终预测价格",
-    similarName: "多条件相似基线",
-    netLoadOnlyName: "仅火电空间相似基线",
-    residualName: "同类型日模型残差修正",
+    predictedName: "模型预测价格",
+    similarName: "多条件相似参考",
+    netLoadOnlyName: "仅火电空间相似参考",
+    residualName: "同类型日模型与相似法差值",
   },
 };
 const predictionChartLayoutStorageKey = "dayahead-prediction-chart-layout";
@@ -176,11 +178,22 @@ function setActiveTab(name) {
 }
 
 function renderTopStatus(statusData) {
-  const activeJob = getFocusedJobState();
+  const activeJob = getFocusedJobState() || statusData.current_job;
+  const windowState = statusData.window_optimization || {};
+  const windowLabel = windowState.best_window_days
+    ? `最优训练窗口：最近 ${windowState.best_window_days} 天`
+    : "最优训练窗口：待寻优";
   const items = [
     `当前模型：${statusData.current_model?.run_id || "-"}`,
     `运行状态：${activeJob?.status || "系统待命"}`,
   ];
+  items.push(windowLabel);
+  items.push(
+    windowState.max_search_history_days
+      ? `寻优上限：最近 ${windowState.max_search_history_days} 天`
+      : `寻优上限：最近 ${currentWindowOptimizationMaxHistoryDays()} 天`,
+  );
+  items.push(windowState.final_model?.run_id ? `默认模型已更新：${windowState.final_model.run_id}` : "默认模型更新：待执行");
   $("#top-status").innerHTML = items
     .map((item) => `<div class="status-chip"><span class="status-chip-dot"></span>${htmlEscape(item)}</div>`)
     .join("");
@@ -423,6 +436,19 @@ function renderQualityReports(reports) {
   });
 }
 
+function qualityIssueLocation(issue) {
+  if (issue.location) return issue.location;
+  const dateParts = [issue.year, issue.month, issue.day].filter((item) => item !== null && item !== undefined && item !== "-");
+  const dateText = issue.date || (dateParts.length === 3 ? `${dateParts[0]}-${String(dateParts[1]).padStart(2, "0")}-${String(dateParts[2]).padStart(2, "0")}` : "");
+  return [
+    dateText,
+    issue.period ? `第 ${issue.period} 点` : "",
+    issue.field ? `字段：${issue.field}` : "",
+    issue.sheet_name ? `Sheet：${issue.sheet_name}` : "",
+    issue.excel_cell ? `单元格：${issue.excel_cell}` : "",
+  ].filter(Boolean).join(" / ") || "-";
+}
+
 function renderQualityIssues(report) {
   App.latestQualityReport = report || null;
   renderQualitySummary(report);
@@ -432,25 +458,33 @@ function renderQualityIssues(report) {
     ? `${report.report_id || "-"}：共 ${issues.length} 条异常`
     : "暂无报告明细";
   if (!issues.length) {
-    tbody.innerHTML = `<tr><td colspan="10">暂无异常明细</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="14">暂无异常明细</td></tr>`;
     return;
   }
   tbody.innerHTML = issues
     .map(
-      (issue) => `
+      (issue) => {
+        const fileName = String(issue.file_path || "-").split(/[\\/]/).pop();
+        const location = qualityIssueLocation(issue);
+        return `
         <tr>
+          <td class="quality-location" title="${htmlEscape(location)}">${htmlEscape(location)}</td>
+          <td>${htmlEscape(issue.year ?? "-")}</td>
+          <td>${htmlEscape(issue.month ?? "-")}</td>
+          <td>${htmlEscape(issue.day ?? "-")}</td>
+          <td>${htmlEscape(issue.time_point || (issue.period ? `第 ${issue.period} 点` : "-"))}</td>
+          <td>${htmlEscape(issue.field || "-")}</td>
+          <td>${htmlEscape(issue.excel_cell || "-")}</td>
+          <td>${htmlEscape(issue.value ?? "-")}</td>
           <td>${htmlEscape(qualityActionLabel(issue.action))}</td>
           <td>${htmlEscape(issue.severity || "-")}</td>
           <td>${htmlEscape(issue.issue_type || "-")}</td>
-          <td title="${htmlEscape(issue.file_path || "-")}">${htmlEscape(String(issue.file_path || "-").split(/[\\/]/).pop())}</td>
+          <td title="${htmlEscape(issue.file_path || "-")}">${htmlEscape(fileName)}</td>
           <td>${htmlEscape(issue.sheet_name || "-")}</td>
-          <td>${htmlEscape(issue.date || "-")}</td>
-          <td>${htmlEscape(issue.period ?? "-")}</td>
-          <td>${htmlEscape(issue.field || "-")}</td>
-          <td>${htmlEscape(issue.value ?? "-")}</td>
           <td>${htmlEscape(issue.message || "-")}</td>
         </tr>
-      `,
+      `;
+      },
     )
     .join("");
 }
@@ -566,9 +600,61 @@ function currentReferenceDays() {
   return Number.isFinite(value) && value >= 1 ? Math.min(value, maxValue) : 1;
 }
 
+function currentTrainingMode() {
+  return $("#training-mode")?.value || App.config?.default_training_mode || "rolling_window";
+}
+
+function currentTrainingWindowDays() {
+  const value = Number($("#training-window-days")?.value || App.config?.default_training_window_days || 60);
+  return Number.isFinite(value) && value >= 1 ? Math.round(value) : 60;
+}
+
+function currentWindowOptimizationMaxHistoryDays() {
+  const value = Number(
+    $("#window-optimization-max-history-days")?.value
+      || App.config?.default_window_optimization_max_history_days
+      || 100,
+  );
+  return Number.isFinite(value) && value >= 1 ? Math.round(value) : 100;
+}
+
+function currentWindowOptimizationValidDays() {
+  const value = Number($("#window-optimization-valid-days")?.value || 14);
+  return Number.isFinite(value) && value >= 1 ? Math.round(value) : 14;
+}
+
+function currentWindowOptimizationNumBoostRound() {
+  const value = Number($("#window-optimization-num-boost-round")?.value || 400);
+  return Number.isFinite(value) && value >= 1 ? Math.round(value) : 400;
+}
+
+function currentWindowOptimizationFineRadius() {
+  const value = Number($("#window-optimization-fine-radius")?.value || 15);
+  return Number.isFinite(value) && value >= 0 ? Math.round(value) : 15;
+}
+
+function syncTrainingModeControls() {
+  const isRolling = currentTrainingMode() === "rolling_window";
+  const windowInput = $("#training-window-days");
+  if (windowInput) windowInput.disabled = !isRolling;
+  const enableStart = $("#enable-start");
+  const enableEnd = $("#enable-end");
+  if (enableStart) enableStart.disabled = isRolling;
+  if (enableEnd) enableEnd.disabled = isRolling;
+  setDatePickerDisabled("train-start-picker", isRolling || !enableStart?.checked);
+  setDatePickerDisabled("train-end-picker", isRolling || !enableEnd?.checked);
+}
+
 function formatReferenceStrategyLabel(strategyKey, label, referenceDays = currentReferenceDays()) {
   const baseLabel = label || referenceStrategyLabelMap[strategyKey] || strategyKey || "-";
   return String(baseLabel).replace(/\s*N\s*/g, ` ${referenceDays} `).replace(/\s+/g, " ").trim();
+}
+
+function modelSimilarityDiff(row) {
+  const value = Number(row?.model_similarity_diff);
+  if (Number.isFinite(value)) return value;
+  const legacyValue = Number(row?.residual_pred);
+  return Number.isFinite(legacyValue) ? legacyValue : 0;
 }
 
 function syncPredictionStrategySelectors(prediction) {
@@ -651,7 +737,6 @@ function renderPredictionTable(prediction) {
     "recent_same_type_days_predicted_price",
     "prediction_price_diff",
     "net_load",
-    "lag_96",
   ];
   const rows = primaryRows.map((row) => {
     const periodKey = String(row.period);
@@ -664,15 +749,14 @@ function renderPredictionTable(prediction) {
       period: row.period,
       recent_n_days_similar_price: recentRow ? Number(recentRow.similar_price || 0).toFixed(2) : "",
       recent_n_days_net_load_only_similar_price: recentRow ? Number(recentRow.net_load_only_similar_price || 0).toFixed(2) : "",
-      recent_n_days_residual_pred: recentRow ? Number(recentRow.residual_pred || 0).toFixed(2) : "",
+      recent_n_days_residual_pred: recentRow ? modelSimilarityDiff(recentRow).toFixed(2) : "",
       recent_n_days_predicted_price: recentPrice === null ? "" : recentPrice.toFixed(2),
       recent_same_type_days_similar_price: sameTypeRow ? Number(sameTypeRow.similar_price || 0).toFixed(2) : "",
       recent_same_type_days_net_load_only_similar_price: sameTypeRow ? Number(sameTypeRow.net_load_only_similar_price || 0).toFixed(2) : "",
-      recent_same_type_days_residual_pred: sameTypeRow ? Number(sameTypeRow.residual_pred || 0).toFixed(2) : "",
+      recent_same_type_days_residual_pred: sameTypeRow ? modelSimilarityDiff(sameTypeRow).toFixed(2) : "",
       recent_same_type_days_predicted_price: sameTypePrice === null ? "" : sameTypePrice.toFixed(2),
       prediction_price_diff: recentPrice === null || sameTypePrice === null ? "" : (sameTypePrice - recentPrice).toFixed(2),
       net_load: row.net_load,
-      lag_96: row.lag_96,
     };
   });
   const head = `<thead><tr>${columns.map((col) => `<th>${htmlEscape(columnTitleMap[col] || col)}</th>`).join("")}</tr></thead>`;
@@ -782,11 +866,11 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
     const value = Number(row.net_load_only_similar_price);
     return Number.isFinite(value) ? value : null;
   });
-  const residual = rows.map((row) => Number(row.residual_pred || 0));
+  const diff = rows.map((row) => modelSimilarityDiff(row));
   const predictedName = formatReferenceStrategyLabel(strategyKey, config.predictedName, referenceDays);
   const similarName = formatReferenceStrategyLabel(strategyKey, config.similarName, referenceDays);
   const netLoadOnlyName = formatReferenceStrategyLabel(strategyKey, config.netLoadOnlyName, referenceDays);
-  const residualName = formatReferenceStrategyLabel(strategyKey, config.residualName, referenceDays);
+  const diffName = formatReferenceStrategyLabel(strategyKey, config.residualName, referenceDays);
 
   chart.setOption(
     {
@@ -818,7 +902,7 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
       legend: {
         top: 8,
         textStyle: { color: "#4e5969" },
-        data: [predictedName, similarName, netLoadOnlyName, residualName],
+        data: [predictedName, similarName, netLoadOnlyName, diffName],
       },
       grid: [
         { left: 54, right: 38, top: 52, height: 210 },
@@ -853,7 +937,7 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
         {
           type: "value",
           gridIndex: 1,
-          name: "Residual",
+          name: "差值",
           axisLabel: { color: "#86909c" },
           splitLine: { show: false },
         },
@@ -866,7 +950,7 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
         {
           name: predictedName,
           type: "line",
-          smooth: true,
+          smooth: false,
           symbol: "circle",
           symbolSize: 5,
           lineStyle: { width: 3 },
@@ -876,7 +960,7 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
         {
           name: similarName,
           type: "line",
-          smooth: true,
+          smooth: false,
           symbol: "none",
           lineStyle: { width: 2, type: "dashed" },
           data: similar,
@@ -884,18 +968,18 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
         {
           name: netLoadOnlyName,
           type: "line",
-          smooth: true,
+          smooth: false,
           symbol: "none",
           lineStyle: { width: 2, type: "dotted" },
           data: netLoadOnlySimilar,
         },
         {
-          name: residualName,
+          name: diffName,
           type: "bar",
           xAxisIndex: 1,
           yAxisIndex: 1,
           barMaxWidth: 10,
-          data: residual,
+          data: diff,
         },
       ],
     },
@@ -908,29 +992,35 @@ function applyProgressCard(key, state) {
   const text = $(`#${key}-progress-text`);
   const status = $(`#${key}-progress-status`);
   const fill = $(`#${key}-progress-fill`);
+  if (!card || !text || !status || !fill) return;
   const progress = Math.max(0, Math.min(100, Number(state.progress || 0)));
   fill.style.width = `${progress}%`;
   text.textContent = state.label || `${progress}%`;
-  status.textContent = state.status || "等待中";
+  status.textContent = state.status || "\u7b49\u5f85\u4e2d";
   card.classList.remove("running", "success", "error");
   if (state.type) card.classList.add(state.type);
 }
 
 function deriveJobState(job, mode) {
-  const idleText = mode === "train" ? "等待手动重训" : "等待执行预测";
+  const idleTextMap = {
+    train: "\u7b49\u5f85\u624b\u52a8\u91cd\u8bad",
+    optimize: "\u7b49\u5f85\u81ea\u52a8\u5bfb\u4f18",
+    predict: "\u7b49\u5f85\u6267\u884c\u9884\u6d4b",
+  };
+  const idleText = idleTextMap[mode] || "\u7b49\u5f85\u4e2d";
   if (!job) {
-    return { progress: 0, label: "未开始", status: idleText, type: "" };
+    return { progress: 0, label: "\u672a\u5f00\u59cb", status: idleText, type: "" };
   }
   if (job.cancelled) {
-    return { progress: Number(job.progress || 0), label: "已停止", status: job.status || "任务已停止", type: "error" };
+    return { progress: Number(job.progress || 0), label: "\u5df2\u505c\u6b62", status: job.status || "\u4efb\u52a1\u5df2\u505c\u6b62", type: "error" };
   }
   if (job.error) {
-    return { progress: Math.max(1, Number(job.progress || 0)), label: "执行失败", status: job.error.split("\n")[0], type: "error" };
+    return { progress: Math.max(1, Number(job.progress || 0)), label: "\u6267\u884c\u5931\u8d25", status: job.error.split("\n")[0], type: "error" };
   }
   if (job.running) {
-    return { progress: Number(job.progress || 0), label: `${job.progress || 0}%`, status: job.status || "执行中", type: "running" };
+    return { progress: Number(job.progress || 0), label: `${job.progress || 0}%`, status: job.status || "\u6267\u884c\u4e2d", type: "running" };
   }
-  return { progress: 100, label: "已完成", status: job.status || "执行完成", type: "success" };
+  return { progress: 100, label: "\u5df2\u5b8c\u6210", status: job.status || "\u6267\u884c\u5b8c\u6210", type: "success" };
 }
 
 function getFocusedJobState() {
@@ -944,6 +1034,7 @@ function getFocusedJobState() {
 }
 
 function renderProgressSections() {
+  applyProgressCard("optimize", deriveJobState(App.jobStates.optimize, "optimize"));
   applyProgressCard("train", deriveJobState(App.jobStates.train, "train"));
   applyProgressCard("predict", deriveJobState(App.jobStates.predict, "predict"));
   syncStopButtons();
@@ -951,15 +1042,17 @@ function renderProgressSections() {
 
 function syncStopButtons() {
   const states = {
+    optimize: Boolean(App.activeJobIds.optimize && App.jobStates.optimize?.running),
     train: Boolean(App.activeJobIds.train && App.jobStates.train?.running),
     predict: Boolean(App.activeJobIds.predict && App.jobStates.predict?.running),
   };
+  $("#stop-optimize-btn")?.classList.toggle("hidden", !states.optimize);
   $("#stop-train-btn")?.classList.toggle("hidden", !states.train);
   $("#stop-predict-btn")?.classList.toggle("hidden", !states.predict);
 }
 
 function setPendingState(mode, title) {
-  const key = mode === "train" ? "train" : "predict";
+  const key = mode || "train";
   App.statusFocus = key;
   applyProgressCard(key, {
     progress: 3,
@@ -978,7 +1071,7 @@ function setPendingState(mode, title) {
 }
 
 function renderStatusPanel(statusData) {
-  const currentJob = getFocusedJobState();
+  const currentJob = getFocusedJobState() || statusData?.current_job || null;
   const text = currentJob?.status || "系统待命";
   $("#status-current").textContent = text;
   $("#status-progress-fill").style.width = `${Math.max(0, Math.min(100, Number(currentJob?.progress || 0)))}%`;
@@ -1010,7 +1103,7 @@ async function pollJobUntilDone(jobId) {
 }
 
 async function refreshTrackedJobs() {
-  const modes = ["train", "predict"];
+  const modes = ["train", "predict", "optimize"];
   const requests = modes.map(async (mode) => {
     const jobId = App.activeJobIds[mode];
     if (!jobId) return;
@@ -1033,8 +1126,8 @@ async function refreshTrackedJobs() {
 
 function resetSessionProgress() {
   App.pendingStatus = null;
-  App.activeJobIds = { train: null, predict: null };
-  App.jobStates = { train: null, predict: null };
+  App.activeJobIds = { train: null, predict: null, optimize: null };
+  App.jobStates = { train: null, predict: null, optimize: null };
   App.statusFocus = null;
   App.predictSessionStarted = false;
   renderProgressSections();
@@ -1044,11 +1137,17 @@ function resetSessionProgress() {
 
 async function loadConfig() {
   App.config = await request("/api/config");
+  if ($("#training-mode") && App.config?.default_training_mode) {
+    $("#training-mode").value = App.config.default_training_mode;
+  }
+  if ($("#training-window-days") && App.config?.default_training_window_days) {
+    $("#training-window-days").value = App.config.default_training_window_days;
+  }
+  if ($("#window-optimization-max-history-days") && App.config?.default_window_optimization_max_history_days) {
+    $("#window-optimization-max-history-days").value = App.config.default_window_optimization_max_history_days;
+  }
   if ($("#reference-days") && App.config?.default_reference_days && !$("#reference-days").value) {
     $("#reference-days").value = App.config.default_reference_days;
-  }
-  if ($("#use-lag-96") && typeof App.config?.default_use_lag_96 === "boolean") {
-    $("#use-lag-96").checked = App.config.default_use_lag_96;
   }
   const weights = App.config?.default_similarity_weights || {};
   [
@@ -1062,6 +1161,7 @@ async function loadConfig() {
       $(selector).value = weights[key];
     }
   });
+  syncTrainingModeControls();
   renderConfigPaths();
 }
 
@@ -1075,8 +1175,8 @@ function collectSimilarityWeights() {
   };
 }
 
-async function saveTrainingPreferences() {
-  await request("/api/training/preferences", {
+async function savePredictionPreferences() {
+  await request("/api/prediction/preferences", {
     method: "POST",
     body: JSON.stringify({ similarity_weights: collectSimilarityWeights() }),
   });
@@ -1136,21 +1236,20 @@ async function saveTemplate() {
 async function startTrain() {
   const btn = $("#train-btn");
   const originalText = btn?.textContent || "手动重训模型";
-  const similarityWeights = collectSimilarityWeights();
   try {
     setButtonLoading(btn, true, originalText);
     setPendingState("train", "正在提交训练任务...");
     const data = await request("/api/train", {
       method: "POST",
       body: JSON.stringify({
+        training_mode: currentTrainingMode(),
+        training_window_days: currentTrainingWindowDays(),
         start_date: $("#train-start-date").value || null,
         end_date: $("#train-end-date").value || null,
         enable_start: $("#enable-start").checked,
         enable_end: $("#enable-end").checked,
         valid_days: Number($("#valid-days").value || 14),
         num_boost_round: Number($("#num-boost-round").value || 400),
-        use_lag_96: $("#use-lag-96")?.checked !== false,
-        similarity_weights: similarityWeights,
       }),
     });
     App.activeJobIds.train = data.job_id;
@@ -1198,6 +1297,60 @@ async function startTrain() {
   }
 }
 
+async function startWindowOptimization() {
+  const btn = $("#optimize-window-btn");
+  const originalText = btn?.textContent || "自动寻优训练窗口";
+  try {
+    setButtonLoading(btn, true, originalText);
+    App.statusFocus = "optimize";
+    App.pendingStatus = {
+      job_type: "optimize",
+      progress: 3,
+      status: "正在提交训练窗口自动寻优任务...",
+      logs: ["[本地] 正在提交训练窗口自动寻优任务..."],
+      running: true,
+    };
+    applyProgressCard("optimize", { progress: 3, label: "\u63d0\u4ea4\u4e2d", status: "\u6b63\u5728\u63d0\u4ea4\u8bad\u7ec3\u7a97\u53e3\u81ea\u52a8\u5bfb\u4f18\u4efb\u52a1...", type: "running" });
+    renderStatusPanel({ current_job: App.pendingStatus, recent_jobs: [] });
+    const data = await request("/api/window-optimization/run", {
+      method: "POST",
+      body: JSON.stringify({
+        force: true,
+        max_history_days: currentWindowOptimizationMaxHistoryDays(),
+        valid_days: currentWindowOptimizationValidDays(),
+        num_boost_round: currentWindowOptimizationNumBoostRound(),
+        fine_radius: currentWindowOptimizationFineRadius(),
+      }),
+    });
+    if (data.started && data.job?.job_id) {
+      App.activeJobIds.optimize = data.job.job_id;
+      App.jobStates.optimize = {
+        job_id: data.job.job_id,
+        job_type: "optimize",
+        progress: 5,
+        status: `训练窗口自动寻优已启动：${data.job.job_id}`,
+        logs: [`[本地] 训练窗口自动寻优已启动：${data.job.job_id}`],
+        running: true,
+      };
+      App.pendingStatus = null;
+      syncStopButtons();
+      applyProgressCard("optimize", { progress: 5, label: "\u5bfb\u4f18\u4e2d", status: `\u8bad\u7ec3\u7a97\u53e3\u81ea\u52a8\u5bfb\u4f18\u5df2\u542f\u52a8\uff1a${data.job.job_id}`, type: "running" });
+      showToast("训练窗口自动寻优已启动");
+    } else {
+      App.pendingStatus = null;
+      applyProgressCard("optimize", deriveJobState(App.jobStates.optimize, "optimize"));
+      showToast(data.reason === "job_running" ? "当前已有任务运行，稍后再试" : "历史数据未变化，无需重新寻优");
+    }
+    await refreshSummary();
+  } catch (error) {
+    App.pendingStatus = null;
+    showToast(error.message, "error");
+  } finally {
+    setButtonLoading(btn, false, originalText);
+    syncStopButtons();
+  }
+}
+
 async function startPredict() {
   const btn = $("#predict-btn");
   const originalText = btn?.textContent || "执行预测";
@@ -1206,10 +1359,13 @@ async function startPredict() {
     App.predictSessionStarted = true;
     setPendingState("predict", "正在保存并提交预测任务...");
     await saveTemplate();
+    const similarityWeights = collectSimilarityWeights();
+    await savePredictionPreferences();
     const data = await request("/api/predict", {
       method: "POST",
       body: JSON.stringify({
         reference_days: currentReferenceDays(),
+        similarity_weights: similarityWeights,
       }),
     });
     App.activeJobIds.predict = data.job_id;
@@ -1314,7 +1470,12 @@ async function cancelJob(mode) {
     showToast("当前没有正在执行的任务", "error");
     return;
   }
-  const stopButton = mode === "train" ? $("#stop-train-btn") : $("#stop-predict-btn");
+  const stopButtonMap = {
+    optimize: $("#stop-optimize-btn"),
+    train: $("#stop-train-btn"),
+    predict: $("#stop-predict-btn"),
+  };
+  const stopButton = stopButtonMap[mode] || $("#stop-train-btn");
   const originalText = stopButton?.textContent || "停止任务";
   try {
     if (stopButton) {
@@ -1619,6 +1780,7 @@ function initDatePicker(pickerId, inputId, defaultValue) {
 }
 
 function setDatePickerDisabled(pickerId, disabled) {
+  if (!App.datePickers[pickerId]) return;
   App.datePickers[pickerId].disabled = disabled;
   if (disabled) {
     App.datePickers[pickerId].open = false;
@@ -1651,6 +1813,8 @@ function initPredictionChartLayout() {
 function bindEvents() {
   $$(".tab-btn").forEach((btn) => btn.addEventListener("click", () => setActiveTab(btn.dataset.tab)));
   $("#train-btn").addEventListener("click", () => startTrain().catch((error) => showToast(error.message, "error")));
+  $("#optimize-window-btn")?.addEventListener("click", () => startWindowOptimization().catch((error) => showToast(error.message, "error")));
+  $("#stop-optimize-btn")?.addEventListener("click", () => cancelJob("optimize"));
   $("#stop-train-btn").addEventListener("click", () => cancelJob("train"));
   $("#refresh-train-metrics-btn").addEventListener("click", () => refreshSummary().then(() => showToast("当前指标已刷新")).catch((error) => showToast(error.message, "error")));
   $("#reload-template-btn").addEventListener("click", () => loadTemplate().then(() => showToast("预测文件已重新加载")).catch((error) => showToast(error.message, "error")));
@@ -1682,10 +1846,19 @@ function bindEvents() {
       syncSelectAllVersionsState();
     }
   });
+  $("#training-mode")?.addEventListener("change", () => syncTrainingModeControls());
   $("#enable-start").addEventListener("change", (event) => {
+    if (currentTrainingMode() === "rolling_window") {
+      syncTrainingModeControls();
+      return;
+    }
     setDatePickerDisabled("train-start-picker", !event.target.checked);
   });
   $("#enable-end").addEventListener("change", (event) => {
+    if (currentTrainingMode() === "rolling_window") {
+      syncTrainingModeControls();
+      return;
+    }
     setDatePickerDisabled("train-end-picker", !event.target.checked);
   });
   [
@@ -1696,7 +1869,7 @@ function bindEvents() {
     "#similarity-weight-ratio",
   ].forEach((selector) => {
     $(selector)?.addEventListener("change", () => {
-      saveTrainingPreferences().catch((error) => showToast(error.message, "error"));
+      savePredictionPreferences().catch((error) => showToast(error.message, "error"));
     });
   });
   $("#hide-status-btn").addEventListener("click", () => toggleStatusPanel(true));

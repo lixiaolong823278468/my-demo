@@ -1,0 +1,9 @@
+{
+  "similarity_weights": {
+    "thermal_space": 0.4,
+    "renewable_power": 0.1,
+    "thermal_on_capacity": 0.3,
+    "day_type": 0.05,
+    "thermal_space_load_ratio": 0.15
+  }
+}

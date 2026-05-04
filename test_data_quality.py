@@ -52,7 +52,7 @@ class DataQualityTests(unittest.TestCase):
         self.assertTrue(any(issue.field == "总加电力值(MW)" for issue in issues))
         self.assertTrue(any(issue.action == "skipped" for issue in issues))
 
-    def test_forecast_template_missing_reference_price_blocks_prediction(self) -> None:
+    def test_forecast_template_missing_reference_price_is_allowed(self) -> None:
         from data_quality import has_blocking_issues, validate_forecast_template
 
         frame = pd.DataFrame(
@@ -60,6 +60,7 @@ class DataQualityTests(unittest.TestCase):
                 "序号": list(range(1, 97)),
                 "5月1日剩余电力值(MW)": [80.0] * 96,
                 "5月2日剩余电力值(MW)": [90.0] * 96,
+                "火电开机容量": [36095.0] * 96,
             }
         )
 
@@ -70,9 +71,7 @@ class DataQualityTests(unittest.TestCase):
             default_year=2026,
         )
 
-        self.assertTrue(has_blocking_issues(issues))
-        self.assertTrue(any(issue.issue_type == "missing_required_field" for issue in issues))
-        self.assertTrue(any(issue.action == "blocked" for issue in issues))
+        self.assertFalse(has_blocking_issues(issues))
 
     def test_forecast_template_accepts_dot_date_headers(self) -> None:
         from data_quality import has_blocking_issues, validate_forecast_template

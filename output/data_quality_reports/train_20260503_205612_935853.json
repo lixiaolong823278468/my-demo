@@ -1,0 +1,21 @@
+{
+  "report_id": "train_20260503_205612_935853",
+  "task_type": "train",
+  "status": "clean",
+  "created_at": "2026-05-03 20:56:12",
+  "summary": {
+    "total_issues": 0,
+    "errors": 0,
+    "warnings": 0,
+    "skipped_sheets": 0,
+    "blocked_issues": 0,
+    "recorded_issues": 0
+  },
+  "metadata": {
+    "history_dir": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\.test_tmp\\stale_feature_cache_1777812972879924700\\history",
+    "skipped_sheets": [],
+    "start_date": null,
+    "end_date": null
+  },
+  "issues": []
+}

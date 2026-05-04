@@ -40,6 +40,14 @@ class DataQualityIssue:
     period: int | None = None
     field: str | None = None
     value: object | None = None
+    year: int | None = None
+    month: int | None = None
+    day: int | None = None
+    time_point: str | None = None
+    excel_row: int | None = None
+    excel_column: str | None = None
+    excel_cell: str | None = None
+    location: str | None = None
 
 
 class DataQualityValidationError(ValueError):
@@ -152,6 +160,102 @@ def safe_value(value: object) -> object | None:
     return value
 
 
+def date_parts(date_text: str | None) -> tuple[int | None, int | None, int | None]:
+    if not date_text:
+        return None, None, None
+    try:
+        value = pd.Timestamp(date_text)
+    except (TypeError, ValueError):
+        return None, None, None
+    if pd.isna(value):
+        return None, None, None
+    return int(value.year), int(value.month), int(value.day)
+
+
+def excel_column_name(column_number: int | None) -> str | None:
+    if not column_number or column_number < 1:
+        return None
+    letters = ""
+    value = column_number
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def excel_column_for_field(columns: Iterable[object] | None, field: str | None) -> str | None:
+    if columns is None or field is None:
+        return None
+    for index, column in enumerate(columns, start=1):
+        if str(column).strip() == str(field).strip():
+            return excel_column_name(index)
+    return None
+
+
+def build_issue_location(
+    *,
+    date: str | None,
+    period: int | None = None,
+    field: str | None = None,
+    sheet_name: str | None = None,
+    excel_cell: str | None = None,
+) -> str:
+    parts: list[str] = []
+    if date:
+        parts.append(str(date))
+    if period is not None:
+        parts.append(f"时点 {period}")
+    if field:
+        parts.append(f"字段：{field}")
+    if sheet_name:
+        parts.append(f"Sheet：{sheet_name}")
+    if excel_cell:
+        parts.append(f"单元格：{excel_cell}")
+    return " / ".join(parts) or "-"
+
+
+def build_issue(
+    *,
+    task_type: str,
+    severity: str,
+    action: str,
+    issue_type: str,
+    file_path: Path | str,
+    sheet_name: str,
+    message: str,
+    date: str | None = None,
+    period: int | None = None,
+    field: str | None = None,
+    value: object | None = None,
+    excel_row: int | None = None,
+    excel_column: str | None = None,
+) -> DataQualityIssue:
+    year, month, day = date_parts(date)
+    excel_cell = f"{excel_column}{excel_row}" if excel_column and excel_row else None
+    time_point = f"第 {period} 点" if period is not None else None
+    return DataQualityIssue(
+        task_type=task_type,
+        severity=severity,
+        action=action,
+        issue_type=issue_type,
+        file_path=str(file_path),
+        sheet_name=str(sheet_name),
+        message=message,
+        date=date,
+        period=period,
+        field=field,
+        value=value,
+        year=year,
+        month=month,
+        day=day,
+        time_point=time_point,
+        excel_row=excel_row,
+        excel_column=excel_column,
+        excel_cell=excel_cell,
+        location=build_issue_location(date=date, period=period, field=field, sheet_name=sheet_name, excel_cell=excel_cell),
+    )
+
+
 def add_missing_field_issue(
     issues: list[DataQualityIssue],
     *,
@@ -164,7 +268,7 @@ def add_missing_field_issue(
     candidates: list[str],
 ) -> None:
     issues.append(
-        DataQualityIssue(
+        build_issue(
             task_type=task_type,
             severity="error",
             action=action,
@@ -190,13 +294,15 @@ def add_numeric_issues(
     date: str | None,
     field: str,
     series: pd.Series,
+    columns: Iterable[object] | None = None,
 ) -> None:
     _, missing, invalid = numeric_masks(series.iloc[:96])
+    excel_column = excel_column_for_field(columns, field)
     for index in series.iloc[:96][missing | invalid].index:
         period = int(index) + 1
         is_missing = bool(missing.loc[index])
         issues.append(
-            DataQualityIssue(
+            build_issue(
                 task_type=task_type,
                 severity=severity,
                 action=action,
@@ -207,6 +313,8 @@ def add_numeric_issues(
                 period=period,
                 field=field,
                 value=safe_value(series.loc[index]),
+                excel_row=int(index) + 2,
+                excel_column=excel_column,
                 message="字段为空" if is_missing else "字段无法转换为数字",
             )
         )
@@ -226,7 +334,7 @@ def validate_history_sheet(
     issues: list[DataQualityIssue] = []
     if len(raw_df) < 96:
         issues.append(
-            DataQualityIssue(
+            build_issue(
                 task_type=task_type,
                 severity="error",
                 action=blocking_action,
@@ -273,6 +381,7 @@ def validate_history_sheet(
             date=date_text,
             field=column,
             series=day_df[column],
+            columns=day_df.columns,
         )
 
     thermal_col = resolve_column(day_df.columns, THERMAL_CANDIDATES)
@@ -300,6 +409,7 @@ def validate_history_sheet(
             date=date_text,
             field=thermal_col,
             series=day_df[thermal_col].ffill().bfill(),
+            columns=day_df.columns,
         )
         return issues
 
@@ -321,18 +431,21 @@ def validate_history_sheet(
     extracted_capacity = overview_series.map(extract_running_unit_capacity)
     missing_capacity = extracted_capacity.isna()
     for index in extracted_capacity[missing_capacity].index:
+        excel_column = excel_column_for_field(day_df.columns, overview_col)
         issues.append(
-            DataQualityIssue(
+            build_issue(
                 task_type=task_type,
                 severity="error",
                 action=blocking_action,
                 issue_type="missing_thermal_capacity",
-                file_path=str(file_path),
-                sheet_name=str(sheet_name),
+                file_path=file_path,
+                sheet_name=sheet_name,
                 date=date_text,
                 period=int(index) + 1,
                 field=overview_col,
                 value=safe_value(day_df.loc[index, overview_col]),
+                excel_row=int(index) + 2,
+                excel_column=excel_column,
                 message="日前-出清概况中无法提取“运行机组容量”，该字段是火电开机容量的关键来源",
             )
         )
@@ -345,12 +458,11 @@ def validate_forecast_template(
     file_path: Path,
     sheet_name: str,
     default_year: int,
-    require_reference_price: bool = True,
 ) -> list[DataQualityIssue]:
     issues: list[DataQualityIssue] = []
     if len(raw_df) < 96:
         issues.append(
-            DataQualityIssue(
+            build_issue(
                 task_type="predict",
                 severity="error",
                 action="blocked",
@@ -372,7 +484,7 @@ def validate_forecast_template(
     unique_dates = sorted(set(header_dates))
     if len(unique_dates) < 2:
         issues.append(
-            DataQualityIssue(
+            build_issue(
                 task_type="predict",
                 severity="error",
                 action="blocked",
@@ -395,38 +507,32 @@ def validate_forecast_template(
     reference_net_load_col = resolve_forecast_template_column(df.columns, reference_date, FORECAST_NET_LOAD_CANDIDATES)
     reference_total_col = resolve_forecast_template_column(df.columns, reference_date, FORECAST_TOTAL_POWER_CANDIDATES)
     reference_power_col = resolve_forecast_template_column(df.columns, reference_date, FORECAST_POWER_CANDIDATES)
-    reference_price_col = resolve_forecast_template_column(df.columns, reference_date, HISTORY_TARGET_CANDIDATES)
 
     if target_net_load_col:
-        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=target_net_load_col, series=df[target_net_load_col])
+        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=target_net_load_col, series=df[target_net_load_col], columns=df.columns)
     elif target_total_col and target_power_col:
-        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=target_total_col, series=df[target_total_col])
-        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=target_power_col, series=df[target_power_col])
+        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=target_total_col, series=df[target_total_col], columns=df.columns)
+        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=target_power_col, series=df[target_power_col], columns=df.columns)
     else:
         add_missing_field_issue(issues, task_type="predict", action="blocked", file_path=file_path, sheet_name=sheet_name, date=target_text, field="预测日火电空间", candidates=FORECAST_NET_LOAD_CANDIDATES + FORECAST_TOTAL_POWER_CANDIDATES + FORECAST_POWER_CANDIDATES)
 
     if reference_net_load_col:
-        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_net_load_col, series=df[reference_net_load_col])
+        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_net_load_col, series=df[reference_net_load_col], columns=df.columns)
     elif reference_total_col and reference_power_col:
-        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_total_col, series=df[reference_total_col])
-        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_power_col, series=df[reference_power_col])
+        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_total_col, series=df[reference_total_col], columns=df.columns)
+        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_power_col, series=df[reference_power_col], columns=df.columns)
     else:
         add_missing_field_issue(issues, task_type="predict", action="blocked", file_path=file_path, sheet_name=sheet_name, date=reference_text, field="参考日火电空间", candidates=FORECAST_NET_LOAD_CANDIDATES + FORECAST_TOTAL_POWER_CANDIDATES + FORECAST_POWER_CANDIDATES)
 
-    if not reference_price_col and require_reference_price:
-        add_missing_field_issue(issues, task_type="predict", action="blocked", file_path=file_path, sheet_name=sheet_name, date=reference_text, field="参考日前日价格", candidates=HISTORY_TARGET_CANDIDATES)
-    elif reference_price_col:
-        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=reference_text, field=reference_price_col, series=df[reference_price_col])
-
     period_col = resolve_column(df.columns, PERIOD_CANDIDATES)
     if period_col:
-        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_period", file_path=file_path, sheet_name=sheet_name, date=target_text, field=period_col, series=df[period_col])
+        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_period", file_path=file_path, sheet_name=sheet_name, date=target_text, field=period_col, series=df[period_col], columns=df.columns)
 
     thermal_col = resolve_column(df.columns, THERMAL_CANDIDATES)
     if not thermal_col:
         add_missing_field_issue(issues, task_type="predict", action="blocked", file_path=file_path, sheet_name=sheet_name, date=target_text, field="火电开机容量", candidates=THERMAL_CANDIDATES)
     else:
-        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=thermal_col, series=df[thermal_col].ffill().bfill())
+        add_numeric_issues(issues, task_type="predict", severity="error", action="blocked", issue_type="invalid_numeric", file_path=file_path, sheet_name=sheet_name, date=target_text, field=thermal_col, series=df[thermal_col].ffill().bfill(), columns=df.columns)
 
     return issues
 
@@ -435,8 +541,35 @@ def has_blocking_issues(issues: list[DataQualityIssue]) -> bool:
     return any(issue.severity == "error" and issue.action in {"skipped", "blocked"} for issue in issues)
 
 
+def enrich_issue_dict(data: dict) -> dict:
+    enriched = dict(data)
+    year, month, day = date_parts(enriched.get("date"))
+    if enriched.get("year") is None:
+        enriched["year"] = year
+    if enriched.get("month") is None:
+        enriched["month"] = month
+    if enriched.get("day") is None:
+        enriched["day"] = day
+    period = enriched.get("period")
+    if enriched.get("time_point") is None:
+        enriched["time_point"] = f"第 {period} 点" if period is not None else None
+    excel_column = enriched.get("excel_column")
+    excel_row = enriched.get("excel_row")
+    if enriched.get("excel_cell") is None:
+        enriched["excel_cell"] = f"{excel_column}{excel_row}" if excel_column and excel_row else None
+    if not enriched.get("location"):
+        enriched["location"] = build_issue_location(
+            date=enriched.get("date"),
+            period=enriched.get("period"),
+            field=enriched.get("field"),
+            sheet_name=enriched.get("sheet_name"),
+            excel_cell=enriched.get("excel_cell"),
+        )
+    return enriched
+
+
 def issue_to_dict(issue: DataQualityIssue) -> dict:
-    return asdict(issue)
+    return enrich_issue_dict(asdict(issue))
 
 
 def build_quality_summary(issues: list[DataQualityIssue]) -> dict[str, int]:
@@ -485,7 +618,9 @@ def load_quality_report(report_id: str, report_dir: Path = DEFAULT_REPORT_DIR) -
     path = report_dir / f"{safe_id}.json"
     if not path.exists():
         raise FileNotFoundError(f"数据异常报告不存在：{safe_id}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["issues"] = [enrich_issue_dict(issue) for issue in payload.get("issues", [])]
+    return payload
 
 
 def list_quality_reports(report_dir: Path = DEFAULT_REPORT_DIR) -> list[dict]:

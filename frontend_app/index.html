@@ -89,60 +89,178 @@
 
         <section class="glass-card">
 
-        <div class="tab-panel active" id="tab-train">
+        <div class="tab-panel active train-page" id="tab-train">
+          <div class="train-workflow-card train-workflow-card-auto">
+            <div class="train-card-accent">AUTO</div>
+            <div class="section-header">
+              <div>
+                <div class="section-title">自动训练窗口寻优</div>
+                <div class="hint-text">先按候选窗口粗搜，再围绕最优窗口局部细搜；寻优完成后自动训练并启用最优模型。</div>
+              </div>
+            </div>
+
+            <div class="form-grid four-col">
+              <label class="field">
+                <span>寻优最大历史天数</span>
+                <input type="number" id="window-optimization-max-history-days" min="30" max="3650" value="100" />
+              </label>
+              <label class="field">
+                <span>寻优验证集天数</span>
+                <input type="number" id="window-optimization-valid-days" min="1" max="90" value="14" />
+              </label>
+              <label class="field">
+                <span>寻优 XGBoost 轮数</span>
+                <input type="number" id="window-optimization-num-boost-round" min="50" max="3000" step="50" value="400" />
+              </label>
+              <label class="field">
+                <span>局部细搜半径</span>
+                <input type="number" id="window-optimization-fine-radius" min="0" max="60" value="15" />
+              </label>
+            </div>
+
+            <div class="actions-row">
+              <button class="primary-btn" id="optimize-window-btn">自动寻优并训练最优模型</button>
+              <button class="ghost-btn" id="refresh-train-metrics-btn">刷新当前指标</button>
+            </div>
+
+            <div class="embedded-progress-row">
+              <div class="progress-card progress-card-optimize" id="optimize-progress-card">
+                <div class="progress-header">
+                  <span class="progress-title">寻优进度</span>
+                  <span class="progress-state-text" id="optimize-progress-text">未开始</span>
+                </div>
+                <div class="progress-status-line" id="optimize-progress-status">等待自动寻优</div>
+                <div class="progress-track">
+                  <div class="progress-fill" id="optimize-progress-fill"></div>
+                </div>
+              </div>
+              <button class="stop-btn hidden" id="stop-optimize-btn" type="button">停止寻优</button>
+            </div>
+          </div>
+
+          <div class="train-section-divider" aria-hidden="true"><span>或者</span></div>
+
+          <div class="train-workflow-card train-workflow-card-manual">
+            <div class="train-card-accent">MANUAL</div>
+            <div class="section-header compact">
+              <div>
+                <div class="section-title">手动训练模型</div>
+                <div class="hint-text">只按当前手动训练参数重训模型，不执行训练窗口寻优。</div>
+              </div>
+            </div>
+
+            <div class="form-grid four-col">
+              <label class="field">
+                <span>训练模式</span>
+                <select id="training-mode">
+                  <option value="rolling_window" selected>按最近 N 天训练</option>
+                  <option value="manual_date_range">手动起止日期</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>训练窗口天数</span>
+                <input type="number" id="training-window-days" min="7" max="730" value="60" />
+              </label>
+              <label class="field">
+                <span>训练起始日期</span>
+                <div class="date-picker" id="train-start-picker" data-input-id="train-start-date">
+                  <input class="date-display" id="train-start-date" type="text" readonly />
+                  <button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button>
+                  <div class="date-panel"></div>
+                </div>
+              </label>
+              <label class="field">
+                <span>训练结束日期</span>
+                <div class="date-picker" id="train-end-picker" data-input-id="train-end-date">
+                  <input class="date-display" id="train-end-date" type="text" readonly />
+                  <button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button>
+                  <div class="date-panel"></div>
+                </div>
+              </label>
+            </div>
+
+            <div class="form-grid four-col">
+              <label class="field">
+                <span>手动验证集天数</span>
+                <input type="number" id="valid-days" min="1" max="90" value="14" />
+              </label>
+              <label class="field">
+                <span>手动 XGBoost 轮数</span>
+                <input type="number" id="num-boost-round" min="50" max="3000" step="50" value="400" />
+              </label>
+            </div>
+
+            <div class="toggle-row">
+              <label class="switch-item">
+                <input type="checkbox" id="enable-start" checked />
+                <span>启用训练起始日期</span>
+              </label>
+              <label class="switch-item">
+                <input type="checkbox" id="enable-end" checked />
+                <span>启用训练结束日期</span>
+              </label>
+              <span class="switch-item">训练模型仅使用当天供需、日期类型和火电容量等特征</span>
+            </div>
+
+            <div class="actions-row">
+              <button class="primary-btn" id="train-btn">手动重训模型</button>
+            </div>
+
+            <div class="embedded-progress-row">
+              <div class="progress-card progress-card-train" id="train-progress-card">
+                <div class="progress-header">
+                  <span class="progress-title">手动训练进度</span>
+                  <span class="progress-state-text" id="train-progress-text">未开始</span>
+                </div>
+                <div class="progress-status-line" id="train-progress-status">等待手动重训</div>
+                <div class="progress-track">
+                  <div class="progress-fill" id="train-progress-fill"></div>
+                </div>
+              </div>
+              <button class="stop-btn hidden" id="stop-train-btn" type="button">停止训练</button>
+            </div>
+          </div>
+
+          <div class="train-metrics-section">
+          <div class="subsection-title">当前默认模型分时段指标</div>
+          <div class="table-shell table-frame table-frame-md">
+            <table class="data-table" id="metrics-table">
+              <thead>
+                <tr>
+                  <th>分时段</th>
+                  <th>相似法参考 MAE</th>
+                  <th>相似法参考 RMSE</th>
+                  <th>模型 MAE</th>
+                  <th>模型 RMSE</th>
+                  <th>训练样本数</th>
+                  <th>验证样本数</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="tab-predict">
           <div class="section-header">
             <div>
-              <div class="section-title">训练参数</div>
-              <div class="hint-text">设置日期范围后，可手动重训并查看核心指标。</div>
+              <div class="section-title">执行预测</div>
+              <div class="hint-text">输入参考天数后执行预测，同时查看最近天和同类型日两条 96 点价格曲线。</div>
             </div>
           </div>
 
           <div class="form-grid four-col">
             <label class="field">
-              <span>训练起始日期</span>
-              <div class="date-picker" id="train-start-picker" data-input-id="train-start-date">
-                <input class="date-display" id="train-start-date" type="text" readonly />
-                <button type="button" class="date-picker-icon" aria-label="选择日期">📅</button>
-                <div class="date-panel"></div>
-              </div>
-            </label>
-            <label class="field">
-              <span>训练结束日期</span>
-              <div class="date-picker" id="train-end-picker" data-input-id="train-end-date">
-                <input class="date-display" id="train-end-date" type="text" readonly />
-                <button type="button" class="date-picker-icon" aria-label="选择日期">📅</button>
-                <div class="date-panel"></div>
-              </div>
-            </label>
-            <label class="field">
-              <span>验证集天数</span>
-              <input type="number" id="valid-days" min="1" max="90" value="14" />
-            </label>
-            <label class="field">
-              <span>XGBoost 轮数</span>
-              <input type="number" id="num-boost-round" min="50" max="3000" step="50" value="400" />
-            </label>
-          </div>
-
-          <div class="toggle-row">
-            <label class="switch-item">
-              <input type="checkbox" id="enable-start" checked />
-              <span>启用训练起始日期</span>
-            </label>
-            <label class="switch-item">
-              <input type="checkbox" id="enable-end" checked />
-              <span>启用训练结束日期</span>
-            </label>
-            <label class="switch-item">
-              <input type="checkbox" id="use-lag-96" checked />
-              <span>使用 lag_96（参考日/昨日同点价格）</span>
+              <span>参考天数</span>
+              <input type="number" id="reference-days" min="1" max="100" value="1" />
             </label>
           </div>
 
           <div class="section-header compact">
             <div>
-              <div class="section-title">相似法权重</div>
-              <div class="hint-text">用于计算相似法基线价格；权重越大，该字段对相似样本选择影响越大。</div>
+              <div class="section-title">相似法参考曲线设置</div>
+              <div class="hint-text">只影响预测时展示的相似法参考价格，不参与模型训练，也不改变模型预测价格。</div>
             </div>
           </div>
 
@@ -166,59 +284,6 @@
             <label class="field">
               <span>供需比权重</span>
               <input type="number" id="similarity-weight-ratio" min="0" step="0.01" value="0.1" />
-            </label>
-          </div>
-
-          <div class="progress-grid">
-            <div class="progress-card progress-card-train" id="train-progress-card">
-              <div class="progress-header">
-                <span class="progress-title">训练进度</span>
-                <span class="progress-state-text" id="train-progress-text">未开始</span>
-              </div>
-              <div class="progress-status-line" id="train-progress-status">等待手动重训</div>
-              <div class="progress-track">
-                <div class="progress-fill" id="train-progress-fill"></div>
-              </div>
-            </div>
-          </div>
-
-          <div class="actions-row">
-            <button class="primary-btn" id="train-btn">手动重训模型</button>
-            <button class="stop-btn hidden" id="stop-train-btn" type="button">停止训练</button>
-            <button class="ghost-btn" id="refresh-train-metrics-btn">刷新当前指标</button>
-          </div>
-
-          <div class="subsection-title">当前默认模型分时段指标</div>
-          <div class="table-shell table-frame table-frame-md">
-            <table class="data-table" id="metrics-table">
-              <thead>
-                <tr>
-                  <th>分时段</th>
-                  <th>相似法 MAE</th>
-                  <th>相似法 RMSE</th>
-                  <th>融合 MAE</th>
-                  <th>融合 RMSE</th>
-                  <th>训练样本数</th>
-                  <th>验证样本数</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="tab-panel" id="tab-predict">
-          <div class="section-header">
-            <div>
-              <div class="section-title">执行预测</div>
-              <div class="hint-text">输入参考天数后执行预测，同时查看最近天和同类型日两条 96 点价格曲线。</div>
-            </div>
-          </div>
-
-          <div class="form-grid four-col">
-            <label class="field">
-              <span>参考天数</span>
-              <input type="number" id="reference-days" min="1" max="100" value="1" />
             </label>
           </div>
 
@@ -318,10 +383,10 @@
               <span>排序方式</span>
               <select id="version-sort">
                 <option value="created_at_desc">训练时间（新到旧）</option>
-                <option value="final_rmse_asc">融合 RMSE（小到大）</option>
-                <option value="final_mae_asc">融合 MAE（小到大）</option>
-                <option value="baseline_rmse_asc">相似法 RMSE（小到大）</option>
-                <option value="baseline_mae_asc">相似法 MAE（小到大）</option>
+                <option value="final_rmse_asc">模型 RMSE（小到大）</option>
+                <option value="final_mae_asc">模型 MAE（小到大）</option>
+                <option value="baseline_rmse_asc">相似法参考 RMSE（小到大）</option>
+                <option value="baseline_mae_asc">相似法参考 MAE（小到大）</option>
               </select>
             </label>
             <div class="actions-row compact-actions">
@@ -341,10 +406,10 @@
                     <th class="version-sort-head" data-version-sort="created_at_desc">创建时间</th>
                     <th>训练范围</th>
                     <th>样本数</th>
-                    <th class="version-sort-head" data-version-sort="baseline_mae_asc">相似法 MAE</th>
-                    <th class="version-sort-head" data-version-sort="baseline_rmse_asc">相似法 RMSE</th>
-                    <th class="version-sort-head" data-version-sort="final_mae_asc">融合 MAE</th>
-                    <th class="version-sort-head" data-version-sort="final_rmse_asc">融合 RMSE</th>
+                    <th class="version-sort-head" data-version-sort="baseline_mae_asc">相似法参考 MAE</th>
+                    <th class="version-sort-head" data-version-sort="baseline_rmse_asc">相似法参考 RMSE</th>
+                    <th class="version-sort-head" data-version-sort="final_mae_asc">模型 MAE</th>
+                    <th class="version-sort-head" data-version-sort="final_rmse_asc">模型 RMSE</th>
                     <th>状态</th>
                   </tr>
                 </thead>
@@ -400,7 +465,7 @@
             <div class="toolbar-title">异常报告列表</div>
             <div class="toolbar-meta" id="quality-reports-meta">正在加载数据异常报告...</div>
           </div>
-          <div class="table-shell table-frame">
+          <div class="table-shell table-frame table-frame-lg">
             <div class="table-scroll">
               <table class="data-table" id="quality-reports-table">
                 <thead>
@@ -427,15 +492,19 @@
               <table class="data-table" id="quality-issues-table">
                 <thead>
                   <tr>
+                    <th>定位</th>
+                    <th>年</th>
+                    <th>月</th>
+                    <th>日</th>
+                    <th>时点</th>
+                    <th>字段</th>
+                    <th>单元格</th>
+                    <th>原值</th>
                     <th>处理</th>
                     <th>级别</th>
                     <th>类型</th>
                     <th>文件</th>
                     <th>Sheet</th>
-                    <th>日期</th>
-                    <th>时点</th>
-                    <th>字段</th>
-                    <th>原值</th>
                     <th>说明</th>
                   </tr>
                 </thead>

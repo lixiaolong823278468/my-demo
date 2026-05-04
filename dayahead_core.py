@@ -68,7 +68,10 @@ SIMILARITY_WEIGHT_ALIASES = {
     "thermal_space": THERMAL_SPACE_WEIGHT_KEY,
 }
 FEATURE_COLUMNS = [
+    TOTAL_LOAD_COLUMN,
     "net_load",
+    RENEWABLE_POWER_COLUMN,
+    THERMAL_SPACE_LOAD_RATIO_COLUMN,
     "thermal_on_capacity",
     "hour",
     "period",
@@ -76,11 +79,7 @@ FEATURE_COLUMNS = [
     "month",
     "is_weekend",
     "is_holiday",
-    "lag_96",
-    SIMILAR_PRICE_COLUMN,
-    SIMILAR_GAP_COLUMN,
 ]
-LAG_96_COLUMN = "lag_96"
 REFERENCE_STRATEGIES = OrderedDict(
     [
         ("recent_n_days", "最近 N 天"),
@@ -114,11 +113,11 @@ class TrainConfig:
     model_root: Path = DEFAULT_MODEL_ROOT
     holiday_file: Path | None = None
     valid_days: int = 14
+    training_window_days: int | None = None
     num_boost_round: int = 400
     start_date: str | None = None
     end_date: str | None = None
     similarity_reference_days: int = DEFAULT_SIMILARITY_REFERENCE_DAYS
-    use_lag_96: bool = True
     similarity_weights: dict[str, float] | None = None
 
 
@@ -189,14 +188,33 @@ def normalize_reference_strategy(reference_strategy: str | None) -> str:
 
 
 def training_feature_columns(config: TrainConfig | None = None) -> list[str]:
-    use_lag_96 = True if config is None else bool(config.use_lag_96)
-    if use_lag_96:
-        return list(FEATURE_COLUMNS)
-    return [column for column in FEATURE_COLUMNS if column != LAG_96_COLUMN]
+    return list(FEATURE_COLUMNS)
 
 
-def model_requires_lag_96(metadata: dict) -> bool:
-    return LAG_96_COLUMN in (metadata.get("feature_columns") or FEATURE_COLUMNS)
+def direct_model_variants() -> OrderedDict[str, list[str]]:
+    return OrderedDict(
+        [
+            ("no_lag_96", training_feature_columns()),
+        ]
+    )
+
+
+def metadata_has_direct_variants(metadata: dict) -> bool:
+    return isinstance(metadata.get("model_variants"), dict)
+
+
+def select_prediction_model_variant(metadata: dict, forecast_df: pd.DataFrame) -> str:
+    variants = metadata.get("model_variants") or {}
+    if "no_lag_96" in variants:
+        return "no_lag_96"
+    if "direct_price" in variants:
+        return "direct_price"
+    allowed_features = set(training_feature_columns())
+    for key, value in variants.items():
+        feature_columns = value.get("feature_columns") or []
+        if set(feature_columns).issubset(allowed_features):
+            return key
+    return "legacy"
 
 
 def normalize_similarity_weights(
@@ -363,6 +381,10 @@ def dataframe_cache_path(cache_dir: str | Path, cache_name: str, cache_key: str)
     return Path(cache_dir) / f"{cache_name}_{cache_key}.pkl"
 
 
+def missing_dataframe_columns(frame: pd.DataFrame, required_columns: list[str] | tuple[str, ...] | set[str]) -> list[str]:
+    return [column for column in required_columns if column not in frame.columns]
+
+
 def load_dataframe_cache(cache_dir: str | Path, cache_name: str, cache_key: str) -> tuple[pd.DataFrame, list[str]] | None:
     cache_path = dataframe_cache_path(cache_dir, cache_name, cache_key)
     if not cache_path.exists():
@@ -401,6 +423,26 @@ def save_dataframe_cache(cache_dir: str | Path, cache_name: str, cache_key: str,
     temp_path.replace(cache_path)
 
 
+def required_raw_history_columns(require_target: bool) -> list[str]:
+    columns = [
+        "date",
+        "period",
+        TOTAL_LOAD_COLUMN,
+        "net_load",
+        RENEWABLE_POWER_COLUMN,
+        THERMAL_SPACE_LOAD_RATIO_COLUMN,
+        "thermal_on_capacity",
+        "segment",
+    ]
+    if require_target:
+        columns.append(TARGET_COLUMN)
+    return columns
+
+
+def required_training_feature_cache_columns() -> list[str]:
+    return sorted(set(FEATURE_COLUMNS + [TARGET_COLUMN, "date", "period", "segment"]))
+
+
 def quality_report_status(issues: list[DataQualityIssue], blocked: bool = False) -> str:
     if blocked:
         return "blocked"
@@ -433,9 +475,12 @@ def load_cached_history_collection(
     cache_dir = Path(model_root) / "cache"
     cached = load_dataframe_cache(cache_dir, "history_raw", signature["cache_key"])
     if cached is not None:
-        emit_progress(progress_callback, "历史数据未变化，已复用缓存", progress_end)
         cached_frame, skipped_sheets = cached
-        return cached_frame, skipped_sheets, holiday_dates, signature, []
+        missing_columns = missing_dataframe_columns(cached_frame, required_raw_history_columns(require_target))
+        if not missing_columns:
+            emit_progress(progress_callback, "历史数据未变化，已复用缓存", progress_end)
+            return cached_frame, skipped_sheets, holiday_dates, signature, []
+        emit_progress(progress_callback, f"历史缓存缺少字段 {missing_columns}，正在重新读取历史数据", progress_start)
 
     builder = DayAheadDataBuilder(holiday_dates)
     try:
@@ -864,8 +909,8 @@ def nearest_multicondition_similarity_price(
         selected_index = score.nsmallest(top_k).index
         selected_score = score.loc[selected_index].to_numpy(dtype=float)
         selected_prices = candidates.loc[selected_index, TARGET_COLUMN].to_numpy(dtype=float)
-        weights = 1.0 / (selected_score + 1e-6)
-        similar_prices.append(float(np.sum(weights * selected_prices) / np.sum(weights)))
+        selected_weights = 1.0 / (selected_score + 1e-6)
+        similar_prices.append(float(np.sum(selected_weights * selected_prices) / np.sum(selected_weights)))
         similar_gaps.append(float(np.min(selected_score)))
     return np.asarray(similar_prices), np.asarray(similar_gaps)
 
@@ -882,13 +927,6 @@ def attach_multicondition_similarity_features(
     result[SIMILAR_PRICE_COLUMN] = similar_price
     result[SIMILAR_GAP_COLUMN] = similar_gap
     return result
-
-
-def attach_lag_96(base_df: pd.DataFrame, history_df: pd.DataFrame) -> pd.DataFrame:
-    history_price = history_df[["date", "period", TARGET_COLUMN]].copy()
-    history_price["lag_date"] = history_price["date"] + pd.Timedelta(days=1)
-    history_price = history_price.rename(columns={TARGET_COLUMN: "lag_96"})
-    return base_df.merge(history_price[["lag_date", "period", "lag_96"]], left_on=["date", "period"], right_on=["lag_date", "period"], how="left").drop(columns=["lag_date"])
 
 
 def attach_similarity_features(
@@ -932,6 +970,25 @@ def filter_date_range(data: pd.DataFrame, start_date: str | None, end_date: str 
     return filtered.reset_index(drop=True)
 
 
+def resolve_training_date_range(history_df: pd.DataFrame, config: TrainConfig) -> tuple[str | None, str | None]:
+    if not config.training_window_days:
+        return config.start_date, config.end_date
+    window_days = int(config.training_window_days)
+    if window_days < 1:
+        raise ValueError("training_window_days 必须大于等于 1")
+    valid_days = max(int(config.valid_days or 0), 0)
+    dates = sorted(pd.to_datetime(history_df["date"], errors="coerce").dropna().dt.normalize().unique())
+    if not dates:
+        return config.start_date, config.end_date
+    end_limit = parse_optional_date(config.end_date)
+    eligible_dates = [date for date in dates if end_limit is None or date <= end_limit]
+    if not eligible_dates:
+        raise ValueError("训练窗口内没有可用历史日期，请检查训练结束日期。")
+    required_days = window_days + valid_days
+    selected_dates = eligible_dates[-required_days:] if len(eligible_dates) > required_days else eligible_dates
+    return pd.Timestamp(selected_dates[0]).strftime("%Y-%m-%d"), pd.Timestamp(selected_dates[-1]).strftime("%Y-%m-%d")
+
+
 def build_training_frame(
     config: TrainConfig,
     progress_callback: ProgressCallback | None = None,
@@ -959,6 +1016,7 @@ def build_training_frame(
                 "history_dir": str(config.history_dir),
                 "start_date": config.start_date,
                 "end_date": config.end_date,
+                "training_window_days": config.training_window_days,
             },
         )
         exc.report_path = report_path
@@ -972,33 +1030,34 @@ def build_training_frame(
             "skipped_sheets": skipped_sheets,
             "start_date": config.start_date,
             "end_date": config.end_date,
+            "training_window_days": config.training_window_days,
         },
     )
-    similarity_reference_days = normalize_similarity_reference_days(config.similarity_reference_days)
-    similarity_weights = normalize_similarity_weights(config.similarity_weights)
-    weights_cache_key = json.dumps(dict(similarity_weights), ensure_ascii=False, sort_keys=True)
-    feature_cache_key = derived_cache_key(
-        history_signature["cache_key"],
-        f"training_features_{similarity_reference_days}_lag_{int(config.use_lag_96)}_weights_{weights_cache_key}",
-    )
+    feature_cache_key = derived_cache_key(history_signature["cache_key"], "direct_price_training_features")
     feature_cache_dir = config.model_root / "cache"
+    raw_history_df = history_df
     cached_features = load_dataframe_cache(feature_cache_dir, "training_features", feature_cache_key)
     if cached_features is not None:
         history_df, _ = cached_features
-        emit_progress(progress_callback, "训练特征未变化，已复用缓存", 21)
+        missing_columns = missing_dataframe_columns(history_df, required_training_feature_cache_columns())
+        if missing_columns:
+            cached_features = None
+            history_df = raw_history_df.copy()
+            emit_progress(progress_callback, f"训练特征缓存缺少字段 {missing_columns}，正在重新构建", 19)
+        else:
+            emit_progress(progress_callback, "训练特征未变化，已复用缓存", 21)
     else:
-        if config.use_lag_96:
-            emit_progress(progress_callback, "正在构建 lag_96 特征", 19)
-            history_df = attach_lag_96(history_df, history_df)
-        emit_progress(progress_callback, "正在构建相似法特征", 20)
-        history_df = attach_similarity_features(history_df, similarity_reference_days, similarity_weights=similarity_weights)
+        missing_columns = []
+    if cached_features is None:
+        emit_progress(progress_callback, "正在准备训练特征", 19)
         save_dataframe_cache(feature_cache_dir, "training_features", feature_cache_key, history_df, skipped_sheets)
-        emit_progress(progress_callback, "相似法特征构建完成", 21)
-    history_df = filter_date_range(history_df, config.start_date, config.end_date)
+        emit_progress(progress_callback, "训练特征构建完成", 21)
+    effective_start_date, effective_end_date = resolve_training_date_range(history_df, config)
+    if config.training_window_days:
+        emit_progress(progress_callback, f"按最近 {config.training_window_days} 天训练窗口过滤数据", 22)
+    history_df = filter_date_range(history_df, effective_start_date, effective_end_date)
     emit_progress(progress_callback, "正在过滤日期范围", 22)
-    required_columns = [TARGET_COLUMN, SIMILAR_PRICE_COLUMN, RESIDUAL_TARGET_COLUMN]
-    if config.use_lag_96:
-        required_columns.append(LAG_96_COLUMN)
+    required_columns = [TARGET_COLUMN, "net_load"]
     history_df = history_df.dropna(subset=required_columns).reset_index(drop=True)
     if history_df.empty:
         raise ValueError("数据加载后经清洗为空，请检查历史数据文件是否包含有效数据。")
@@ -1027,6 +1086,10 @@ def train_segment_models(
     num_boost_round: int,
     feature_columns: list[str],
     progress_callback: ProgressCallback | None = None,
+    progress_start: int = 25,
+    progress_span: int = 45,
+    progress_label: str = "正在训练分时段模型",
+    label_column: str = TARGET_COLUMN,
 ) -> tuple[dict[str, dict[str, float | int | None]], list[str], list[str]]:
     import xgboost as xgb
 
@@ -1038,12 +1101,13 @@ def train_segment_models(
 
     total_segments = len(SEGMENTS)
     for idx, segment_name in enumerate(SEGMENTS, start=1):
-        emit_progress(progress_callback, f"正在训练分时段模型：{segment_name}", 25 + int(idx / total_segments * 45))
+        emit_progress(progress_callback, f"{progress_label}：{segment_name}", progress_start + int(idx / total_segments * progress_span))
         segment_df = history_df[history_df["segment"] == segment_name].copy()
+        segment_df = segment_df.dropna(subset=[label_column])
         if segment_df.empty:
             raise ValueError(f"时段 {segment_name} 无训练数据")
         train_df, valid_df = split_train_valid(segment_df, valid_days)
-        dtrain = make_dmatrix(train_df, feature_columns, RESIDUAL_TARGET_COLUMN)
+        dtrain = make_dmatrix(train_df, feature_columns, label_column)
         evals = [(dtrain, "train")]
         train_kwargs = {
             "params": DEFAULT_XGB_PARAMS,
@@ -1053,7 +1117,7 @@ def train_segment_models(
             "verbose_eval": False,
         }
         if not valid_df.empty:
-            dvalid = make_dmatrix(valid_df, feature_columns, RESIDUAL_TARGET_COLUMN)
+            dvalid = make_dmatrix(valid_df, feature_columns, label_column)
             evals.append((dvalid, "valid"))
             train_kwargs["early_stopping_rounds"] = 50
         booster = xgb.train(**train_kwargs)
@@ -1066,16 +1130,14 @@ def train_segment_models(
         }
         if not valid_df.empty:
             iteration_range = best_iteration_range(booster)
-            residual_pred = booster.predict(dvalid, iteration_range=iteration_range) if iteration_range else booster.predict(dvalid)
-            final_pred = valid_df[SIMILAR_PRICE_COLUMN].to_numpy(dtype=float) + residual_pred
-            baseline_pred = valid_df[SIMILAR_PRICE_COLUMN].to_numpy(dtype=float)
+            final_pred = booster.predict(dvalid, iteration_range=iteration_range) if iteration_range else booster.predict(dvalid)
             actual = valid_df[TARGET_COLUMN].to_numpy(dtype=float)
             segment_metrics.update(
                 {
-                    "baseline_mae": calculate_metrics(actual, baseline_pred)["mae"],
-                    "baseline_rmse": calculate_metrics(actual, baseline_pred)["rmse"],
                     "final_mae": calculate_metrics(actual, final_pred)["mae"],
                     "final_rmse": calculate_metrics(actual, final_pred)["rmse"],
+                    "direct_mae": calculate_metrics(actual, final_pred)["mae"],
+                    "direct_rmse": calculate_metrics(actual, final_pred)["rmse"],
                 }
             )
         metrics_summary[segment_name] = segment_metrics
@@ -1210,28 +1272,52 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     staging_dir = config.model_root / "_staging" / run_id
     staging_dir.mkdir(parents=True, exist_ok=True)
-    feature_columns = training_feature_columns(config)
+    model_variants = direct_model_variants()
     similarity_weights = normalize_similarity_weights(config.similarity_weights)
-    metrics_summary, train_dates, valid_dates = train_segment_models(
-        history_df,
-        staging_dir,
-        config.valid_days,
-        config.num_boost_round,
-        feature_columns,
-        progress_callback=progress_callback,
-    )
+    variant_metrics: dict[str, dict[str, dict[str, float | int | None]]] = {}
+    train_dates: list[str] = []
+    valid_dates: list[str] = []
+    for variant_index, (variant_key, feature_columns) in enumerate(model_variants.items(), start=1):
+        variant_dir = staging_dir / variant_key
+        metrics_summary, variant_train_dates, variant_valid_dates = train_segment_models(
+            history_df,
+            variant_dir,
+            config.valid_days,
+            config.num_boost_round,
+            feature_columns,
+            progress_callback=progress_callback,
+            progress_start=25 + (variant_index - 1) * 25,
+            progress_span=20,
+            progress_label=f"正在训练{variant_key}直接价格模型",
+            label_column=TARGET_COLUMN,
+        )
+        variant_metrics[variant_key] = metrics_summary
+        if not train_dates:
+            train_dates = variant_train_dates
+        if not valid_dates:
+            valid_dates = variant_valid_dates
+    metrics_summary = variant_metrics.get("no_lag_96") or next(iter(variant_metrics.values()))
 
     metadata = {
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "model_type": "direct_price_xgboost",
         "target_column": TARGET_COLUMN,
-        "feature_columns": feature_columns,
+        "feature_columns": model_variants["no_lag_96"],
+        "model_variants": {
+            key: {
+                "feature_columns": columns,
+                "model_dir": key,
+            }
+            for key, columns in model_variants.items()
+        },
         "segments": [{"name": name, "start": start, "end": end} for name, (start, end) in SEGMENTS.items()],
         "valid_days": config.valid_days,
+        "training_window_days": config.training_window_days,
+        "training_mode": "rolling_window" if config.training_window_days else "manual_date_range",
         "num_boost_round": config.num_boost_round,
         "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
         "similarity_weights": dict(similarity_weights),
-        "use_lag_96": bool(config.use_lag_96),
         "xgboost_params": DEFAULT_XGB_PARAMS,
         "train_start_date": train_dates[0] if train_dates else None,
         "train_end_date": train_dates[-1] if train_dates else None,
@@ -1245,12 +1331,18 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
             "holiday_file": str(config.holiday_file) if config.holiday_file else None,
             "start_date": config.start_date,
             "end_date": config.end_date,
+            "training_window_days": config.training_window_days,
+            "training_mode": "rolling_window" if config.training_window_days else "manual_date_range",
+            "valid_days": config.valid_days,
+            "num_boost_round": config.num_boost_round,
             "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
             "similarity_weights": dict(similarity_weights),
-            "use_lag_96": bool(config.use_lag_96),
         },
-        "blend_method": "similarity_baseline_plus_xgboost_residual",
+        "prediction_method": "direct_price_xgboost",
+        "similarity_usage": "prediction_reference_only",
+        "blend_method": "direct_price_xgboost",
         "metrics": metrics_summary,
+        "variant_metrics": variant_metrics,
     }
     metadata_path = staging_dir / "metadata.json"
     emit_progress(progress_callback, "正在写入模型元数据", 82)
@@ -1270,10 +1362,12 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "sample_rows": metadata["sample_rows"],
         "start_date_filter": config.start_date,
         "end_date_filter": config.end_date,
-        "use_lag_96": bool(config.use_lag_96),
+        "training_window_days": config.training_window_days,
+        "training_mode": metadata["training_mode"],
         "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
         "similarity_weights": dict(similarity_weights),
         "metrics": metrics_summary,
+        "variant_metrics": variant_metrics,
     }
     append_jsonl(config.model_root / "training_runs.jsonl", log_entry)
     emit_progress(progress_callback, f"训练完成，当前默认模型：{run_id}", 100)
@@ -1322,11 +1416,21 @@ def load_models(model_root: str | Path) -> tuple[dict, dict[str, object], Path]:
     active_dir = resolve_active_model_dir(model_root)
     metadata = json.loads((active_dir / "metadata.json").read_text(encoding="utf-8"))
     models = {}
-    for segment in metadata["segments"]:
-        segment_name = segment["name"]
-        booster = xgb.Booster()
-        booster.load_model(str(active_dir / f"{segment_name}.json"))
-        models[segment_name] = booster
+    if metadata_has_direct_variants(metadata):
+        for variant_key, variant_meta in metadata["model_variants"].items():
+            variant_dir = active_dir / variant_meta.get("model_dir", variant_key)
+            models[variant_key] = {}
+            for segment in metadata["segments"]:
+                segment_name = segment["name"]
+                booster = xgb.Booster()
+                booster.load_model(str(variant_dir / f"{segment_name}.json"))
+                models[variant_key][segment_name] = booster
+    else:
+        for segment in metadata["segments"]:
+            segment_name = segment["name"]
+            booster = xgb.Booster()
+            booster.load_model(str(active_dir / f"{segment_name}.json"))
+            models[segment_name] = booster
     return metadata, models, active_dir
 
 
@@ -1351,7 +1455,6 @@ def try_load_forecast_template(
     forecast_file: str | Path,
     holiday_dates: set[pd.Timestamp],
     default_year: int,
-    require_lag_96: bool = True,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None, list[DataQualityIssue]]:
     workbook = pd.read_excel(forecast_file, sheet_name=None)
     non_empty_sheets = [(str(name), df) for name, df in workbook.items() if not df.empty and len(df.columns) > 0]
@@ -1375,7 +1478,6 @@ def try_load_forecast_template(
         file_path=Path(forecast_file),
         sheet_name=template_sheet_name,
         default_year=default_year,
-        require_reference_price=require_lag_96,
     )
     if has_blocking_issues(quality_issues):
         raise DataQualityValidationError("预测文件关键字段异常，已停止预测", quality_issues)
@@ -1388,12 +1490,7 @@ def try_load_forecast_template(
     reference_net_load_col = resolve_forecast_template_column(raw_df.columns, reference_date, ["剩余电力值(MW)", "剩余电力值", "火电空间", "火电剩余空间"], required=False)
     reference_total_col = resolve_forecast_template_column(raw_df.columns, reference_date, ["总加电力值(MW)", "总加电力值"], required=False)
     reference_power_col = resolve_forecast_template_column(raw_df.columns, reference_date, ["风光电力值(MW)", "风光电力值", "电力值(MW)", "电力值"], required=False)
-    reference_price_col = resolve_forecast_template_column(
-        raw_df.columns,
-        reference_date,
-        ["日前出清价格(元/MWh)", "日前-出清价格(元/MWh)", "日前出清价格", "出清价格"],
-        required=require_lag_96,
-    )
+    reference_price_col = resolve_forecast_template_column(raw_df.columns, reference_date, ["日前出清价格(元/MWh)", "日前-出清价格(元/MWh)", "日前出清价格", "出清价格"], required=False)
     thermal_col = resolve_column(raw_df.columns, ["火电开机容量(MW)", "火电开机容量", "运行机组容量"], required=False)
     period_col = resolve_column(raw_df.columns, ["序号", "时段", "period"], required=False)
 
@@ -1423,7 +1520,9 @@ def try_load_forecast_template(
         raise ValueError("预测文件有效行数不足 96")
     periods = periods[:96]
     target_date = target_date.normalize()
+    reference_date = reference_date.normalize()
     target_day_type = day_type_of(target_date, holiday_dates)
+    reference_day_type = day_type_of(reference_date, holiday_dates)
     forecast_df = pd.DataFrame(
         {
             "date": target_date,
@@ -1443,25 +1542,32 @@ def try_load_forecast_template(
             "source_file": str(forecast_file),
         }
     )
-    if reference_price_col:
-        forecast_df[LAG_96_COLUMN] = to_numeric(raw_df[reference_price_col]).iloc[:96].to_numpy()
     forecast_df["segment"] = assign_segments(forecast_df["period"])
 
     reference_df = None
     if reference_price_col:
         reference_df = pd.DataFrame(
             {
-                "date": reference_date.normalize(),
+                "date": reference_date,
                 "period": periods,
+                "hour": ((periods - 1) // 4).astype(int),
+                "weekday": int(reference_date.weekday()),
+                "month": int(reference_date.month),
+                "is_weekend": int(reference_day_type == "weekend"),
+                "is_holiday": int(reference_day_type == "holiday"),
+                DAY_TYPE_COLUMN: reference_day_type,
                 TOTAL_LOAD_COLUMN: reference_total_load.iloc[:96].to_numpy(),
                 "net_load": reference_net_load.iloc[:96].to_numpy(),
                 RENEWABLE_POWER_COLUMN: reference_renewable_power.iloc[:96].to_numpy(),
                 THERMAL_SPACE_LOAD_RATIO_COLUMN: calculate_thermal_space_load_ratio(reference_net_load, reference_total_load).iloc[:96].to_numpy(),
                 "thermal_on_capacity": thermal_series.iloc[:96].to_numpy(),
-                DAY_TYPE_COLUMN: day_type_of(reference_date, holiday_dates),
                 TARGET_COLUMN: to_numeric(raw_df[reference_price_col]).iloc[:96].to_numpy(),
+                "sheet_name": "forecast_template",
+                "source_file": str(forecast_file),
             }
         )
+        reference_df["segment"] = assign_segments(reference_df["period"])
+
     return forecast_df, reference_df, quality_issues
 
 
@@ -1469,10 +1575,9 @@ def load_forecast_generic(
     history_df: pd.DataFrame,
     forecast_file: str | Path,
     holiday_dates: set[pd.Timestamp],
-    require_lag_96: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame | None, list[DataQualityIssue]]:
     default_year = int(pd.to_datetime(history_df["date"]).max().year)
-    template_df, template_reference, quality_issues = try_load_forecast_template(forecast_file, holiday_dates, default_year, require_lag_96=require_lag_96)
+    template_df, template_reference, quality_issues = try_load_forecast_template(forecast_file, holiday_dates, default_year)
     if template_df is not None:
         return template_df, template_reference, quality_issues
 
@@ -1635,7 +1740,7 @@ def build_reference_frame(
         template_reference = template_reference_df[reference_columns(template_reference_df)].copy()
         template_reference["date"] = pd.to_datetime(template_reference["date"], errors="coerce").dt.normalize()
         template_date = pd.to_datetime(template_reference["date"]).iloc[0].normalize()
-        if is_eligible_reference(template_date):
+        if pd.notna(template_date):
             selected_frames.append(template_reference)
             selected_dates.append(template_date)
 
@@ -1692,18 +1797,6 @@ def clip_price_series(values: pd.Series | np.ndarray) -> pd.Series | np.ndarray:
     return np.clip(values, PRICE_FLOOR, PRICE_CAP)
 
 
-def ensure_prediction_lag_96(forecast_df: pd.DataFrame, history_df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-    if not model_requires_lag_96(metadata):
-        return forecast_df
-    result = forecast_df
-    if LAG_96_COLUMN not in result.columns:
-        result = attach_lag_96(result, history_df)
-    if result[LAG_96_COLUMN].isna().any():
-        missing = result.loc[result[LAG_96_COLUMN].isna(), ["date", "period"]].head(10)
-        raise ValueError(f"Missing lag_96 for date/period:\n{missing.to_string(index=False)}")
-    return result
-
-
 def prepare_prediction_inputs(
     history_dir: str | Path,
     forecast_file: str | Path,
@@ -1747,7 +1840,6 @@ def prepare_prediction_inputs(
             history_df,
             forecast_file,
             holiday_dates,
-            require_lag_96=model_requires_lag_96(metadata),
         )
         quality_issues.extend(forecast_quality_issues)
     except DataQualityValidationError as exc:
@@ -1760,7 +1852,6 @@ def prepare_prediction_inputs(
         )
         exc.report_path = report_path
         raise
-    forecast_df = ensure_prediction_lag_96(forecast_df, history_df, metadata)
     emit_progress(progress_callback, "预测输入准备完成", 45)
     report_path = save_quality_report(
         task_type="predict",
@@ -1783,6 +1874,7 @@ def run_prediction_with_strategy(
     progress_callback: ProgressCallback | None = None,
     segment_progress_start: int = 55,
     segment_progress_span: int = 30,
+    similarity_weights: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, list[str], str, str]:
     strategy_key = normalize_reference_strategy(reference_strategy)
     strategy_label = REFERENCE_STRATEGIES[strategy_key]
@@ -1795,11 +1887,21 @@ def run_prediction_with_strategy(
         holiday_dates=holiday_dates,
     )
     metadata_weights = metadata.get("similarity_weights")
-    model_similarity_weights = normalize_similarity_weights(metadata_weights, fill_missing_with_defaults=False) if metadata_weights else None
+    effective_similarity_weights = similarity_weights if similarity_weights is not None else metadata_weights
+    model_similarity_weights = normalize_similarity_weights(effective_similarity_weights, fill_missing_with_defaults=False) if effective_similarity_weights else None
     strategy_forecast_df = attach_forecast_similarity_features(forecast_df, reference_df, similarity_weights=model_similarity_weights)
 
     prediction_frames: list[pd.DataFrame] = []
     total_segments = len(metadata["segments"])
+    if metadata_has_direct_variants(metadata):
+        variant_key = select_prediction_model_variant(metadata, strategy_forecast_df)
+        variant_meta = metadata["model_variants"][variant_key]
+        feature_columns = variant_meta["feature_columns"]
+        variant_models = models[variant_key]
+    else:
+        variant_key = "legacy"
+        feature_columns = metadata["feature_columns"]
+        variant_models = models
     for idx, segment in enumerate(metadata["segments"], start=1):
         segment_name = segment["name"]
         if progress_callback is not None:
@@ -1808,14 +1910,19 @@ def run_prediction_with_strategy(
         segment_df = strategy_forecast_df[strategy_forecast_df["segment"] == segment_name].copy()
         if segment_df.empty:
             continue
-        dmatrix = make_dmatrix(segment_df, metadata["feature_columns"])
-        booster = models[segment_name]
+        dmatrix = make_dmatrix(segment_df, feature_columns)
+        booster = variant_models[segment_name]
         iteration_range = best_iteration_range(booster)
-        residual_pred = booster.predict(dmatrix, iteration_range=iteration_range) if iteration_range else booster.predict(dmatrix)
-        raw_predicted_price = segment_df[SIMILAR_PRICE_COLUMN].to_numpy(dtype=float) + residual_pred
+        model_pred = booster.predict(dmatrix, iteration_range=iteration_range) if iteration_range else booster.predict(dmatrix)
+        if metadata_has_direct_variants(metadata):
+            raw_predicted_price = model_pred
+        else:
+            raw_predicted_price = segment_df[SIMILAR_PRICE_COLUMN].to_numpy(dtype=float) + model_pred
         clipped_predicted_price = clip_price_series(raw_predicted_price)
         segment_df["predicted_price"] = clipped_predicted_price
-        segment_df["residual_pred"] = segment_df["predicted_price"] - segment_df[SIMILAR_PRICE_COLUMN]
+        segment_df["model_variant"] = variant_key
+        segment_df["model_similarity_diff"] = segment_df["predicted_price"] - segment_df[SIMILAR_PRICE_COLUMN]
+        segment_df["residual_pred"] = segment_df["model_similarity_diff"]
         prediction_frames.append(segment_df)
 
     result_df = pd.concat(prediction_frames, ignore_index=True).sort_values(["date", "period"]).reset_index(drop=True)
@@ -1830,6 +1937,7 @@ def predict_prices(
     holiday_file: str | Path | None = None,
     reference_days: int = 1,
     reference_strategy: str = "recent_n_days",
+    similarity_weights: dict[str, object] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> PredictResult:
     ensure_xgboost_available()
@@ -1852,6 +1960,7 @@ def predict_prices(
         models=models,
         reference_days=reference_days,
         reference_strategy=reference_strategy,
+        similarity_weights=similarity_weights,
         progress_callback=progress_callback,
     )
     emit_progress(progress_callback, "正在导出预测结果", 92)
@@ -1880,6 +1989,7 @@ def predict_prices_compare(
     holiday_file: str | Path | None = None,
     reference_days: int = 1,
     selected_strategy: str = "recent_n_days",
+    similarity_weights: dict[str, object] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> PredictCompareResult:
     ensure_xgboost_available()
@@ -1908,6 +2018,7 @@ def predict_prices_compare(
             models=models,
             reference_days=reference_days,
             reference_strategy=strategy_key,
+            similarity_weights=similarity_weights,
             progress_callback=progress_callback,
             segment_progress_start=55 + int((strategy_index - 1) * 15),
             segment_progress_span=12,
@@ -1961,14 +2072,16 @@ def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:
         "period",
         "segment",
         "hour",
+        TOTAL_LOAD_COLUMN,
         "net_load",
         RENEWABLE_POWER_COLUMN,
+        THERMAL_SPACE_LOAD_RATIO_COLUMN,
         "thermal_on_capacity",
         DAY_TYPE_COLUMN,
-        LAG_96_COLUMN,
         SIMILAR_PRICE_COLUMN,
         NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN,
-        "residual_pred",
+        "model_variant",
+        "model_similarity_diff",
         "predicted_price",
     ]
     export_df = result_df[[column for column in export_columns if column in result_df.columns]].copy()
@@ -2057,20 +2170,22 @@ def summarize_model_quality_metrics(metrics: dict | None) -> dict[str, float | N
         baseline_rmse = segment_metrics.get("baseline_rmse")
         final_mae = segment_metrics.get("final_mae")
         final_rmse = segment_metrics.get("final_rmse")
-        if any(value is None for value in (baseline_mae, baseline_rmse, final_mae, final_rmse)):
+        if any(value is None for value in (final_mae, final_rmse)):
             continue
 
         try:
-            baseline_mae_value = float(baseline_mae)
-            baseline_rmse_value = float(baseline_rmse)
+            baseline_mae_value = float(baseline_mae) if baseline_mae is not None else np.nan
+            baseline_rmse_value = float(baseline_rmse) if baseline_rmse is not None else np.nan
             final_mae_value = float(final_mae)
             final_rmse_value = float(final_rmse)
         except (TypeError, ValueError):
             continue
 
         total_valid_rows += valid_rows_value
-        baseline_mae_weighted += valid_rows_value * baseline_mae_value
-        baseline_rmse_squared_weighted += valid_rows_value * (baseline_rmse_value**2)
+        if not np.isnan(baseline_mae_value):
+            baseline_mae_weighted += valid_rows_value * baseline_mae_value
+        if not np.isnan(baseline_rmse_value):
+            baseline_rmse_squared_weighted += valid_rows_value * (baseline_rmse_value**2)
         final_mae_weighted += valid_rows_value * final_mae_value
         final_rmse_squared_weighted += valid_rows_value * (final_rmse_value**2)
 
@@ -2083,8 +2198,8 @@ def summarize_model_quality_metrics(metrics: dict | None) -> dict[str, float | N
         }
 
     return {
-        "baseline_mae": round(baseline_mae_weighted / total_valid_rows, 4),
-        "baseline_rmse": round(float(np.sqrt(baseline_rmse_squared_weighted / total_valid_rows)), 4),
+        "baseline_mae": round(baseline_mae_weighted / total_valid_rows, 4) if baseline_mae_weighted else None,
+        "baseline_rmse": round(float(np.sqrt(baseline_rmse_squared_weighted / total_valid_rows)), 4) if baseline_rmse_squared_weighted else None,
         "final_mae": round(final_mae_weighted / total_valid_rows, 4),
         "final_rmse": round(float(np.sqrt(final_rmse_squared_weighted / total_valid_rows)), 4),
     }

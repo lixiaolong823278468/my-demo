@@ -1,0 +1,380 @@
+{
+  "run_id": "run_20260503_223803",
+  "created_at": "2026-05-03T22:38:04",
+  "model_type": "direct_price_xgboost",
+  "target_column": "日前出清价格(元/MWh)",
+  "feature_columns": [
+    "total_load",
+    "net_load",
+    "renewable_power",
+    "thermal_space_load_ratio",
+    "thermal_on_capacity",
+    "hour",
+    "period",
+    "weekday",
+    "month",
+    "is_weekend",
+    "is_holiday",
+    "lag_96"
+  ],
+  "model_variants": {
+    "with_lag_96": {
+      "feature_columns": [
+        "total_load",
+        "net_load",
+        "renewable_power",
+        "thermal_space_load_ratio",
+        "thermal_on_capacity",
+        "hour",
+        "period",
+        "weekday",
+        "month",
+        "is_weekend",
+        "is_holiday",
+        "lag_96"
+      ],
+      "model_dir": "with_lag_96",
+      "requires_lag_96": true
+    },
+    "no_lag_96": {
+      "feature_columns": [
+        "total_load",
+        "net_load",
+        "renewable_power",
+        "thermal_space_load_ratio",
+        "thermal_on_capacity",
+        "hour",
+        "period",
+        "weekday",
+        "month",
+        "is_weekend",
+        "is_holiday"
+      ],
+      "model_dir": "no_lag_96",
+      "requires_lag_96": false
+    }
+  },
+  "segments": [
+    {
+      "name": "night",
+      "start": 1,
+      "end": 24
+    },
+    {
+      "name": "morning_peak",
+      "start": 25,
+      "end": 40
+    },
+    {
+      "name": "midday",
+      "start": 41,
+      "end": 60
+    },
+    {
+      "name": "evening_peak",
+      "start": 61,
+      "end": 80
+    },
+    {
+      "name": "late_night",
+      "start": 81,
+      "end": 96
+    }
+  ],
+  "valid_days": 14,
+  "training_window_days": 33,
+  "training_mode": "rolling_window",
+  "num_boost_round": 400,
+  "similarity_reference_days": 100,
+  "similarity_weights": {
+    "thermal_space": 0.45,
+    "renewable_power": 0.15,
+    "thermal_on_capacity": 0.2,
+    "day_type": 0.1,
+    "thermal_space_load_ratio": 0.1
+  },
+  "use_lag_96": "dual",
+  "xgboost_params": {
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "eta": 0.05,
+    "max_depth": 5,
+    "min_child_weight": 3,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "seed": 42
+  },
+  "train_start_date": "2026-03-07",
+  "train_end_date": "2026-04-16",
+  "train_dates": [
+    "2026-03-07",
+    "2026-03-08",
+    "2026-03-09",
+    "2026-03-10",
+    "2026-03-11",
+    "2026-03-12",
+    "2026-03-13",
+    "2026-03-14",
+    "2026-03-15",
+    "2026-03-16",
+    "2026-03-17",
+    "2026-03-18",
+    "2026-03-19",
+    "2026-03-20",
+    "2026-03-21",
+    "2026-03-22",
+    "2026-03-23",
+    "2026-04-01",
+    "2026-04-02",
+    "2026-04-03",
+    "2026-04-04",
+    "2026-04-05",
+    "2026-04-06",
+    "2026-04-07",
+    "2026-04-08",
+    "2026-04-09",
+    "2026-04-10",
+    "2026-04-11",
+    "2026-04-12",
+    "2026-04-13",
+    "2026-04-14",
+    "2026-04-15",
+    "2026-04-16"
+  ],
+  "valid_dates": [
+    "2026-04-17",
+    "2026-04-18",
+    "2026-04-19",
+    "2026-04-20",
+    "2026-04-21",
+    "2026-04-22",
+    "2026-04-23",
+    "2026-04-24",
+    "2026-04-25",
+    "2026-04-26",
+    "2026-04-27",
+    "2026-04-28",
+    "2026-04-29",
+    "2026-04-30"
+  ],
+  "sample_rows": 4512,
+  "skipped_sheets": [
+    "10月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "10月.xlsx | 2024年10月29日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
+    "11月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "11月.xlsx | 2024年11月13日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
+    "11月.xlsx | 2024年11月14日 | 缺少必要字段，可识别字段名：总加电力值(MW), 总加电力值",
+    "11月.xlsx | 2024年11月24日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
+    "12月.xlsx | 2024年12月16日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
+    "2月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月1日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月2日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月3日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月4日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月5日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月6日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月7日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月8日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月9日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月10日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月11日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月12日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月13日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月14日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月15日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月16日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月17日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月18日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月19日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月20日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月23日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月24日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月25日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月26日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月27日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月28日 | Sheet 名称无法识别为日期",
+    "2月.xlsx | 2月29日 | Sheet 名称无法识别为日期",
+    "3月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "4月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "5月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "6月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "7月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "7月.xlsx | 2024年7月5日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
+    "7月.xlsx | 2024年7月31日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
+    "8月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "8月.xlsx | 2024年8月21日 | 日前-出清概况中无法提取“运行机组容量”，该字段是火电开机容量的关键来源",
+    "8月.xlsx | 2024年8月27日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
+    "9月.xlsx | Sheet | Sheet 名称无法识别为日期",
+    "9月.xlsx | 2024年9月9日 | 缺少必要字段，可识别字段名：日前出清价格(元/MWh), 日前-出清价格(元/MWh), 日前出清价格, 出清价格",
+    "2月.xlsx | Sheet2 | Sheet 名称无法识别为日期",
+    "2月.xlsx | Sheet3 | Sheet 名称无法识别为日期",
+    "4月.xlsx | 2025年4月11日 | 日前-出清概况中无法提取“运行机组容量”，该字段是火电开机容量的关键来源",
+    "8月.xlsx | 2025年8月28日 | 日前-出清概况中无法提取“运行机组容量”，该字段是火电开机容量的关键来源"
+  ],
+  "quality_report_path": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\data_quality_reports\\train_20260503_223803_753217.json",
+  "train_config": {
+    "history_dir": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\数据",
+    "holiday_file": null,
+    "start_date": null,
+    "end_date": null,
+    "training_window_days": 33,
+    "training_mode": "rolling_window",
+    "valid_days": 14,
+    "num_boost_round": 400,
+    "similarity_reference_days": 100,
+    "similarity_weights": {
+      "thermal_space": 0.45,
+      "renewable_power": 0.15,
+      "thermal_on_capacity": 0.2,
+      "day_type": 0.1,
+      "thermal_space_load_ratio": 0.1
+    },
+    "use_lag_96": "dual"
+  },
+  "prediction_method": "direct_price_xgboost",
+  "similarity_usage": "prediction_reference_only",
+  "blend_method": "direct_price_xgboost",
+  "metrics": {
+    "night": {
+      "train_rows": 768,
+      "valid_rows": 336,
+      "best_iteration": 24,
+      "final_mae": 16.0519,
+      "final_rmse": 21.3529,
+      "direct_mae": 16.0519,
+      "direct_rmse": 21.3529
+    },
+    "morning_peak": {
+      "train_rows": 512,
+      "valid_rows": 224,
+      "best_iteration": 52,
+      "final_mae": 42.3352,
+      "final_rmse": 58.7412,
+      "direct_mae": 42.3352,
+      "direct_rmse": 58.7412
+    },
+    "midday": {
+      "train_rows": 640,
+      "valid_rows": 280,
+      "best_iteration": 68,
+      "final_mae": 12.3055,
+      "final_rmse": 25.4788,
+      "direct_mae": 12.3055,
+      "direct_rmse": 25.4788
+    },
+    "evening_peak": {
+      "train_rows": 640,
+      "valid_rows": 280,
+      "best_iteration": 20,
+      "final_mae": 60.9625,
+      "final_rmse": 85.6653,
+      "direct_mae": 60.9625,
+      "direct_rmse": 85.6653
+    },
+    "late_night": {
+      "train_rows": 512,
+      "valid_rows": 224,
+      "best_iteration": 33,
+      "final_mae": 35.9547,
+      "final_rmse": 51.0079,
+      "direct_mae": 35.9547,
+      "direct_rmse": 51.0079
+    }
+  },
+  "variant_metrics": {
+    "with_lag_96": {
+      "night": {
+        "train_rows": 768,
+        "valid_rows": 336,
+        "best_iteration": 24,
+        "final_mae": 16.0519,
+        "final_rmse": 21.3529,
+        "direct_mae": 16.0519,
+        "direct_rmse": 21.3529
+      },
+      "morning_peak": {
+        "train_rows": 512,
+        "valid_rows": 224,
+        "best_iteration": 52,
+        "final_mae": 42.3352,
+        "final_rmse": 58.7412,
+        "direct_mae": 42.3352,
+        "direct_rmse": 58.7412
+      },
+      "midday": {
+        "train_rows": 640,
+        "valid_rows": 280,
+        "best_iteration": 68,
+        "final_mae": 12.3055,
+        "final_rmse": 25.4788,
+        "direct_mae": 12.3055,
+        "direct_rmse": 25.4788
+      },
+      "evening_peak": {
+        "train_rows": 640,
+        "valid_rows": 280,
+        "best_iteration": 20,
+        "final_mae": 60.9625,
+        "final_rmse": 85.6653,
+        "direct_mae": 60.9625,
+        "direct_rmse": 85.6653
+      },
+      "late_night": {
+        "train_rows": 512,
+        "valid_rows": 224,
+        "best_iteration": 33,
+        "final_mae": 35.9547,
+        "final_rmse": 51.0079,
+        "direct_mae": 35.9547,
+        "direct_rmse": 51.0079
+      }
+    },
+    "no_lag_96": {
+      "night": {
+        "train_rows": 792,
+        "valid_rows": 336,
+        "best_iteration": 3,
+        "final_mae": 23.3861,
+        "final_rmse": 30.1868,
+        "direct_mae": 23.3861,
+        "direct_rmse": 30.1868
+      },
+      "morning_peak": {
+        "train_rows": 528,
+        "valid_rows": 224,
+        "best_iteration": 47,
+        "final_mae": 45.2683,
+        "final_rmse": 63.4944,
+        "direct_mae": 45.2683,
+        "direct_rmse": 63.4944
+      },
+      "midday": {
+        "train_rows": 660,
+        "valid_rows": 280,
+        "best_iteration": 51,
+        "final_mae": 17.0766,
+        "final_rmse": 28.7565,
+        "direct_mae": 17.0766,
+        "direct_rmse": 28.7565
+      },
+      "evening_peak": {
+        "train_rows": 660,
+        "valid_rows": 280,
+        "best_iteration": 29,
+        "final_mae": 62.3342,
+        "final_rmse": 87.5844,
+        "direct_mae": 62.3342,
+        "direct_rmse": 87.5844
+      },
+      "late_night": {
+        "train_rows": 528,
+        "valid_rows": 224,
+        "best_iteration": 17,
+        "final_mae": 43.6748,
+        "final_rmse": 57.148,
+        "direct_mae": 43.6748,
+        "direct_rmse": 57.148
+      }
+    }
+  }
+}
