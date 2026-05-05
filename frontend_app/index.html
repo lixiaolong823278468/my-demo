@@ -138,6 +138,68 @@
             </div>
           </div>
 
+          <div class="train-workflow-card">
+            <div class="train-card-accent">MODEL</div>
+            <div class="section-header compact">
+              <div>
+                <div class="section-title">模型结构配置</div>
+                <div class="hint-text">这里的配置会同时用于自动寻优和手动训练；预测时会读取模型自己的配置，保证训练和预测一致。</div>
+              </div>
+            </div>
+
+            <div class="form-grid four-col">
+              <label class="field">
+                <span>启用高价样本加权</span>
+                <input type="checkbox" id="high-price-weight-enabled" />
+              </label>
+              <label class="field">
+                <span>高价阈值分位</span>
+                <input type="number" id="high-price-quantile" min="0.5" max="0.99" step="0.01" value="0.8" />
+              </label>
+              <label class="field">
+                <span>高价权重倍数</span>
+                <input type="number" id="high-price-multiplier" min="1" max="10" step="0.1" value="2" />
+              </label>
+              <label class="field">
+                <span>时段模式</span>
+                <select id="segment-mode">
+                  <option value="default">系统默认 5 段</option>
+                  <option value="custom">自定义时段</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="form-grid four-col">
+              <label class="field">
+                <span>切分段数</span>
+                <select id="segment-count">
+                  <option value="1">1 段</option>
+                  <option value="2">2 段</option>
+                  <option value="3">3 段</option>
+                  <option value="4">4 段</option>
+                  <option value="5" selected>5 段</option>
+                  <option value="6">6 段</option>
+                  <option value="8">8 段</option>
+                </select>
+              </label>
+              <div class="field hint-text" id="segment-validation-text">使用系统默认 5 段</div>
+            </div>
+
+            <div class="table-shell table-frame table-frame-sm">
+              <table class="data-table" id="segment-config-table">
+                <thead>
+                  <tr>
+                    <th>时段名称</th>
+                    <th>开始时间</th>
+                    <th>结束时间</th>
+                    <th>说明</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
           <div class="train-section-divider" aria-hidden="true"><span>或者</span></div>
 
           <div class="train-workflow-card train-workflow-card-manual">

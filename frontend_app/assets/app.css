@@ -630,6 +630,26 @@ select {
   box-shadow: 0 0 0 4px rgba(15, 107, 255, 0.1);
 }
 
+.mini-input {
+  width: 100%;
+  min-width: 96px;
+  border: 1px solid rgba(16, 32, 51, 0.12);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--text-1);
+}
+
+.mini-input:disabled {
+  opacity: 0.72;
+  background: rgba(241, 245, 249, 0.78);
+}
+
+.error-text {
+  color: #dc2626 !important;
+  font-weight: 700;
+}
+
 .date-picker {
   position: relative;
   display: flex;

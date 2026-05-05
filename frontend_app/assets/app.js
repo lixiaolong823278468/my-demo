@@ -29,7 +29,17 @@ const App = {
   predictionChartSignature: null,
   qualityReports: [],
   latestQualityReport: null,
+  segmentRows: [],
 };
+
+const defaultSegmentRows = [
+  { name: "night", start_time: "00:00", end_time: "06:00" },
+  { name: "morning_peak", start_time: "06:00", end_time: "10:00" },
+  { name: "midday", start_time: "10:00", end_time: "15:00" },
+  { name: "evening_peak", start_time: "15:00", end_time: "20:00" },
+  { name: "late_night", start_time: "20:00", end_time: "24:00" },
+];
+const segmentDraftStorageKey = "dayahead_segment_drafts_by_count";
 
 const columnTitleMap = {
   date: "日期",
@@ -773,6 +783,178 @@ function currentWindowOptimizationFineRadius() {
   return Number.isFinite(value) && value >= 0 ? Math.round(value) : 15;
 }
 
+function timeToMinutes(value) {
+  const match = String(value || "").trim().match(/^(\d{1,2}):([0-5]\d)$/);
+  if (!match) return NaN;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour === 24 && minute === 0) return 1440;
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || minute % 15 !== 0) return NaN;
+  return hour * 60 + minute;
+}
+
+function normalizeTimeText(value) {
+  const minutes = timeToMinutes(value);
+  return Number.isFinite(minutes) ? minutesToTime(minutes) : String(value || "").trim();
+}
+
+function minutesToTime(minutes) {
+  const safeMinutes = Math.max(0, Math.min(1440, Number(minutes) || 0));
+  const hour = Math.floor(safeMinutes / 60);
+  const minute = safeMinutes % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function buildEvenSegmentRows(count) {
+  const rows = [];
+  const step = Math.floor(96 / count) * 15;
+  let start = 0;
+  for (let index = 0; index < count; index += 1) {
+    const end = index === count - 1 ? 1440 : Math.max(start + 60, Math.round((index + 1) * 1440 / count / 15) * 15);
+    rows.push({
+      name: `segment_${index + 1}`,
+      start_time: minutesToTime(start),
+      end_time: minutesToTime(end),
+    });
+    start = end;
+  }
+  return rows;
+}
+
+function cloneSegmentRows(rows) {
+  return (rows || []).map((row) => ({
+    name: String(row.name || ""),
+    start_time: normalizeTimeText(row.start_time || "00:00"),
+    end_time: normalizeTimeText(row.end_time || "24:00"),
+  }));
+}
+
+function loadSegmentDrafts() {
+  try {
+    const data = JSON.parse(localStorage.getItem(segmentDraftStorageKey) || "{}");
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSegmentDraftForCount(count, rows) {
+  if (!count || !Array.isArray(rows) || !rows.length) return;
+  const drafts = loadSegmentDrafts();
+  drafts[String(count)] = cloneSegmentRows(rows);
+  localStorage.setItem(segmentDraftStorageKey, JSON.stringify(drafts));
+}
+
+function segmentRowsForCount(count) {
+  const drafts = loadSegmentDrafts();
+  const savedRows = drafts[String(count)];
+  if (Array.isArray(savedRows) && savedRows.length === Number(count)) {
+    return cloneSegmentRows(savedRows);
+  }
+  return buildEvenSegmentRows(Number(count || 5));
+}
+
+function segmentMode() {
+  return $("#segment-mode")?.value || "default";
+}
+
+function validateSegmentRows(rows) {
+  if (segmentMode() !== "custom") return { ok: true, message: "使用系统默认 5 段" };
+  if (!rows.length) return { ok: false, message: "请至少配置 1 个时段" };
+  let expectedStart = 0;
+  const names = new Set();
+  for (const row of rows) {
+    const name = String(row.name || "").trim();
+    const start = timeToMinutes(row.start_time);
+    const end = timeToMinutes(row.end_time);
+    if (!name) return { ok: false, message: "时段名称不能为空" };
+    if (names.has(name)) return { ok: false, message: `时段名称重复：${name}` };
+    names.add(name);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return { ok: false, message: "时间必须是 15 分钟粒度，例如 06:00、18:15" };
+    if (start !== expectedStart) return { ok: false, message: "时段必须连续覆盖，不能空缺或重叠" };
+    if (end <= start) return { ok: false, message: `${name} 的结束时间必须晚于开始时间` };
+    if (end - start < 60) return { ok: false, message: `${name} 至少需要 1 小时` };
+    expectedStart = end;
+  }
+  if (expectedStart !== 1440) return { ok: false, message: "最后一个时段必须结束于 24:00" };
+  return { ok: true, message: "时段配置合法" };
+}
+
+function renderSegmentConfigTable() {
+  const tbody = $("#segment-config-table tbody");
+  if (!tbody) return;
+  const isCustom = segmentMode() === "custom";
+  const rows = isCustom ? App.segmentRows : defaultSegmentRows;
+  tbody.innerHTML = rows
+    .map((row, index) => `
+      <tr>
+        <td><input class="mini-input segment-name-input" data-index="${index}" value="${htmlEscape(row.name)}" ${isCustom ? "" : "disabled"} /></td>
+        <td><input class="mini-input segment-start-input" data-index="${index}" value="${htmlEscape(row.start_time)}" disabled /></td>
+        <td><input class="mini-input segment-end-input" data-index="${index}" value="${htmlEscape(row.end_time)}" ${isCustom && index < rows.length - 1 ? "" : "disabled"} /></td>
+        <td>${index === rows.length - 1 ? "最后一段固定到 24:00" : "修改结束时间后，下一段自动衔接"}</td>
+      </tr>
+    `)
+    .join("");
+  const validation = validateSegmentRows(rows);
+  const status = $("#segment-validation-text");
+  if (status) {
+    status.textContent = validation.message;
+    status.classList.toggle("error-text", !validation.ok);
+  }
+}
+
+function collectSegmentConfig() {
+  if (segmentMode() !== "custom") return { segment_mode: "default", segment_config: null };
+  const validation = validateSegmentRows(App.segmentRows);
+  if (!validation.ok) {
+    throw new Error(validation.message);
+  }
+  saveSegmentDraftForCount(App.segmentRows.length, App.segmentRows);
+  return {
+    segment_mode: "custom",
+    segment_config: App.segmentRows.map((row) => ({
+      name: row.name,
+      start_time: normalizeTimeText(row.start_time),
+      end_time: normalizeTimeText(row.end_time),
+    })),
+  };
+}
+
+function collectHighPriceWeighting() {
+  return {
+    enabled: Boolean($("#high-price-weight-enabled")?.checked),
+    quantile: Number($("#high-price-quantile")?.value || 0.8),
+    multiplier: Number($("#high-price-multiplier")?.value || 2),
+  };
+}
+
+function collectTrainingAdvancedConfig() {
+  return {
+    ...collectSegmentConfig(),
+    high_price_weighting: collectHighPriceWeighting(),
+  };
+}
+
+function initializeAdvancedTrainingControls() {
+  const preferences = App.config?.training_preferences || {};
+  const segmentConfig = Array.isArray(preferences.segment_config) ? preferences.segment_config : defaultSegmentRows;
+  App.segmentRows = segmentConfig.map((row) => ({
+    name: row.name,
+    start_time: row.start_time || "00:00",
+    end_time: row.end_time || "24:00",
+  }));
+  const modeSelect = $("#segment-mode");
+  if (modeSelect) modeSelect.value = preferences.segment_mode || "default";
+  const countSelect = $("#segment-count");
+  if (countSelect) countSelect.value = String(App.segmentRows.length || 5);
+  saveSegmentDraftForCount(App.segmentRows.length || 5, App.segmentRows);
+  const highConfig = preferences.high_price_weighting || {};
+  if ($("#high-price-weight-enabled")) $("#high-price-weight-enabled").checked = Boolean(highConfig.enabled);
+  if ($("#high-price-quantile")) $("#high-price-quantile").value = highConfig.quantile ?? 0.8;
+  if ($("#high-price-multiplier")) $("#high-price-multiplier").value = highConfig.multiplier ?? 2;
+  renderSegmentConfigTable();
+}
+
 function syncTrainingModeControls() {
   const isRolling = currentTrainingMode() === "rolling_window";
   const windowInput = $("#training-window-days");
@@ -1394,6 +1576,7 @@ async function startTrain() {
         enable_end: $("#enable-end").checked,
         valid_days: Number($("#valid-days").value || 14),
         num_boost_round: Number($("#num-boost-round").value || 400),
+        ...collectTrainingAdvancedConfig(),
       }),
     });
     App.activeJobIds.train = data.job_id;
@@ -1464,6 +1647,7 @@ async function startWindowOptimization() {
         valid_days: currentWindowOptimizationValidDays(),
         num_boost_round: currentWindowOptimizationNumBoostRound(),
         fine_radius: currentWindowOptimizationFineRadius(),
+        ...collectTrainingAdvancedConfig(),
       }),
     });
     if (data.started && data.job?.job_id) {
@@ -1991,6 +2175,27 @@ function bindEvents() {
     }
   });
   $("#training-mode")?.addEventListener("change", () => syncTrainingModeControls());
+  $("#segment-mode")?.addEventListener("change", () => renderSegmentConfigTable());
+  $("#segment-count")?.addEventListener("change", (event) => {
+    saveSegmentDraftForCount(App.segmentRows.length, App.segmentRows);
+    App.segmentRows = segmentRowsForCount(Number(event.target.value || 5));
+    renderSegmentConfigTable();
+  });
+  $("#segment-config-table")?.addEventListener("change", (event) => {
+    const index = Number(event.target.dataset.index);
+    if (!Number.isInteger(index) || !App.segmentRows[index]) return;
+    if (event.target.matches(".segment-name-input")) {
+      App.segmentRows[index].name = event.target.value.trim();
+    }
+    if (event.target.matches(".segment-end-input")) {
+      App.segmentRows[index].end_time = normalizeTimeText(event.target.value);
+      if (App.segmentRows[index + 1]) {
+        App.segmentRows[index + 1].start_time = App.segmentRows[index].end_time;
+      }
+    }
+    saveSegmentDraftForCount(App.segmentRows.length, App.segmentRows);
+    renderSegmentConfigTable();
+  });
   $("#enable-start").addEventListener("change", (event) => {
     if (currentTrainingMode() === "rolling_window") {
       syncTrainingModeControls();
@@ -2035,6 +2240,7 @@ async function initialLoad() {
   initDatePicker("train-start-picker", "train-start-date", "2025-01-01");
   initDatePicker("train-end-picker", "train-end-date", "2026-03-31");
   await loadConfig();
+  initializeAdvancedTrainingControls();
   renderConfigPaths();
   const initResults = await Promise.allSettled([refreshSummary(), loadLogs(), loadTemplate()]);
   initResults.forEach((result) => {

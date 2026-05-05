@@ -25,6 +25,7 @@ from dayahead_core import (
     DEFAULT_HISTORY_DIR,
     DEFAULT_MODEL_ROOT,
     DEFAULT_OUTPUT_FILE,
+    DEFAULT_SEGMENT_CONFIG,
     PRICE_CAP,
     PRICE_FLOOR,
     TrainConfig,
@@ -36,6 +37,7 @@ from dayahead_core import (
     load_current_metadata,
     load_training_log,
     load_training_preferences,
+    normalize_segment_config,
     normalize_similarity_weights,
     predict_prices_compare,
     rollback_to_previous,
@@ -79,6 +81,42 @@ def resolve_similarity_weights(payload: dict[str, Any], model_root: Path = MODEL
     if parsed_weights is not None:
         return parsed_weights
     return dict(load_training_preferences(model_root)["similarity_weights"])
+
+
+def parse_segment_config_payload(payload: dict[str, Any]) -> list[dict[str, object]] | None:
+    mode = str(payload.get("segment_mode") or "default")
+    if mode != "custom":
+        return None
+    raw_segments = payload.get("segment_config")
+    if not isinstance(raw_segments, list):
+        raise ValueError("自定义时段配置不能为空")
+    normalized = normalize_segment_config(raw_segments)
+    return [
+        {
+            "name": name,
+            "start_time": f"{((start - 1) * 15) // 60:02d}:{((start - 1) * 15) % 60:02d}",
+            "end_time": f"{(end * 15) // 60:02d}:{(end * 15) % 60:02d}",
+        }
+        for name, (start, end) in normalized.items()
+    ]
+
+
+def parse_high_price_weighting_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("high_price_weighting") if isinstance(payload.get("high_price_weighting"), dict) else {}
+    enabled = bool(raw.get("enabled", payload.get("high_price_weight_enabled", False)))
+    try:
+        quantile = float(raw.get("quantile", payload.get("high_price_quantile", 0.8)))
+    except (TypeError, ValueError):
+        quantile = 0.8
+    try:
+        multiplier = float(raw.get("multiplier", payload.get("high_price_weight_multiplier", 2.0)))
+    except (TypeError, ValueError):
+        multiplier = 2.0
+    return {
+        "enabled": enabled,
+        "quantile": min(0.99, max(0.5, quantile)),
+        "multiplier": max(1.0, multiplier),
+    }
 
 
 def now_text() -> str:
@@ -545,6 +583,16 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
         model_root = Path(payload.get("model_root") or MODEL_ROOT)
         training_mode = str(payload.get("training_mode") or "rolling_window")
         training_window_days = int(payload.get("training_window_days") or 60) if training_mode == "rolling_window" else None
+        segment_config = parse_segment_config_payload(payload)
+        high_price_weighting = parse_high_price_weighting_payload(payload)
+        save_training_preferences(
+            model_root,
+            {
+                "segment_mode": "custom" if segment_config else "default",
+                "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
+                "high_price_weighting": high_price_weighting,
+            },
+        )
         result = train_and_register(
             TrainConfig(
                 history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
@@ -555,6 +603,10 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
                 start_date=(payload.get("start_date") or None) if training_mode != "rolling_window" and payload.get("enable_start", True) else None,
                 end_date=(payload.get("end_date") or None) if training_mode != "rolling_window" and payload.get("enable_end", True) else None,
                 similarity_reference_days=int(payload.get("similarity_reference_days") or 100),
+                segment_config=segment_config,
+                high_price_weight_enabled=high_price_weighting["enabled"],
+                high_price_quantile=high_price_weighting["quantile"],
+                high_price_weight_multiplier=high_price_weighting["multiplier"],
             ),
             progress_callback=build_progress_callback(job_id),
         )
@@ -647,6 +699,16 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
         num_boost_round = int(payload.get("num_boost_round") or AUTO_WINDOW_NUM_BOOST_ROUND)
         fine_radius = int(payload.get("fine_radius") or AUTO_WINDOW_FINE_RADIUS)
         max_history_days = resolve_window_optimization_max_history_days(payload)
+        segment_config = parse_segment_config_payload(payload)
+        high_price_weighting = parse_high_price_weighting_payload(payload)
+        save_training_preferences(
+            MODEL_ROOT,
+            {
+                "segment_mode": "custom" if segment_config else "default",
+                "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
+                "high_price_weighting": high_price_weighting,
+            },
+        )
         STATE.append_log(job_id, "开始自动训练窗口寻优", 1)
         STATE.raise_if_cancelled(job_id)
 
@@ -683,6 +745,10 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
                     training_window_days=window_days,
                     num_boost_round=num_boost_round,
                     enable_rolling_backtest=enable_rolling_backtest,
+                    segment_config=segment_config,
+                    high_price_weight_enabled=high_price_weighting["enabled"],
+                    high_price_quantile=high_price_weighting["quantile"],
+                    high_price_weight_multiplier=high_price_weighting["multiplier"],
                 ),
                 progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
             )
@@ -735,6 +801,10 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
                 valid_days=valid_days,
                 training_window_days=best_window_days,
                 num_boost_round=num_boost_round,
+                segment_config=segment_config,
+                high_price_weight_enabled=high_price_weighting["enabled"],
+                high_price_quantile=high_price_weighting["quantile"],
+                high_price_weight_multiplier=high_price_weighting["multiplier"],
             ),
             progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
         )
@@ -763,6 +833,9 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
             "fine_candidates": fine_candidates,
             "rerank_top_n": AUTO_WINDOW_RERANK_TOP_N,
             "selection_method": "rolling_backtest_rerank",
+            "segment_mode": "custom" if segment_config else "default",
+            "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
+            "high_price_weighting": high_price_weighting,
             "best_window_days": best_window_days,
             "best_score": best.get("score"),
             "best_static_score": best.get("static_score"),
@@ -909,7 +982,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             if path == "/api/window-optimization/run":
                 return self.send_json(check_window_optimization("manual", force=bool(payload.get("force", True)), payload=payload), HTTPStatus.ACCEPTED)
             if path in {"/api/training/preferences", "/api/prediction/preferences"}:
-                preferences = save_training_preferences(MODEL_ROOT, {"similarity_weights": resolve_similarity_weights(payload, MODEL_ROOT)})
+                preference_payload: dict[str, Any] = {"similarity_weights": resolve_similarity_weights(payload, MODEL_ROOT)}
+                if path == "/api/training/preferences":
+                    segment_config = parse_segment_config_payload(payload)
+                    preference_payload.update(
+                        {
+                            "segment_mode": "custom" if segment_config else "default",
+                            "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
+                            "high_price_weighting": parse_high_price_weighting_payload(payload),
+                        }
+                    )
+                preferences = save_training_preferences(MODEL_ROOT, preference_payload)
                 return self.send_json({"preferences": preferences})
             if path == "/api/predict":
                 return self.send_json(start_background_job("predict", build_predict_worker(payload)), HTTPStatus.ACCEPTED)
@@ -961,6 +1044,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             "default_similarity_weights": dict(load_training_preferences(MODEL_ROOT)["similarity_weights"]),
             "prediction_preferences": load_training_preferences(MODEL_ROOT),
             "training_preferences": load_training_preferences(MODEL_ROOT),
+            "default_segment_config": DEFAULT_SEGMENT_CONFIG,
             "reference_strategy_options": [
                 {"key": "recent_n_days", "label": "最近 N 天"},
                 {"key": "recent_same_type_days", "label": "最近 N 个同类型日"},

@@ -48,6 +48,29 @@ class HistoryCacheTests(unittest.TestCase):
         self.assertEqual(summary["direction_accuracy"], 100.0)
         self.assertGreater(comparison["mae_improvement"], 0)
 
+    def test_custom_segment_config_maps_periods_continuously(self) -> None:
+        from dayahead_core import assign_segments, normalize_segment_config
+
+        segments = normalize_segment_config(
+            [
+                {"name": "low", "start_time": "00:00", "end_time": "08:00"},
+                {"name": "mid", "start_time": "08:00", "end_time": "18:00"},
+                {"name": "high", "start_time": "18:00", "end_time": "24:00"},
+            ]
+        )
+        assigned = assign_segments(pd.Series([1, 32, 33, 72, 73, 96]), segments).tolist()
+
+        self.assertEqual(assigned, ["low", "low", "mid", "mid", "high", "high"])
+
+    def test_high_price_weighting_marks_only_expensive_samples(self) -> None:
+        from dayahead_core import high_price_sample_weights
+
+        frame = pd.DataFrame({"price": [100.0, 200.0, 500.0]})
+
+        weights = high_price_sample_weights(frame, "price", True, 200.0, 3.0)
+
+        self.assertEqual(weights.tolist(), [1.0, 3.0, 3.0])
+
     def test_prediction_variant_prefers_no_lag_and_skips_legacy_lag(self) -> None:
         from dayahead_core import select_prediction_model_variant
 

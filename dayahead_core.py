@@ -88,6 +88,15 @@ REFERENCE_STRATEGIES = OrderedDict(
         ("recent_same_type_days", "最近 N 个同类型日"),
     ]
 )
+
+
+def period_to_time(period_boundary: int) -> str:
+    minutes = max(0, min(96, int(period_boundary) - 1)) * 15
+    if int(period_boundary) >= 97:
+        minutes = 24 * 60
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
 SEGMENTS = OrderedDict(
     [
         ("night", (1, 24)),
@@ -97,6 +106,10 @@ SEGMENTS = OrderedDict(
         ("late_night", (81, 96)),
     ]
 )
+DEFAULT_SEGMENT_CONFIG = [
+    {"name": name, "start": start, "end": end, "start_time": period_to_time(start), "end_time": period_to_time(end + 1)}
+    for name, (start, end) in SEGMENTS.items()
+]
 DEFAULT_XGB_PARAMS = {
     "objective": "reg:squarederror",
     "eval_metric": "rmse",
@@ -129,6 +142,10 @@ class TrainConfig:
     similarity_reference_days: int = DEFAULT_SIMILARITY_REFERENCE_DAYS
     similarity_weights: dict[str, float] | None = None
     enable_rolling_backtest: bool = True
+    segment_config: list[dict[str, object]] | None = None
+    high_price_weight_enabled: bool = False
+    high_price_quantile: float = 0.8
+    high_price_weight_multiplier: float = 2.0
 
 
 @dataclass
@@ -195,6 +212,77 @@ def normalize_reference_strategy(reference_strategy: str | None) -> str:
     if strategy_key not in REFERENCE_STRATEGIES:
         raise ValueError(f"不支持的参考日策略: {strategy_key}")
     return strategy_key
+
+
+def time_text_to_minutes(value: object) -> int:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d{1,2}):([0-5]\d)", text)
+    if not match:
+        raise ValueError(f"时段时间格式不正确：{text}")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour == 24 and minute == 0:
+        return 24 * 60
+    if hour < 0 or hour > 23 or minute % 15 != 0:
+        raise ValueError(f"时段时间必须在 00:00~24:00 且按 15 分钟粒度：{text}")
+    return hour * 60 + minute
+
+
+def minutes_to_time_text(minutes: int) -> str:
+    minutes = max(0, min(24 * 60, int(minutes)))
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def normalize_segment_config(segment_config: list[dict[str, object]] | None = None) -> OrderedDict[str, tuple[int, int]]:
+    if not segment_config:
+        return OrderedDict((name, (start, end)) for name, (start, end) in SEGMENTS.items())
+    normalized: OrderedDict[str, tuple[int, int]] = OrderedDict()
+    expected_start = 0
+    seen_names: set[str] = set()
+    if len(segment_config) > 8:
+        raise ValueError("自定义时段最多支持 8 段，避免每段样本过少")
+    for index, item in enumerate(segment_config, start=1):
+        name = str(item.get("name") or f"segment_{index}").strip()
+        safe_name = re.sub(r"[^0-9A-Za-z_\u4e00-\u9fff-]+", "_", name).strip("_") or f"segment_{index}"
+        if safe_name in seen_names:
+            raise ValueError(f"时段名称不能重复：{name}")
+        seen_names.add(safe_name)
+        if item.get("start_time") is not None:
+            start_minutes = time_text_to_minutes(item.get("start_time"))
+        elif item.get("start") is not None and str(item.get("start")).strip().isdigit():
+            start_minutes = (int(item.get("start")) - 1) * 15
+        else:
+            start_minutes = 0
+        if item.get("end_time") is not None:
+            end_minutes = time_text_to_minutes(item.get("end_time"))
+        elif item.get("end") is not None and str(item.get("end")).strip().isdigit():
+            end_minutes = int(item.get("end")) * 15
+        else:
+            end_minutes = 24 * 60
+        if start_minutes != expected_start:
+            raise ValueError("自定义时段必须连续覆盖 00:00~24:00，不能空缺或重叠")
+        if end_minutes <= start_minutes:
+            raise ValueError(f"时段 {name} 的结束时间必须晚于开始时间")
+        if end_minutes - start_minutes < 60:
+            raise ValueError(f"时段 {name} 至少需要 1 小时，避免训练样本过少")
+        normalized[safe_name] = (start_minutes // 15 + 1, end_minutes // 15)
+        expected_start = end_minutes
+    if expected_start != 24 * 60:
+        raise ValueError("自定义时段必须覆盖到 24:00")
+    return normalized
+
+
+def segment_metadata(segment_definitions: OrderedDict[str, tuple[int, int]]) -> list[dict[str, object]]:
+    return [
+        {
+            "name": name,
+            "start": int(start),
+            "end": int(end),
+            "start_time": minutes_to_time_text((int(start) - 1) * 15),
+            "end_time": minutes_to_time_text(int(end) * 15),
+        }
+        for name, (start, end) in segment_definitions.items()
+    ]
 
 
 def training_feature_columns(config: TrainConfig | None = None) -> list[str]:
@@ -651,9 +739,10 @@ def extract_thermal_on_capacity(text: object) -> float:
     return np.nan
 
 
-def assign_segments(periods: pd.Series) -> pd.Series:
+def assign_segments(periods: pd.Series, segment_definitions: OrderedDict[str, tuple[int, int]] | None = None) -> pd.Series:
+    segment_definitions = segment_definitions or normalize_segment_config()
     segment = pd.Series(index=periods.index, dtype="object")
-    for name, (start, end) in SEGMENTS.items():
+    for name, (start, end) in segment_definitions.items():
         segment.loc[periods.between(start, end)] = name
     if segment.isna().any():
         invalid = periods[segment.isna()].tolist()
@@ -1135,16 +1224,18 @@ def train_backend_model(
     label_column: str,
     num_boost_round: int,
     output_path: Path | None,
+    sample_weight: np.ndarray | pd.Series | None = None,
 ) -> tuple[object, int | None, np.ndarray | None]:
     train_x = train_df[feature_columns].astype(float)
     train_y = train_df[label_column].astype(float)
     valid_x = valid_df[feature_columns].astype(float) if not valid_df.empty else None
     valid_y = valid_df[label_column].astype(float) if not valid_df.empty else None
+    train_weight = np.asarray(sample_weight, dtype=float) if sample_weight is not None else None
 
     if backend == "lightgbm":
         import lightgbm as lgb
 
-        train_dataset = lgb.Dataset(train_x, label=train_y, feature_name=feature_columns)
+        train_dataset = lgb.Dataset(train_x, label=train_y, weight=train_weight, feature_name=feature_columns)
         valid_sets = [train_dataset]
         valid_names = ["train"]
         callbacks = []
@@ -1195,6 +1286,8 @@ def train_backend_model(
             fit_kwargs["eval_set"] = (valid_x, valid_y)
             fit_kwargs["early_stopping_rounds"] = 50
             fit_kwargs["use_best_model"] = True
+        if train_weight is not None:
+            fit_kwargs["sample_weight"] = train_weight
         model.fit(train_x, train_y, **fit_kwargs)
         best_iteration = int(model.get_best_iteration()) if model.get_best_iteration() is not None else None
         prediction = model.predict(valid_x) if valid_x is not None else None
@@ -1206,6 +1299,8 @@ def train_backend_model(
     import xgboost as xgb
 
     dtrain = make_dmatrix(train_df, feature_columns, label_column)
+    if train_weight is not None:
+        dtrain.set_weight(train_weight)
     evals = [(dtrain, "train")]
     train_kwargs = {
         "params": DEFAULT_XGB_PARAMS,
@@ -1232,6 +1327,21 @@ def train_backend_model(
     return booster, best_iteration, prediction
 
 
+def high_price_sample_weights(
+    frame: pd.DataFrame,
+    label_column: str,
+    enabled: bool,
+    high_price_threshold: float | None,
+    multiplier: float,
+) -> np.ndarray | None:
+    if not enabled or high_price_threshold is None or multiplier <= 1:
+        return None
+    weights = np.ones(len(frame), dtype=float)
+    labels = pd.to_numeric(frame[label_column], errors="coerce").to_numpy(dtype=float)
+    weights[labels >= float(high_price_threshold)] = float(multiplier)
+    return weights
+
+
 def train_segment_models(
     history_df: pd.DataFrame,
     output_dir: Path,
@@ -1244,21 +1354,33 @@ def train_segment_models(
     progress_label: str = "正在训练分时段模型",
     label_column: str = TARGET_COLUMN,
     model_backend: str = "xgboost",
+    segment_definitions: OrderedDict[str, tuple[int, int]] | None = None,
+    high_price_weight_enabled: bool = False,
+    high_price_threshold: float | None = None,
+    high_price_weight_multiplier: float = 2.0,
 ) -> tuple[dict[str, dict[str, float | int | None]], list[str], list[str]]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    segment_definitions = segment_definitions or normalize_segment_config()
     metrics_summary: dict[str, dict[str, float | int | None]] = {}
     unique_dates = sorted(pd.to_datetime(history_df["date"]).dt.strftime("%Y-%m-%d").unique().tolist())
     valid_dates = unique_dates[-valid_days:] if valid_days > 0 and len(unique_dates) > valid_days else []
     train_dates = unique_dates[:-valid_days] if valid_dates else unique_dates
 
-    total_segments = len(SEGMENTS)
-    for idx, segment_name in enumerate(SEGMENTS, start=1):
+    total_segments = len(segment_definitions)
+    for idx, segment_name in enumerate(segment_definitions, start=1):
         emit_progress(progress_callback, f"{progress_label}：{segment_name}", progress_start + int(idx / total_segments * progress_span))
         segment_df = history_df[history_df["segment"] == segment_name].copy()
         segment_df = segment_df.dropna(subset=[label_column])
         if segment_df.empty:
             raise ValueError(f"时段 {segment_name} 无训练数据")
         train_df, valid_df = split_train_valid(segment_df, valid_days)
+        sample_weight = high_price_sample_weights(
+            train_df,
+            label_column,
+            high_price_weight_enabled,
+            high_price_threshold,
+            high_price_weight_multiplier,
+        )
         _, best_iteration, final_pred = train_backend_model(
             model_backend,
             train_df,
@@ -1267,12 +1389,14 @@ def train_segment_models(
             label_column,
             num_boost_round,
             output_dir / model_file_name(segment_name, model_backend),
+            sample_weight=sample_weight,
         )
 
         segment_metrics: dict[str, float | int | None] = {
             "train_rows": int(len(train_df)),
             "valid_rows": int(len(valid_df)),
             "best_iteration": best_iteration,
+            "high_price_train_rows": int(np.sum(sample_weight > 1)) if sample_weight is not None else 0,
         }
         if not valid_df.empty and final_pred is not None:
             actual = valid_df[TARGET_COLUMN].to_numpy(dtype=float)
@@ -1422,7 +1546,12 @@ def rolling_backtest_selected_model(
     horizons: tuple[int, ...] = (14, 30),
     similarity_reference_days: int = DEFAULT_SIMILARITY_REFERENCE_DAYS,
     similarity_weights: dict[str, object] | None = None,
+    segment_definitions: OrderedDict[str, tuple[int, int]] | None = None,
+    high_price_weight_enabled: bool = False,
+    high_price_threshold: float | None = None,
+    high_price_weight_multiplier: float = 2.0,
 ) -> dict:
+    segment_definitions = segment_definitions or normalize_segment_config()
     unique_dates = sorted(pd.to_datetime(history_df["date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique().tolist())
     results: dict[str, dict] = {}
     if len(unique_dates) < 3:
@@ -1444,11 +1573,18 @@ def rolling_backtest_selected_model(
                 continue
             train_pool = baseline_history_df[baseline_history_df["date"].dt.strftime("%Y-%m-%d").isin(previous_dates)].copy()
             test_pool = baseline_history_df[baseline_history_df["date"].dt.strftime("%Y-%m-%d") == test_date].copy()
-            for segment_name in SEGMENTS:
+            for segment_name in segment_definitions:
                 train_df = train_pool[train_pool["segment"] == segment_name].dropna(subset=[TARGET_COLUMN]).copy()
                 test_df = test_pool[test_pool["segment"] == segment_name].dropna(subset=[TARGET_COLUMN]).copy()
                 if train_df.empty or test_df.empty:
                     continue
+                sample_weight = high_price_sample_weights(
+                    train_df,
+                    TARGET_COLUMN,
+                    high_price_weight_enabled,
+                    high_price_threshold,
+                    high_price_weight_multiplier,
+                )
                 model, _, _ = train_backend_model(
                     model_backend,
                     train_df,
@@ -1457,6 +1593,7 @@ def rolling_backtest_selected_model(
                     TARGET_COLUMN,
                     num_boost_round,
                     None,
+                    sample_weight=sample_weight,
                 )
                 pred = predict_backend_model(model, model_backend, test_df, feature_columns)
                 predictions.append(
@@ -1567,7 +1704,12 @@ def training_preferences_path(model_root: str | Path = DEFAULT_MODEL_ROOT) -> Pa
 
 
 def default_training_preferences() -> dict:
-    return {"similarity_weights": dict(normalize_similarity_weights())}
+    return {
+        "similarity_weights": dict(normalize_similarity_weights()),
+        "segment_mode": "default",
+        "segment_config": DEFAULT_SEGMENT_CONFIG,
+        "high_price_weighting": {"enabled": False, "quantile": 0.8, "multiplier": 2.0},
+    }
 
 
 def load_training_preferences(model_root: str | Path = DEFAULT_MODEL_ROOT) -> dict:
@@ -1581,6 +1723,16 @@ def load_training_preferences(model_root: str | Path = DEFAULT_MODEL_ROOT) -> di
     preferences = default_training_preferences()
     if isinstance(data, dict) and isinstance(data.get("similarity_weights"), dict):
         preferences["similarity_weights"] = dict(normalize_similarity_weights(data["similarity_weights"]))
+    if isinstance(data, dict) and data.get("segment_mode") == "custom" and isinstance(data.get("segment_config"), list):
+        preferences["segment_mode"] = "custom"
+        preferences["segment_config"] = segment_metadata(normalize_segment_config(data["segment_config"]))
+    if isinstance(data, dict) and isinstance(data.get("high_price_weighting"), dict):
+        high_config = data["high_price_weighting"]
+        preferences["high_price_weighting"] = {
+            "enabled": bool(high_config.get("enabled", False)),
+            "quantile": min(0.99, max(0.5, float(high_config.get("quantile", 0.8)))),
+            "multiplier": max(1.0, float(high_config.get("multiplier", 2.0))),
+        }
     return preferences
 
 
@@ -1588,6 +1740,17 @@ def save_training_preferences(model_root: str | Path, preferences: dict) -> dict
     current = load_training_preferences(model_root)
     if isinstance(preferences.get("similarity_weights"), dict):
         current["similarity_weights"] = dict(normalize_similarity_weights(preferences["similarity_weights"]))
+    if preferences.get("segment_mode") in {"default", "custom"}:
+        current["segment_mode"] = preferences.get("segment_mode")
+    if isinstance(preferences.get("segment_config"), list):
+        current["segment_config"] = segment_metadata(normalize_segment_config(preferences["segment_config"]))
+    if isinstance(preferences.get("high_price_weighting"), dict):
+        high_config = preferences["high_price_weighting"]
+        current["high_price_weighting"] = {
+            "enabled": bool(high_config.get("enabled", False)),
+            "quantile": min(0.99, max(0.5, float(high_config.get("quantile", 0.8)))),
+            "multiplier": max(1.0, float(high_config.get("multiplier", 2.0))),
+        }
     path = training_preferences_path(model_root)
     write_json(path, current)
     return current
@@ -1666,6 +1829,13 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     emit_progress(progress_callback, "开始加载历史数据", 5)
     history_df, skipped_sheets, quality_report_path = build_training_frame(config, progress_callback=progress_callback)
     emit_progress(progress_callback, "历史数据加载完成，开始生成训练样本", 20)
+    segment_definitions = normalize_segment_config(config.segment_config)
+    segment_config_metadata = segment_metadata(segment_definitions)
+    history_df["segment"] = assign_segments(history_df["period"], segment_definitions)
+    high_price_threshold = None
+    if config.high_price_weight_enabled:
+        quantile = min(0.99, max(0.5, float(config.high_price_quantile or 0.8)))
+        high_price_threshold = float(pd.to_numeric(history_df[TARGET_COLUMN], errors="coerce").quantile(quantile))
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     staging_dir = config.model_root / "_staging" / run_id
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -1699,6 +1869,10 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
                 progress_label=f"正在训练 {backend_label} 直接价格模型",
                 label_column=TARGET_COLUMN,
                 model_backend=backend_key,
+                segment_definitions=segment_definitions,
+                high_price_weight_enabled=config.high_price_weight_enabled,
+                high_price_threshold=high_price_threshold,
+                high_price_weight_multiplier=config.high_price_weight_multiplier,
             )
             model_variants[variant_key] = {
                 "feature_columns": feature_columns,
@@ -1735,6 +1909,10 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
             config.num_boost_round,
             similarity_reference_days=normalize_similarity_reference_days(config.similarity_reference_days),
             similarity_weights=dict(similarity_weights),
+            segment_definitions=segment_definitions,
+            high_price_weight_enabled=config.high_price_weight_enabled,
+            high_price_threshold=high_price_threshold,
+            high_price_weight_multiplier=config.high_price_weight_multiplier,
         )
     else:
         rolling_backtest_metrics = {}
@@ -1752,7 +1930,15 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "model_backend_candidates": dict(model_backends),
         "variant_quality_metrics": variant_quality_metrics,
         "rolling_backtest_metrics": rolling_backtest_metrics,
-        "segments": [{"name": name, "start": start, "end": end} for name, (start, end) in SEGMENTS.items()],
+        "segments": segment_config_metadata,
+        "segment_config": segment_config_metadata,
+        "segment_mode": "custom" if config.segment_config else "default",
+        "high_price_weighting": {
+            "enabled": bool(config.high_price_weight_enabled),
+            "quantile": float(config.high_price_quantile),
+            "multiplier": float(config.high_price_weight_multiplier),
+            "threshold": round(float(high_price_threshold), 4) if high_price_threshold is not None else None,
+        },
         "valid_days": config.valid_days,
         "training_window_days": config.training_window_days,
         "training_mode": "rolling_window" if config.training_window_days else "manual_date_range",
@@ -1778,6 +1964,13 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
             "num_boost_round": config.num_boost_round,
             "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
             "similarity_weights": dict(similarity_weights),
+            "segment_config": segment_config_metadata,
+            "high_price_weighting": {
+                "enabled": bool(config.high_price_weight_enabled),
+                "quantile": float(config.high_price_quantile),
+                "multiplier": float(config.high_price_weight_multiplier),
+                "threshold": round(float(high_price_threshold), 4) if high_price_threshold is not None else None,
+            },
         },
         "prediction_method": "direct_price_multi_model",
         "similarity_usage": "prediction_reference_only",
@@ -1814,6 +2007,8 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "selected_model_backend": selected_variant_meta["model_backend"],
         "variant_quality_metrics": variant_quality_metrics,
         "rolling_backtest_metrics": rolling_backtest_metrics,
+        "segment_config": segment_config_metadata,
+        "high_price_weighting": metadata["high_price_weighting"],
     }
     append_jsonl(config.model_root / "training_runs.jsonl", log_entry)
     emit_progress(progress_callback, f"训练完成，当前默认模型：{run_id}", 100)
@@ -2314,6 +2509,11 @@ def prepare_prediction_inputs(
             forecast_file,
             holiday_dates,
         )
+        model_segment_definitions = normalize_segment_config(metadata.get("segment_config") or metadata.get("segments"))
+        history_df["segment"] = assign_segments(history_df["period"], model_segment_definitions)
+        forecast_df["segment"] = assign_segments(forecast_df["period"], model_segment_definitions)
+        if template_reference_df is not None and not template_reference_df.empty:
+            template_reference_df["segment"] = assign_segments(template_reference_df["period"], model_segment_definitions)
         quality_issues.extend(forecast_quality_issues)
     except DataQualityValidationError as exc:
         quality_issues.extend(exc.issues)

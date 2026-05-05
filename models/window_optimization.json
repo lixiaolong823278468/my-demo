@@ -1,9 +1,9 @@
 {
   "enabled": true,
-  "last_run_at": "2026-05-05 00:09:29",
-  "last_attempt_at": "2026-05-05 00:09:29",
+  "last_run_at": "2026-05-05 02:07:06",
+  "last_attempt_at": "2026-05-05 02:07:06",
   "last_attempt_status": "success",
-  "last_attempt_finished_at": "2026-05-05 00:09:29",
+  "last_attempt_finished_at": "2026-05-05 02:07:06",
   "last_attempted_history_cache_key": "f5a716e074da1a336df06cb282d0732dbd32366ea40dbd0f550495b64adc8298",
   "history_cache_key": "f5a716e074da1a336df06cb282d0732dbd32366ea40dbd0f550495b64adc8298",
   "history_date_start": "2024-01-01",
@@ -734,7 +734,7 @@
       "rmse_true_weighted": 45.4923
     }
   },
-  "search_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702",
+  "search_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000",
   "results": [
     {
       "phase": "fine",
@@ -751,8 +751,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234709",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_55",
+      "run_id": "run_20260505_014812",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_55",
       "train_start": "2026-02-13",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -785,8 +785,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234747",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_56",
+      "run_id": "run_20260505_014842",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_56",
       "train_start": "2026-02-12",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -819,8 +819,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_233841",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\coarse_60",
+      "run_id": "run_20260505_014132",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\coarse_60",
       "train_start": "2026-02-08",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -853,8 +853,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234945",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_59",
+      "run_id": "run_20260505_015013",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_59",
       "train_start": "2026-02-09",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -887,8 +887,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234630",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_54",
+      "run_id": "run_20260505_014742",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_54",
       "train_start": "2026-02-14",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -921,8 +921,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234552",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_53",
+      "run_id": "run_20260505_014712",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_53",
       "train_start": "2026-02-15",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -955,8 +955,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234906",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_58",
+      "run_id": "run_20260505_014943",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_58",
       "train_start": "2026-02-10",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -989,8 +989,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235024",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_61",
+      "run_id": "run_20260505_015043",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_61",
       "train_start": "2026-02-07",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1023,8 +1023,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235102",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_62",
+      "run_id": "run_20260505_015113",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_62",
       "train_start": "2026-02-06",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1057,8 +1057,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234826",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_57",
+      "run_id": "run_20260505_014913",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_57",
       "train_start": "2026-02-11",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1091,8 +1091,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235141",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_63",
+      "run_id": "run_20260505_015143",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_63",
       "train_start": "2026-02-05",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1125,8 +1125,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234514",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_52",
+      "run_id": "run_20260505_014640",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_52",
       "train_start": "2026-02-16",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1159,8 +1159,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235344",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_66",
+      "run_id": "run_20260505_015312",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_66",
       "train_start": "2026-02-02",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1193,8 +1193,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234357",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_50",
+      "run_id": "run_20260505_014539",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_50",
       "train_start": "2026-02-18",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1227,8 +1227,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235619",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_70",
+      "run_id": "run_20260505_015512",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_70",
       "train_start": "2026-01-29",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1261,8 +1261,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235756",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_73",
+      "run_id": "run_20260505_015642",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_73",
       "train_start": "2026-01-26",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1295,8 +1295,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235303",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_65",
+      "run_id": "run_20260505_015242",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_65",
       "train_start": "2026-02-03",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1329,8 +1329,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235834",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_74",
+      "run_id": "run_20260505_015712",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_74",
       "train_start": "2026-01-25",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1363,8 +1363,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235425",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_67",
+      "run_id": "run_20260505_015342",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_67",
       "train_start": "2026-02-01",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1397,8 +1397,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234436",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_51",
+      "run_id": "run_20260505_014609",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_51",
       "train_start": "2026-02-17",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1431,8 +1431,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235650",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_71",
+      "run_id": "run_20260505_015542",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_71",
       "train_start": "2026-01-28",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1465,8 +1465,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235220",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_64",
+      "run_id": "run_20260505_015213",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_64",
       "train_start": "2026-02-04",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1499,8 +1499,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235722",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_72",
+      "run_id": "run_20260505_015612",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_72",
       "train_start": "2026-01-27",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1533,8 +1533,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235508",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_68",
+      "run_id": "run_20260505_015412",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_68",
       "train_start": "2026-01-31",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1567,8 +1567,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235545",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_69",
+      "run_id": "run_20260505_015442",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_69",
       "train_start": "2026-01-30",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1601,8 +1601,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234000",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\coarse_90",
+      "run_id": "run_20260505_014236",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\coarse_90",
       "train_start": "2026-01-09",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1635,8 +1635,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234319",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_49",
+      "run_id": "run_20260505_014509",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_49",
       "train_start": "2026-02-19",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1669,8 +1669,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234041",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\coarse_100",
+      "run_id": "run_20260505_014307",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\coarse_100",
       "train_start": "2025-12-30",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1703,8 +1703,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_233918",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\coarse_75",
+      "run_id": "run_20260505_014205",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\coarse_75",
       "train_start": "2026-01-24",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1737,8 +1737,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234159",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_47",
+      "run_id": "run_20260505_014408",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_47",
       "train_start": "2026-02-21",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1771,8 +1771,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234239",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_48",
+      "run_id": "run_20260505_014439",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_48",
       "train_start": "2026-02-20",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1805,8 +1805,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_233730",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\coarse_30",
+      "run_id": "run_20260505_014032",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\coarse_30",
       "train_start": "2026-03-10",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1839,8 +1839,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_234120",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\fine_46",
+      "run_id": "run_20260505_014338",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\fine_46",
       "train_start": "2026-02-22",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1873,8 +1873,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_233807",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\coarse_45",
+      "run_id": "run_20260505_014102",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\coarse_45",
       "train_start": "2026-02-23",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -1927,8 +1927,8 @@
           }
         ]
       },
-      "run_id": "run_20260505_000200",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\rerank_56",
+      "run_id": "run_20260505_020013",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\rerank_56",
       "train_start": "2026-02-12",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -2616,8 +2616,8 @@
           }
         ]
       },
-      "run_id": "run_20260505_000452",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\rerank_60",
+      "run_id": "run_20260505_020246",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\rerank_60",
       "train_start": "2026-02-08",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -3305,8 +3305,8 @@
           }
         ]
       },
-      "run_id": "run_20260504_235912",
-      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260504_233702\\rerank_55",
+      "run_id": "run_20260505_015742",
+      "model_root": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\window_optimization\\20260505_014000\\rerank_55",
       "train_start": "2026-02-13",
       "train_end": "2026-04-16",
       "valid_start": "2026-04-17",
@@ -3961,9 +3961,9 @@
     }
   ],
   "final_model": {
-    "run_id": "run_20260505_000713",
+    "run_id": "run_20260505_020448",
     "current_model_dir": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\models\\current",
-    "history_model_dir": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\models\\history\\run_20260505_000713",
+    "history_model_dir": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\models\\history\\run_20260505_020448",
     "metrics": {
       "night": {
         "train_rows": 1344,
@@ -4169,6 +4169,6 @@
       "8月.xlsx | 2025年8月28日 | 日前-出清概况中无法提取“运行机组容量”，该字段是火电开机容量的关键来源"
     ],
     "metadata_path": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\models\\current\\metadata.json",
-    "quality_report_path": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\data_quality_reports\\train_20260505_000713_340292.json"
+    "quality_report_path": "D:\\每日工作\\代码示例\\预测程序-------\\demo1\\output\\data_quality_reports\\train_20260505_020448_563588.json"
   }
 }

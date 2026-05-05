@@ -24,6 +24,9 @@ Thumbs.db
 # 日志
 *.log
 
+# 运行输出
+output/
+
 # 本地缓存
 models/cache/
 .test_tmp/
