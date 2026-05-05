@@ -85,11 +85,28 @@
             <div class="card-value">0 ~ 1500 元/兆瓦时</div>
             <div class="card-desc">预测结果自动执行上下限裁剪</div>
           </article>
+          <article class="info-card metric-card tone-purple">
+            <div class="card-icon">C</div>
+            <div class="card-title">当前模型实际配置</div>
+            <div class="card-value card-value-sm" id="current-model-config">-</div>
+            <div class="card-desc">训练完成后从 metadata 读取，防止配置漏传</div>
+          </article>
         </section>
 
         <section class="glass-card">
 
         <div class="tab-panel active train-page" id="tab-train">
+          <div class="cleanup-card">
+            <div class="cleanup-card-main">
+              <div class="cleanup-icon" aria-hidden="true">🧹</div>
+              <div>
+                <div class="cleanup-title">空间清理</div>
+                <div class="cleanup-desc" id="cleanup-output-summary">清理 output 寻优中间结果、旧异常报告和临时缓存，保留最新预测结果与模型。</div>
+              </div>
+            </div>
+            <button class="cleanup-btn" id="cleanup-output-btn" type="button">一键清理垃圾</button>
+          </div>
+
           <div class="train-workflow-card train-workflow-card-auto">
             <div class="train-card-accent">AUTO</div>
             <div class="section-header">
@@ -325,8 +342,10 @@
                   <th>窗口</th>
                   <th>模型 MAE</th>
                   <th>模型 RMSE</th>
-                  <th>相似法 MAE</th>
-                  <th>较相似法提升</th>
+                  <th>多条件相似法 MAE</th>
+                  <th>较多条件提升</th>
+                  <th>仅火电空间相似法 MAE</th>
+                  <th>较火电空间提升</th>
                   <th>方向准确率</th>
                   <th>高价尖峰 MAE</th>
                   <th>晚高峰 MAE</th>

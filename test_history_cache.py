@@ -41,12 +41,17 @@ class HistoryCacheTests(unittest.TestCase):
 
         summary = summarize_prediction_errors(frame)
         comparison = summarize_model_vs_baseline(frame)
+        thermal_space_comparison = summarize_model_vs_baseline(
+            frame.rename(columns={"similar_predicted": "net_load_only_similar_predicted"}),
+            "net_load_only_similar_predicted",
+        )
 
         self.assertEqual(summary["rows"], 4)
         self.assertEqual(summary["mae"], 5.0)
         self.assertEqual(summary["max_abs_error"], 5.0)
         self.assertEqual(summary["direction_accuracy"], 100.0)
         self.assertGreater(comparison["mae_improvement"], 0)
+        self.assertGreater(thermal_space_comparison["mae_improvement"], 0)
 
     def test_custom_segment_config_maps_periods_continuously(self) -> None:
         from dayahead_core import assign_segments, normalize_segment_config
@@ -70,6 +75,88 @@ class HistoryCacheTests(unittest.TestCase):
         weights = high_price_sample_weights(frame, "price", True, 200.0, 3.0)
 
         self.assertEqual(weights.tolist(), [1.0, 3.0, 3.0])
+
+    def test_window_optimization_payload_keeps_advanced_training_options(self) -> None:
+        from api_server import build_window_optimization_worker_payload
+
+        payload = {
+            "valid_days": 30,
+            "num_boost_round": 500,
+            "fine_radius": 7,
+            "segment_mode": "custom",
+            "segment_config": [
+                {"name": "low", "start_time": "00:00", "end_time": "08:00"},
+                {"name": "mid", "start_time": "08:00", "end_time": "18:00"},
+                {"name": "high", "start_time": "18:00", "end_time": "24:00"},
+            ],
+            "high_price_weighting": {"enabled": True, "quantile": 0.85, "multiplier": 3.0},
+        }
+
+        worker_payload = build_window_optimization_worker_payload("manual", payload, force=True)
+
+        self.assertEqual(worker_payload["valid_days"], 30)
+        self.assertEqual(worker_payload["num_boost_round"], 500)
+        self.assertEqual(worker_payload["fine_radius"], 7)
+        self.assertEqual(worker_payload["segment_mode"], "custom")
+        self.assertEqual(len(worker_payload["segment_config"]), 3)
+        self.assertTrue(worker_payload["high_price_weighting"]["enabled"])
+        self.assertEqual(worker_payload["high_price_weighting"]["quantile"], 0.85)
+        self.assertEqual(worker_payload["high_price_weighting"]["multiplier"], 3.0)
+        self.assertTrue(worker_payload["force"])
+
+    def test_window_optimization_payload_uses_saved_advanced_preferences(self) -> None:
+        import api_server
+        from dayahead_core import save_training_preferences
+
+        root = Path(__file__).resolve().parent / ".test_tmp" / f"prefs_{time.time_ns()}"
+        root.mkdir(parents=True, exist_ok=True)
+        save_training_preferences(
+            root,
+            {
+                "segment_mode": "custom",
+                "segment_config": [
+                    {"name": "low", "start_time": "00:00", "end_time": "12:00"},
+                    {"name": "high", "start_time": "12:00", "end_time": "24:00"},
+                ],
+                "high_price_weighting": {"enabled": True, "quantile": 0.9, "multiplier": 2.5},
+            },
+        )
+
+        original_model_root = api_server.MODEL_ROOT
+        try:
+            api_server.MODEL_ROOT = root
+            worker_payload = api_server.build_window_optimization_worker_payload("startup", {})
+        finally:
+            api_server.MODEL_ROOT = original_model_root
+
+        self.assertEqual(worker_payload["segment_mode"], "custom")
+        self.assertEqual(len(worker_payload["segment_config"]), 2)
+        self.assertTrue(worker_payload["high_price_weighting"]["enabled"])
+        self.assertEqual(worker_payload["high_price_weighting"]["quantile"], 0.9)
+        self.assertEqual(worker_payload["high_price_weighting"]["multiplier"], 2.5)
+
+    def test_training_result_validation_rejects_mismatched_options(self) -> None:
+        import api_server
+
+        root = Path(__file__).resolve().parent / ".test_tmp" / f"metadata_{time.time_ns()}"
+        model_dir = root / "history" / "run_test"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "metadata.json").write_text(
+            "{"
+            '"segment_mode":"default",'
+            '"segment_config":[{"name":"night","start_time":"00:00","end_time":"24:00"}],'
+            '"high_price_weighting":{"enabled":false,"quantile":0.8,"multiplier":2.0}'
+            "}",
+            encoding="utf-8",
+        )
+        result = type("Result", (), {"history_model_dir": model_dir})()
+
+        with self.assertRaises(RuntimeError):
+            api_server.validate_training_result_options(
+                result,
+                [{"name": "low", "start_time": "00:00", "end_time": "12:00"}, {"name": "high", "start_time": "12:00", "end_time": "24:00"}],
+                {"enabled": True, "quantile": 0.8, "multiplier": 2.0},
+            )
 
     def test_prediction_variant_prefers_no_lag_and_skips_legacy_lag(self) -> None:
         from dayahead_core import select_prediction_model_variant

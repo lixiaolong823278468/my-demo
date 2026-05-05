@@ -1607,6 +1607,9 @@ def rolling_backtest_selected_model(
                             "similar_predicted": test_df[SIMILAR_PRICE_COLUMN].to_numpy(dtype=float)
                             if SIMILAR_PRICE_COLUMN in test_df.columns
                             else np.full(len(test_df), np.nan),
+                            "net_load_only_similar_predicted": test_df[NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN].to_numpy(dtype=float)
+                            if NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN in test_df.columns
+                            else np.full(len(test_df), np.nan),
                         }
                     )
                 )
@@ -1622,29 +1625,42 @@ def rolling_backtest_selected_model(
             segment_name: summarize_prediction_errors(segment_df, "similar_predicted")
             for segment_name, segment_df in error_df.groupby("segment")
         }
+        segment_net_load_only_baseline_metrics = {
+            segment_name: summarize_prediction_errors(segment_df, "net_load_only_similar_predicted")
+            for segment_name, segment_df in error_df.groupby("segment")
+        }
         high_threshold = float(error_df["actual"].quantile(0.9))
         low_threshold = float(error_df["actual"].quantile(0.1))
         high_spike_df = error_df[error_df["actual"] >= high_threshold]
         low_spike_df = error_df[error_df["actual"] <= low_threshold]
         model_vs_baseline = summarize_model_vs_baseline(error_df)
+        model_vs_net_load_only_baseline = summarize_model_vs_baseline(error_df, "net_load_only_similar_predicted")
         results[str(horizon)] = {
             "rows": int(len(error_df)),
             "test_date_start": min(test_dates) if test_dates else None,
             "test_date_end": max(test_dates) if test_dates else None,
             "overall": summarize_prediction_errors(error_df),
             "baseline": summarize_prediction_errors(error_df, "similar_predicted"),
+            "baseline_label": "多条件相似法",
+            "net_load_only_baseline": summarize_prediction_errors(error_df, "net_load_only_similar_predicted"),
+            "net_load_only_baseline_label": "仅火电空间相似法",
             "model_vs_similarity": model_vs_baseline,
+            "model_vs_net_load_only_similarity": model_vs_net_load_only_baseline,
             "segments": segment_metrics,
             "segment_baseline": segment_baseline_metrics,
+            "segment_net_load_only_baseline": segment_net_load_only_baseline_metrics,
             "daily_error_rank": top_daily_error_days(error_df),
             "spike_errors": {
                 "high_threshold": round(high_threshold, 4),
                 "high": summarize_prediction_errors(high_spike_df),
                 "high_baseline": summarize_prediction_errors(high_spike_df, "similar_predicted"),
+                "high_net_load_only_baseline": summarize_prediction_errors(high_spike_df, "net_load_only_similar_predicted"),
                 "high_model_vs_similarity": summarize_model_vs_baseline(high_spike_df),
+                "high_model_vs_net_load_only_similarity": summarize_model_vs_baseline(high_spike_df, "net_load_only_similar_predicted"),
                 "low_threshold": round(low_threshold, 4),
                 "low": summarize_prediction_errors(low_spike_df),
                 "low_baseline": summarize_prediction_errors(low_spike_df, "similar_predicted"),
+                "low_net_load_only_baseline": summarize_prediction_errors(low_spike_df, "net_load_only_similar_predicted"),
             },
         }
     return results

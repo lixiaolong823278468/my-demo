@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import mimetypes
+import shutil
 import threading
 import traceback
 import urllib.parse
@@ -55,8 +56,9 @@ MODEL_ROOT = Path(DEFAULT_MODEL_ROOT)
 FORECAST_FILE = Path(DEFAULT_FORECAST_FILE)
 HISTORY_DIR = Path(DEFAULT_HISTORY_DIR)
 OUTPUT_FILE = Path(DEFAULT_OUTPUT_FILE)
+OUTPUT_ROOT = BASE_DIR / "output"
 WINDOW_OPTIMIZATION_STATE_FILE = MODEL_ROOT / "window_optimization.json"
-WINDOW_OPTIMIZATION_OUTPUT_ROOT = BASE_DIR / "output" / "window_optimization"
+WINDOW_OPTIMIZATION_OUTPUT_ROOT = OUTPUT_ROOT / "window_optimization"
 AUTO_WINDOW_CANDIDATES = [30, 45, 60, 75, 90, 120, 150, 180, 240, 365]
 AUTO_WINDOW_FINE_RADIUS = 15
 AUTO_WINDOW_MAX_HISTORY_DAYS = 100
@@ -585,6 +587,7 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
         training_window_days = int(payload.get("training_window_days") or 60) if training_mode == "rolling_window" else None
         segment_config = parse_segment_config_payload(payload)
         high_price_weighting = parse_high_price_weighting_payload(payload)
+        STATE.append_log(job_id, describe_training_options(segment_config, high_price_weighting), 3)
         save_training_preferences(
             model_root,
             {
@@ -593,6 +596,8 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
                 "high_price_weighting": high_price_weighting,
             },
         )
+        previous_metadata = load_current_metadata(model_root) or {}
+        previous_run_id = previous_metadata.get("run_id")
         result = train_and_register(
             TrainConfig(
                 history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
@@ -610,6 +615,7 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
             ),
             progress_callback=build_progress_callback(job_id),
         )
+        validate_training_result_or_restore(model_root, result, segment_config, high_price_weighting, previous_run_id)
         return summarize_train_result(result)
 
     return worker
@@ -647,6 +653,121 @@ def window_optimization_state() -> dict[str, Any]:
 
 def save_window_optimization_state(state: dict[str, Any]) -> None:
     write_json_file(WINDOW_OPTIMIZATION_STATE_FILE, state)
+
+
+def path_size(path: Path) -> int:
+    try:
+        if not path.exists() and not path.is_symlink():
+            return 0
+        if path.is_file() or path.is_symlink():
+            return path.stat().st_size
+        return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+    except OSError:
+        return 0
+
+
+def count_path_files(path: Path) -> int:
+    try:
+        if not path.exists() and not path.is_symlink():
+            return 0
+        if path.is_file() or path.is_symlink():
+            return 1
+        return sum(1 for item in path.rglob("*") if item.is_file())
+    except OSError:
+        return 0
+
+
+def safe_cleanup_target(path: Path) -> Path:
+    target = path.resolve()
+    base = BASE_DIR.resolve()
+    if base not in [target, *target.parents]:
+        raise RuntimeError(f"拒绝清理项目目录外路径：{target}")
+    protected = {base, MODEL_ROOT.resolve(), HISTORY_DIR.resolve(), FRONTEND_APP_DIR.resolve()}
+    if target in protected:
+        raise RuntimeError(f"拒绝清理受保护目录：{target}")
+    return target
+
+
+def remove_cleanup_target(path: Path, label: str, removed: list[dict[str, Any]]) -> None:
+    target = safe_cleanup_target(path)
+    if not target.exists() and not target.is_symlink():
+        return
+    size = path_size(target)
+    files = count_path_files(target)
+    if target.is_dir() and not target.is_symlink():
+        shutil.rmtree(target)
+    else:
+        target.unlink(missing_ok=True)
+    removed.append(
+        {
+            "label": label,
+            "path": str(target),
+            "bytes": size,
+            "files": files,
+        }
+    )
+
+
+def prune_quality_reports(report_dir: Path, keep_latest: int, removed: list[dict[str, Any]]) -> None:
+    if not report_dir.exists():
+        return
+    reports = sorted(report_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    keep = {item.resolve() for item in reports[:keep_latest]}
+    for report in reports[keep_latest:]:
+        remove_cleanup_target(report, "旧数据异常报告", removed)
+    for extra in report_dir.iterdir():
+        if extra.resolve() in keep:
+            continue
+        if extra.suffix.lower() != ".json":
+            remove_cleanup_target(extra, "数据异常报告目录杂项", removed)
+    if report_dir.exists() and not any(report_dir.iterdir()):
+        report_dir.rmdir()
+
+
+def cleanup_output_junk() -> dict[str, Any]:
+    status = STATE.status()
+    if status.get("running"):
+        raise RuntimeError("当前有训练、寻优或预测任务正在运行，请任务结束后再清理")
+
+    removed: list[dict[str, Any]] = []
+    keep_quality_reports = 10
+    output_file = OUTPUT_FILE.resolve()
+    quality_report_dir = (OUTPUT_ROOT / "data_quality_reports").resolve()
+
+    if OUTPUT_ROOT.exists():
+        for item in list(OUTPUT_ROOT.iterdir()):
+            resolved = item.resolve()
+            if resolved == output_file:
+                continue
+            if resolved == quality_report_dir:
+                prune_quality_reports(item, keep_quality_reports, removed)
+                continue
+            if item.name == "window_optimization":
+                remove_cleanup_target(item, "自动寻优中间结果", removed)
+                continue
+            remove_cleanup_target(item, "output 目录杂项", removed)
+
+    for folder_name in [".test_tmp", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__"]:
+        remove_cleanup_target(BASE_DIR / folder_name, folder_name, removed)
+
+    for log_path in [BASE_DIR / "api_server.stdout.log", BASE_DIR / "api_server.stderr.log"]:
+        if log_path.exists() and log_path.stat().st_size == 0:
+            remove_cleanup_target(log_path, "空日志文件", removed)
+
+    total_bytes = sum(item["bytes"] for item in removed)
+    total_files = sum(item["files"] for item in removed)
+    return {
+        "message": "清理完成",
+        "removed": removed,
+        "removed_count": len(removed),
+        "total_files": total_files,
+        "total_bytes": total_bytes,
+        "kept": [
+            str(output_file),
+            f"{quality_report_dir}（保留最新 {keep_quality_reports} 个）",
+            str(MODEL_ROOT.resolve()),
+        ],
+    }
 
 
 def mark_window_optimization_attempt(
@@ -691,6 +812,116 @@ def mark_window_optimization_attempt_status(status: str, message: str | None = N
     save_window_optimization_state(state)
 
 
+def build_window_optimization_worker_payload(
+    reason: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    force: bool | None = None,
+) -> dict[str, Any]:
+    payload = payload or {}
+    preferences = load_training_preferences(MODEL_ROOT)
+
+    has_segment_payload = "segment_mode" in payload or "segment_config" in payload
+    has_high_price_payload = (
+        "high_price_weighting" in payload
+        or "high_price_weight_enabled" in payload
+        or "high_price_quantile" in payload
+        or "high_price_weight_multiplier" in payload
+    )
+    segment_source = payload if has_segment_payload else preferences
+    high_price_source = payload if has_high_price_payload else preferences
+
+    worker_payload: dict[str, Any] = {
+        "reason": reason,
+        "max_history_days": resolve_window_optimization_max_history_days(payload),
+        "valid_days": int(payload.get("valid_days") or AUTO_WINDOW_VALID_DAYS),
+        "num_boost_round": int(payload.get("num_boost_round") or AUTO_WINDOW_NUM_BOOST_ROUND),
+        "fine_radius": int(payload.get("fine_radius") or AUTO_WINDOW_FINE_RADIUS),
+        "segment_mode": segment_source.get("segment_mode", "default"),
+        "segment_config": segment_source.get("segment_config"),
+        "high_price_weighting": parse_high_price_weighting_payload(high_price_source),
+    }
+    if force is not None:
+        worker_payload["force"] = force
+    if payload.get("candidate_windows"):
+        worker_payload["candidate_windows"] = payload.get("candidate_windows")
+    return worker_payload
+
+
+def normalize_segments_for_compare(segment_config: list[dict[str, object]] | None) -> list[dict[str, object]]:
+    return parse_segment_config_payload(
+        {
+            "segment_mode": "custom",
+            "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
+        }
+    ) or []
+
+
+def describe_training_options(segment_config: list[dict[str, object]] | None, high_price_weighting: dict[str, Any]) -> str:
+    segments = normalize_segments_for_compare(segment_config)
+    segment_text = " / ".join(
+        f"{item.get('name')}:{item.get('start_time')}-{item.get('end_time')}"
+        for item in segments
+    )
+    high_text = (
+        f"开启，高价分位={high_price_weighting.get('quantile')}，权重倍数={high_price_weighting.get('multiplier')}"
+        if high_price_weighting.get("enabled")
+        else "关闭"
+    )
+    return f"实际训练配置：{len(segments)} 个时段（{segment_text}）；高价样本加权：{high_text}"
+
+
+def validate_training_result_options(
+    result: Any,
+    segment_config: list[dict[str, object]] | None,
+    high_price_weighting: dict[str, Any],
+) -> None:
+    metadata = read_json_file(Path(result.history_model_dir) / "metadata.json")
+    expected_segments = normalize_segments_for_compare(segment_config)
+    actual_segments = normalize_segments_for_compare(metadata.get("segment_config") or metadata.get("segments"))
+    expected_mode = "custom" if segment_config else "default"
+    actual_mode = str(metadata.get("segment_mode") or "default")
+    if actual_mode != expected_mode or actual_segments != expected_segments:
+        raise RuntimeError(
+            "训练配置校验失败：模型元数据中的时段配置与本次提交配置不一致，已阻止启用该模型。"
+        )
+
+    actual_high = metadata.get("high_price_weighting") if isinstance(metadata.get("high_price_weighting"), dict) else {}
+    expected_enabled = bool(high_price_weighting.get("enabled"))
+    actual_enabled = bool(actual_high.get("enabled"))
+    expected_quantile = float(high_price_weighting.get("quantile", 0.8))
+    actual_quantile = float(actual_high.get("quantile", 0.8))
+    expected_multiplier = float(high_price_weighting.get("multiplier", 2.0))
+    actual_multiplier = float(actual_high.get("multiplier", 2.0))
+    if (
+        actual_enabled != expected_enabled
+        or abs(actual_quantile - expected_quantile) > 1e-9
+        or abs(actual_multiplier - expected_multiplier) > 1e-9
+        or (expected_enabled and actual_high.get("threshold") is None)
+    ):
+        raise RuntimeError(
+            "训练配置校验失败：模型元数据中的高价样本加权配置与本次提交配置不一致，已阻止启用该模型。"
+        )
+
+
+def validate_training_result_or_restore(
+    model_root: Path,
+    result: Any,
+    segment_config: list[dict[str, object]] | None,
+    high_price_weighting: dict[str, Any],
+    previous_run_id: str | None,
+) -> None:
+    try:
+        validate_training_result_options(result, segment_config, high_price_weighting)
+    except Exception:
+        if previous_run_id:
+            try:
+                activate_model_version(model_root, previous_run_id, persist_default=True)
+            except Exception:
+                pass
+        raise
+
+
 def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> Callable[[str], dict[str, Any]]:
     payload = payload or {}
 
@@ -701,6 +932,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
         max_history_days = resolve_window_optimization_max_history_days(payload)
         segment_config = parse_segment_config_payload(payload)
         high_price_weighting = parse_high_price_weighting_payload(payload)
+        STATE.append_log(job_id, describe_training_options(segment_config, high_price_weighting), 2)
         save_training_preferences(
             MODEL_ROOT,
             {
@@ -794,6 +1026,8 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
         best = min(best_pool, key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))))
         best_window_days = int(best["window_days"])
         STATE.append_log(job_id, f"最优训练窗口为最近 {best_window_days} 天，正在训练正式模型", 86)
+        previous_metadata = load_current_metadata(MODEL_ROOT) or {}
+        previous_run_id = previous_metadata.get("run_id")
         final_result = train_and_register(
             TrainConfig(
                 history_dir=HISTORY_DIR,
@@ -808,6 +1042,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
             ),
             progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
         )
+        validate_training_result_or_restore(MODEL_ROOT, final_result, segment_config, high_price_weighting, previous_run_id)
         activate_model_version(MODEL_ROOT, final_result.run_id, persist_default=True)
         final_summary = summarize_train_result(final_result)
         state = {
@@ -871,7 +1106,7 @@ def maybe_start_window_optimization(reason: str = "startup", payload: dict[str, 
         and state.get("last_attempt_status") == "failed"
     ):
         return {"started": False, "reason": "last_attempt_failed", "state": state}
-    worker_payload = {"reason": reason, "max_history_days": resolve_window_optimization_max_history_days(payload)}
+    worker_payload = build_window_optimization_worker_payload(reason, payload)
     mark_window_optimization_attempt(signature, reason, payload=worker_payload)
     job = start_background_job("optimize", build_window_optimization_worker(worker_payload))
     return {"started": True, "job": job, "state": state}
@@ -890,7 +1125,7 @@ def check_window_optimization(reason: str = "status_check", force: bool = False,
     if STATE.has_running_job():
         return {"started": False, "reason": "job_running", "state": window_optimization_state()}
     LAST_AUTO_WINDOW_CHECK_AT = datetime.now()
-    worker_payload = {"reason": reason, "force": True, "max_history_days": resolve_window_optimization_max_history_days(payload)}
+    worker_payload = build_window_optimization_worker_payload(reason, payload, force=True)
     try:
         mark_window_optimization_attempt(current_history_signature(), reason, force=True, payload=worker_payload)
     except Exception:
@@ -981,6 +1216,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self.send_json(start_background_job("train", build_train_worker(payload)), HTTPStatus.ACCEPTED)
             if path == "/api/window-optimization/run":
                 return self.send_json(check_window_optimization("manual", force=bool(payload.get("force", True)), payload=payload), HTTPStatus.ACCEPTED)
+            if path == "/api/cleanup/output":
+                return self.send_json(cleanup_output_junk())
             if path in {"/api/training/preferences", "/api/prediction/preferences"}:
                 preference_payload: dict[str, Any] = {"similarity_weights": resolve_similarity_weights(payload, MODEL_ROOT)}
                 if path == "/api/training/preferences":
