@@ -1085,7 +1085,7 @@ def resolve_training_date_range(history_df: pd.DataFrame, config: TrainConfig) -
     end_limit = parse_optional_date(config.end_date)
     eligible_dates = [date for date in dates if end_limit is None or date <= end_limit]
     if not eligible_dates:
-        raise ValueError("训练窗口内没有可用历史日期，请检查训练结束日期。")
+        raise ValueError("训练使用天数内没有可用历史日期，请检查训练结束日期。")
     required_days = window_days + valid_days
     selected_dates = eligible_dates[-required_days:] if len(eligible_dates) > required_days else eligible_dates
     return pd.Timestamp(selected_dates[0]).strftime("%Y-%m-%d"), pd.Timestamp(selected_dates[-1]).strftime("%Y-%m-%d")
@@ -1156,7 +1156,7 @@ def build_training_frame(
         emit_progress(progress_callback, "训练特征构建完成", 21)
     effective_start_date, effective_end_date = resolve_training_date_range(history_df, config)
     if config.training_window_days:
-        emit_progress(progress_callback, f"按最近 {config.training_window_days} 天训练窗口过滤数据", 22)
+        emit_progress(progress_callback, f"按最近 {config.training_window_days} 天训练使用天数过滤数据", 22)
     history_df = filter_date_range(history_df, effective_start_date, effective_end_date)
     emit_progress(progress_callback, "正在过滤日期范围", 22)
     required_columns = [TARGET_COLUMN, "net_load"]
@@ -2895,6 +2895,177 @@ def summarize_model_quality_metrics(metrics: dict | None) -> dict[str, float | N
     }
 
 
+def summarize_variant_display_metrics(metrics: dict | None) -> dict[str, float | int | None]:
+    quality = summarize_model_quality_metrics(metrics)
+    if not isinstance(metrics, dict) or not metrics:
+        return {
+            **quality,
+            "train_rows": None,
+            "valid_rows": None,
+            "max_abs_error": None,
+            "p90_abs_error": None,
+            "direction_accuracy": None,
+            "best_iteration_avg": None,
+            "best_iteration_max": None,
+            "best_iteration_min": None,
+        }
+
+    train_rows_total = 0
+    valid_rows_total = 0
+    max_abs_error = None
+    p90_abs_error_weighted = 0.0
+    direction_accuracy_weighted = 0.0
+    p90_weight_rows = 0.0
+    direction_weight_rows = 0.0
+    best_iterations: list[int] = []
+
+    for segment_metrics in metrics.values():
+        if not isinstance(segment_metrics, dict):
+            continue
+        train_rows = segment_metrics.get("train_rows")
+        valid_rows = segment_metrics.get("valid_rows")
+        try:
+            train_rows_value = int(float(train_rows or 0))
+            valid_rows_value = int(float(valid_rows or 0))
+        except (TypeError, ValueError):
+            train_rows_value = 0
+            valid_rows_value = 0
+        train_rows_total += max(0, train_rows_value)
+        valid_rows_total += max(0, valid_rows_value)
+
+        try:
+            current_max = float(segment_metrics.get("max_abs_error"))
+            max_abs_error = current_max if max_abs_error is None else max(max_abs_error, current_max)
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            p90_value = float(segment_metrics.get("p90_abs_error"))
+            if valid_rows_value > 0:
+                p90_abs_error_weighted += valid_rows_value * p90_value
+                p90_weight_rows += valid_rows_value
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            direction_value = float(segment_metrics.get("direction_accuracy"))
+            if valid_rows_value > 0:
+                direction_accuracy_weighted += valid_rows_value * direction_value
+                direction_weight_rows += valid_rows_value
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            best_iteration = segment_metrics.get("best_iteration")
+            if best_iteration is not None:
+                best_iterations.append(int(float(best_iteration)))
+        except (TypeError, ValueError):
+            pass
+
+    return {
+        **quality,
+        "train_rows": train_rows_total or None,
+        "valid_rows": valid_rows_total or None,
+        "max_abs_error": round(max_abs_error, 4) if max_abs_error is not None else None,
+        "p90_abs_error": round(p90_abs_error_weighted / p90_weight_rows, 4) if p90_weight_rows else None,
+        "direction_accuracy": round(direction_accuracy_weighted / direction_weight_rows, 4) if direction_weight_rows else None,
+        "best_iteration_avg": round(float(np.mean(best_iterations)), 2) if best_iterations else None,
+        "best_iteration_max": max(best_iterations) if best_iterations else None,
+        "best_iteration_min": min(best_iterations) if best_iterations else None,
+    }
+
+
+def nested_metric(data: dict | None, *keys: str) -> object | None:
+    current: object = data or {}
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def version_rolling_metrics(metadata: dict) -> dict[str, object | None]:
+    rolling = metadata.get("rolling_backtest_metrics") if isinstance(metadata.get("rolling_backtest_metrics"), dict) else {}
+    metrics: dict[str, object | None] = {}
+    for days in ("14", "30"):
+        row = rolling.get(days) if isinstance(rolling.get(days), dict) else {}
+        prefix = f"rolling_{days}"
+        metrics[f"{prefix}_mae"] = nested_metric(row, "overall", "mae")
+        metrics[f"{prefix}_rmse"] = nested_metric(row, "overall", "rmse")
+        metrics[f"{prefix}_direction_accuracy"] = nested_metric(row, "overall", "direction_accuracy")
+        metrics[f"{prefix}_max_abs_error"] = nested_metric(row, "overall", "max_abs_error")
+        metrics[f"{prefix}_p90_abs_error"] = nested_metric(row, "overall", "p90_abs_error")
+        metrics[f"{prefix}_multi_similarity_mae"] = nested_metric(row, "baseline", "mae")
+        metrics[f"{prefix}_multi_similarity_rmse"] = nested_metric(row, "baseline", "rmse")
+        metrics[f"{prefix}_thermal_space_similarity_mae"] = nested_metric(row, "net_load_only_baseline", "mae")
+        metrics[f"{prefix}_thermal_space_similarity_rmse"] = nested_metric(row, "net_load_only_baseline", "rmse")
+        metrics[f"{prefix}_multi_similarity_improvement"] = nested_metric(row, "model_vs_similarity", "mae_improvement")
+        metrics[f"{prefix}_multi_similarity_improvement_pct"] = nested_metric(row, "model_vs_similarity", "mae_improvement_pct")
+        metrics[f"{prefix}_thermal_space_similarity_improvement"] = nested_metric(row, "model_vs_net_load_only_similarity", "mae_improvement")
+        metrics[f"{prefix}_thermal_space_similarity_improvement_pct"] = nested_metric(row, "model_vs_net_load_only_similarity", "mae_improvement_pct")
+        metrics[f"{prefix}_high_price_mae"] = nested_metric(row, "spike_errors", "high", "mae")
+        metrics[f"{prefix}_high_price_rmse"] = nested_metric(row, "spike_errors", "high", "rmse")
+        metrics[f"{prefix}_high_price_multi_similarity_mae"] = nested_metric(row, "spike_errors", "high_baseline", "mae")
+        metrics[f"{prefix}_high_price_thermal_space_similarity_mae"] = nested_metric(row, "spike_errors", "high_net_load_only_baseline", "mae")
+        metrics[f"{prefix}_evening_peak_mae"] = nested_metric(row, "segments", "evening_peak", "mae")
+        metrics[f"{prefix}_evening_peak_rmse"] = nested_metric(row, "segments", "evening_peak", "rmse")
+    return metrics
+
+
+def version_algorithm_variants(metadata: dict) -> list[dict[str, object | None]]:
+    variants = metadata.get("model_variants") if isinstance(metadata.get("model_variants"), dict) else {}
+    variant_metrics = metadata.get("variant_metrics") if isinstance(metadata.get("variant_metrics"), dict) else {}
+    quality_metrics = metadata.get("variant_quality_metrics") if isinstance(metadata.get("variant_quality_metrics"), dict) else {}
+    selected_key = metadata.get("selected_model_key")
+    rows: list[dict[str, object | None]] = []
+    for variant_key, variant_meta in variants.items():
+        if not isinstance(variant_meta, dict):
+            variant_meta = {}
+        quality = quality_metrics.get(variant_key)
+        if not isinstance(quality, dict):
+            quality = summarize_model_quality_metrics(variant_metrics.get(variant_key))
+        display_metrics = summarize_variant_display_metrics(variant_metrics.get(variant_key))
+        rows.append(
+            {
+                "variant_key": variant_key,
+                "model_backend": variant_meta.get("model_backend"),
+                "model_backend_label": variant_meta.get("model_backend_label") or variant_meta.get("model_backend") or variant_key,
+                "is_selected": variant_key == selected_key,
+                "final_mae": quality.get("final_mae") if isinstance(quality, dict) else None,
+                "final_rmse": quality.get("final_rmse") if isinstance(quality, dict) else None,
+                "train_rows": display_metrics.get("train_rows"),
+                "valid_rows": display_metrics.get("valid_rows"),
+                "max_abs_error": display_metrics.get("max_abs_error"),
+                "p90_abs_error": display_metrics.get("p90_abs_error"),
+                "direction_accuracy": display_metrics.get("direction_accuracy"),
+                "best_iteration_avg": display_metrics.get("best_iteration_avg"),
+                "best_iteration_max": display_metrics.get("best_iteration_max"),
+                "best_iteration_min": display_metrics.get("best_iteration_min"),
+            }
+        )
+    if rows:
+        return rows
+    display_metrics = summarize_variant_display_metrics(metadata.get("metrics"))
+    return [
+        {
+            "variant_key": selected_key,
+            "model_backend": metadata.get("selected_model_backend"),
+            "model_backend_label": metadata.get("selected_model_backend_label") or metadata.get("selected_model_backend"),
+            "is_selected": True,
+            "final_mae": display_metrics.get("final_mae"),
+            "final_rmse": display_metrics.get("final_rmse"),
+            "train_rows": display_metrics.get("train_rows"),
+            "valid_rows": display_metrics.get("valid_rows"),
+            "max_abs_error": display_metrics.get("max_abs_error"),
+            "p90_abs_error": display_metrics.get("p90_abs_error"),
+            "direction_accuracy": display_metrics.get("direction_accuracy"),
+            "best_iteration_avg": display_metrics.get("best_iteration_avg"),
+            "best_iteration_max": display_metrics.get("best_iteration_max"),
+            "best_iteration_min": display_metrics.get("best_iteration_min"),
+        }
+    ]
+
+
 def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
     current_dir, previous_dir, history_dir = ensure_model_dirs(model_root)
     current_metadata = read_model_metadata(current_dir)
@@ -2913,6 +3084,8 @@ def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
         if metadata is None:
             continue
         quality_metrics = summarize_model_quality_metrics(metadata.get("metrics"))
+        segment_config = metadata.get("segment_config") or metadata.get("segments") or []
+        high_price_weighting = metadata.get("high_price_weighting") if isinstance(metadata.get("high_price_weighting"), dict) else {}
         rows.append(
             {
                 "version_key": run_dir.name,
@@ -2920,14 +3093,30 @@ def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
                 "created_at": metadata.get("created_at"),
                 "train_start_date": metadata.get("train_start_date"),
                 "train_end_date": metadata.get("train_end_date"),
+                "training_mode": metadata.get("training_mode"),
+                "training_window_days": metadata.get("training_window_days"),
+                "valid_days": metadata.get("valid_days"),
+                "num_boost_round": metadata.get("num_boost_round"),
                 "sample_rows": metadata.get("sample_rows"),
                 "is_default": metadata.get("run_id") == current_run_id,
                 "is_previous": metadata.get("run_id") == previous_run_id,
                 "is_pinned_default": run_dir.name == pinned_version_key,
+                "model_type": metadata.get("model_type") or metadata.get("prediction_method"),
+                "selected_model_key": metadata.get("selected_model_key"),
+                "selected_model_backend": metadata.get("selected_model_backend"),
+                "selected_model_backend_label": metadata.get("selected_model_backend_label") or metadata.get("selected_model_backend"),
+                "algorithm_variants": version_algorithm_variants(metadata),
+                "segment_mode": metadata.get("segment_mode") or ("custom" if metadata.get("segment_config") else "default"),
+                "segment_count": len(segment_config) if isinstance(segment_config, list) else None,
+                "high_price_weight_enabled": high_price_weighting.get("enabled"),
+                "high_price_quantile": high_price_weighting.get("quantile"),
+                "high_price_weight_multiplier": high_price_weighting.get("multiplier"),
+                "high_price_threshold": high_price_weighting.get("threshold"),
                 "baseline_mae": quality_metrics.get("baseline_mae"),
                 "baseline_rmse": quality_metrics.get("baseline_rmse"),
                 "final_mae": quality_metrics.get("final_mae"),
                 "final_rmse": quality_metrics.get("final_rmse"),
+                **version_rolling_metrics(metadata),
                 "path": str(run_dir),
             }
         )

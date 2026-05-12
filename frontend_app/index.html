@@ -111,8 +111,8 @@
             <div class="train-card-accent">AUTO</div>
             <div class="section-header">
               <div>
-                <div class="section-title">自动训练窗口寻优</div>
-                <div class="hint-text">先按候选窗口粗搜，再围绕最优窗口局部细搜；寻优完成后自动训练并启用最优模型。</div>
+                <div class="section-title">自动训练使用天数寻优</div>
+                <div class="hint-text">先测试不同“训练使用天数”，再围绕最优天数局部细搜；寻优完成后自动训练并启用最优模型。</div>
               </div>
             </div>
 
@@ -126,7 +126,7 @@
                 <input type="number" id="window-optimization-valid-days" min="1" max="90" value="14" />
               </label>
               <label class="field">
-                <span>寻优 XGBoost 轮数</span>
+                <span>每个模型最大训练轮数</span>
                 <input type="number" id="window-optimization-num-boost-round" min="50" max="3000" step="50" value="400" />
               </label>
               <label class="field">
@@ -224,7 +224,7 @@
             <div class="section-header compact">
               <div>
                 <div class="section-title">手动训练模型</div>
-                <div class="hint-text">只按当前手动训练参数重训模型，不执行训练窗口寻优。</div>
+                <div class="hint-text">只按当前手动训练参数重训模型，不执行训练使用天数寻优。</div>
               </div>
             </div>
 
@@ -237,7 +237,7 @@
                 </select>
               </label>
               <label class="field">
-                <span>训练窗口天数</span>
+                <span>训练使用天数</span>
                 <input type="number" id="training-window-days" min="7" max="730" value="60" />
               </label>
               <label class="field">
@@ -264,7 +264,7 @@
                 <input type="number" id="valid-days" min="1" max="90" value="14" />
               </label>
               <label class="field">
-                <span>手动 XGBoost 轮数</span>
+                <span>每个模型最大训练轮数</span>
                 <input type="number" id="num-boost-round" min="50" max="3000" step="50" value="400" />
               </label>
             </div>
@@ -336,25 +336,27 @@
 
           <div class="subsection-title">最近 14/30 天滚动回测</div>
           <div class="table-shell table-frame table-frame-sm">
-            <table class="data-table" id="rolling-backtest-table">
-              <thead>
-                <tr>
-                  <th>窗口</th>
-                  <th>模型 MAE</th>
-                  <th>模型 RMSE</th>
-                  <th>多条件相似法 MAE</th>
-                  <th>较多条件提升</th>
-                  <th>仅火电空间相似法 MAE</th>
-                  <th>较火电空间提升</th>
-                  <th>方向准确率</th>
-                  <th>高价尖峰 MAE</th>
-                  <th>晚高峰 MAE</th>
-                  <th>最大误差</th>
-                  <th>样本数</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
+            <div class="table-scroll">
+              <table class="data-table" id="rolling-backtest-table">
+                <thead>
+                  <tr>
+                    <th>窗口</th>
+                    <th>模型 MAE</th>
+                    <th>模型 RMSE</th>
+                    <th>多条件相似法 MAE</th>
+                    <th>较多条件提升</th>
+                    <th>仅火电空间相似法 MAE</th>
+                    <th>较火电空间提升</th>
+                    <th>方向准确率</th>
+                    <th>高价尖峰 MAE</th>
+                    <th>晚高峰 MAE</th>
+                    <th>最大误差</th>
+                    <th>样本数</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
           </div>
 
           <div class="subsection-title">模型直观诊断</div>
@@ -531,10 +533,14 @@
               <span>排序方式</span>
               <select id="version-sort">
                 <option value="created_at_desc">训练时间（新到旧）</option>
+                <option value="rolling_30_mae_asc">30天滚动 MAE（小到大）</option>
+                <option value="rolling_14_mae_asc">14天滚动 MAE（小到大）</option>
+                <option value="rolling_30_high_price_mae_asc">高价尖峰 MAE（小到大）</option>
+                <option value="rolling_30_evening_peak_mae_asc">晚高峰 MAE（小到大）</option>
                 <option value="final_rmse_asc">模型 RMSE（小到大）</option>
                 <option value="final_mae_asc">模型 MAE（小到大）</option>
-                <option value="baseline_rmse_asc">相似法参考 RMSE（小到大）</option>
-                <option value="baseline_mae_asc">相似法参考 MAE（小到大）</option>
+                <option value="rolling_30_multi_similarity_mae_asc">30天多条件相似法 MAE（小到大）</option>
+                <option value="rolling_30_thermal_space_similarity_mae_asc">30天仅火电空间相似法 MAE（小到大）</option>
               </select>
             </label>
             <div class="actions-row compact-actions">
@@ -552,12 +558,32 @@
                     <th><input type="checkbox" id="select-all-versions" /></th>
                     <th>版本号</th>
                     <th class="version-sort-head" data-version-sort="created_at_desc">创建时间</th>
+                    <th>算法</th>
+                    <th>训练使用天数</th>
+                    <th>最大轮数</th>
+                    <th>最佳轮数</th>
                     <th>训练范围</th>
+                    <th>分段</th>
+                    <th>高价加权</th>
                     <th>样本数</th>
-                    <th class="version-sort-head" data-version-sort="baseline_mae_asc">相似法参考 MAE</th>
-                    <th class="version-sort-head" data-version-sort="baseline_rmse_asc">相似法参考 RMSE</th>
                     <th class="version-sort-head" data-version-sort="final_mae_asc">模型 MAE</th>
                     <th class="version-sort-head" data-version-sort="final_rmse_asc">模型 RMSE</th>
+                    <th class="version-sort-head" data-version-sort="rolling_14_mae_asc">14天模型 MAE</th>
+                    <th>14天模型 RMSE</th>
+                    <th>14天多条件 MAE</th>
+                    <th>14天火电空间 MAE</th>
+                    <th class="version-sort-head" data-version-sort="rolling_30_mae_asc">30天模型 MAE</th>
+                    <th>30天模型 RMSE</th>
+                    <th class="version-sort-head" data-version-sort="rolling_30_multi_similarity_mae_asc">30天多条件 MAE</th>
+                    <th class="version-sort-head" data-version-sort="rolling_30_thermal_space_similarity_mae_asc">30天火电空间 MAE</th>
+                    <th>较多条件提升</th>
+                    <th>较火电空间提升</th>
+                    <th class="version-sort-head" data-version-sort="rolling_30_high_price_mae_asc">高价尖峰 MAE</th>
+                    <th>尖峰多条件 MAE</th>
+                    <th>尖峰火电空间 MAE</th>
+                    <th class="version-sort-head" data-version-sort="rolling_30_evening_peak_mae_asc">晚高峰 MAE</th>
+                    <th>方向准确率</th>
+                    <th>最大误差</th>
                     <th>状态</th>
                   </tr>
                 </thead>

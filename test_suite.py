@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
+import time
 import traceback
 from datetime import date, datetime
 from pathlib import Path
@@ -468,14 +470,46 @@ def test_frontend_prediction_ui() -> None:
     record("预测图表切换包含动画过渡", "prediction-chart-grid" in app_css and "transition:" in app_css, "", "frontend")
     segmented_active = re.search(r"\.segmented-option\.active\s*\{[^}]+\}", app_css)
     record("布局选中态避免白色字体", bool(segmented_active and "color: #ffffff" not in segmented_active.group(0)), "", "frontend")
-    record("最近天图表包含预测/基线/残差", all(text in app_js for text in ["最近 N 天预测价格", "最近 N 天相似基线", "最近 N 天模型残差修正"]), "", "frontend")
-    record("同类型日图表包含预测/基线/残差", all(text in app_js for text in ["同类型日预测价格", "同类型日相似基线", "同类型日模型残差修正"]), "", "frontend")
+    record("最近天图表包含预测/基线/残差", all(text in app_js for text in ["模型预测价格", "多条件相似参考", "最近 N 天模型与相似法差值"]), "", "frontend")
+    record("同类型日图表包含预测/基线/残差", all(text in app_js for text in ["模型预测价格", "多条件相似参考", "同类型日模型与相似法差值"]), "", "frontend")
     record("明细表包含双策略分解列", all(text in app_js for text in ["recent_n_days_similar_price", "recent_n_days_residual_pred", "recent_n_days_predicted_price", "recent_same_type_days_similar_price", "recent_same_type_days_residual_pred", "recent_same_type_days_predicted_price"]), "", "frontend")
 
 
-# ========== 8. 边界条件与异常处理 ==========
+# ========== 9. 清理流程测试 ==========
+def test_cleanup_units() -> None:
+    print("\n--- 9. 清理流程测试 ---")
+    import api_server
+
+    root = BASE_DIR / ".test_tmp" / f"cleanup_skip_{time.time_ns()}"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "locked.txt").write_text("locked", encoding="utf-8")
+    original_rmtree = api_server.shutil.rmtree
+
+    def raise_permission_error(target: Path, *args: Any, **kwargs: Any) -> None:
+        raise PermissionError(5, "拒绝访问", str(target))
+
+    try:
+        api_server.shutil.rmtree = raise_permission_error
+        removed: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        try:
+            api_server.remove_cleanup_target(root, "临时缓存", removed, skipped)
+            record(
+                "remove_cleanup_target 权限拒绝时跳过",
+                not removed and len(skipped) == 1 and skipped[0]["path"] == str(root.resolve()),
+                f"removed={removed}, skipped={skipped}",
+                "cleanup",
+            )
+        except Exception as exc:
+            record("remove_cleanup_target 权限拒绝时跳过", False, repr(exc), "cleanup")
+    finally:
+        api_server.shutil.rmtree = original_rmtree
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ========== 10. 边界条件与异常处理 ==========
 def test_edge_cases() -> None:
-    print("\n--- 8. 边界条件与异常处理 ---")
+    print("\n--- 10. 边界条件与异常处理 ---")
     from dayahead_core import (
         list_excel_files,
         filter_date_range,
@@ -526,6 +560,7 @@ def main() -> None:
     test_core_functions()
     test_prediction_pipeline_units()
     test_frontend_prediction_ui()
+    test_cleanup_units()
     test_edge_cases()
 
     # 输出总结

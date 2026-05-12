@@ -104,7 +104,7 @@ const helpContentUrl = "/assets/help-content.json";
 let helpContentMap = {
   寻优最大历史天数: {
     title: "寻优最大历史天数",
-    body: "自动寻找训练窗口时，最多向历史数据回看多少天。范围越大，能测试的训练窗口越多，但计算时间也会变长。",
+    body: "自动寻找最合适训练使用天数时，最多向历史数据回看多少天。范围越大，能测试的候选天数越多，但计算时间也会变长。",
     tips: ["数据变化快时可适当缩短", "数据规律稳定时可适当放大", "不确定时保持默认值即可"],
   },
   寻优验证集天数: {
@@ -112,15 +112,15 @@ let helpContentMap = {
     body: "自动寻优时预留最近多少天作为验证集，用来判断不同窗口参数的效果。",
     tips: ["天数太少容易偶然", "天数太多会减少训练样本", "常用 7~30 天"],
   },
-  "寻优 XGBoost 轮数": {
-    title: "寻优 XGBoost 轮数",
-    body: "模型在寻优阶段迭代学习的轮数。轮数越大，模型学习更充分，但耗时更久，也可能过拟合。",
+  "每个模型最大训练轮数": {
+    title: "每个模型最大训练轮数",
+    body: "自动寻优或手动训练时，每个时段、每种算法最多训练多少轮。XGBoost、LightGBM、CatBoost 都会使用这个上限；如果验证误差长期不再变好，会提前停止。",
     tips: ["数据量较小时不用过大", "训练慢时先降低轮数", "默认值偏稳妥"],
   },
   局部细搜半径: {
     title: "局部细搜半径",
-    body: "粗略找到较优训练窗口后，在最优点附近再细查多少天。半径越大，细搜越充分但耗时越长。",
-    tips: ["设为 0 表示不做细搜", "窗口效果波动大时可适当增加", "常用 7~30 天"],
+    body: "粗略找到较优训练使用天数后，在最优点附近再细查多少天。半径越大，细搜越充分但耗时越长。",
+    tips: ["设为 0 表示不做细搜", "候选天数效果波动大时可适当增加", "常用 7~30 天"],
   },
   启用高价样本加权: {
     title: "启用高价样本加权",
@@ -167,10 +167,10 @@ let helpContentMap = {
     body: "选择手动训练使用最近 N 天滚动窗口，还是指定起止日期范围。",
     tips: ["滚动窗口更适合日常更新", "指定日期适合复盘某段历史"],
   },
-  训练窗口天数: {
-    title: "训练窗口天数",
-    body: "手动训练时使用最近多少天作为训练样本。",
-    tips: ["太短可能不稳定", "太长可能混入过旧规律", "常用 30~180 天"],
+  训练使用天数: {
+    title: "训练使用天数",
+    body: "这版模型训练时，往前取了多少天历史数据。比如 56 表示用最近 56 天数据训练；不是预测天数，也不是回测天数。",
+    tips: ["天数太短可能不稳定", "天数太长可能混入过旧规律", "常用 30~180 天"],
   },
   训练起始日期: {
     title: "训练起始日期",
@@ -197,9 +197,9 @@ let helpContentMap = {
     body: "手动训练时从训练数据末尾预留多少天做验证，用于评估模型效果。",
     tips: ["常用 7~30 天", "样本少时不要设置过大"],
   },
-  "手动 XGBoost 轮数": {
-    title: "手动 XGBoost 轮数",
-    body: "手动训练时模型迭代学习的轮数。轮数越多耗时越长。",
+  "手动每个模型最大训练轮数": {
+    title: "每个模型最大训练轮数",
+    body: "手动训练时，每个时段、每种算法最多训练多少轮。轮数越多上限越高、耗时可能越长，但模型会根据验证集表现提前停止。",
     tips: ["训练变慢可降低", "效果不稳定可配合验证集观察"],
   },
   参考天数: {
@@ -640,8 +640,8 @@ function renderTopStatus(statusData) {
   const activeJob = getFocusedJobState() || statusData.current_job;
   const windowState = statusData.window_optimization || {};
   const windowLabel = windowState.best_window_days
-    ? `最优训练窗口：最近 ${windowState.best_window_days} 天`
-    : "最优训练窗口：待寻优";
+    ? `最优训练使用天数：最近 ${windowState.best_window_days} 天`
+    : "最优训练使用天数：待寻优";
   const items = [
     `当前模型：${statusData.current_model?.run_id || "-"}`,
     `运行状态：${activeJob?.status || "系统待命"}`,
@@ -878,6 +878,21 @@ function formatPercentCell(value) {
   return formatted === "-" ? "-" : `${formatted}%`;
 }
 
+function formatBestIterationCell(variant) {
+  const averageValue = Number(variant.best_iteration_avg);
+  const maxValue = Number(variant.best_iteration_max);
+  if (!Number.isFinite(averageValue) && !Number.isFinite(maxValue)) return "-";
+  const averageText = Number.isFinite(averageValue) ? averageValue.toFixed(0) : "-";
+  const maxText = Number.isFinite(maxValue) ? maxValue.toFixed(0) : "-";
+  return `${averageText} / ${maxText}`;
+}
+
+function formatBooleanText(value, trueText = "是", falseText = "否") {
+  if (value === true) return trueText;
+  if (value === false) return falseText;
+  return "-";
+}
+
 function formatChartTooltipValue(value) {
   const rawValue = Array.isArray(value) ? value[value.length - 1] : value;
   const numericValue = Number(rawValue);
@@ -891,10 +906,14 @@ function sortVersionsForDisplay(versions) {
   const sortKey = currentVersionSort();
   const list = [...versions];
   const metricKeyMap = {
-    baseline_mae_asc: "baseline_mae",
-    baseline_rmse_asc: "baseline_rmse",
     final_mae_asc: "final_mae",
     final_rmse_asc: "final_rmse",
+    rolling_14_mae_asc: "rolling_14_mae",
+    rolling_30_mae_asc: "rolling_30_mae",
+    rolling_30_high_price_mae_asc: "rolling_30_high_price_mae",
+    rolling_30_evening_peak_mae_asc: "rolling_30_evening_peak_mae",
+    rolling_30_multi_similarity_mae_asc: "rolling_30_multi_similarity_mae",
+    rolling_30_thermal_space_similarity_mae_asc: "rolling_30_thermal_space_similarity_mae",
   };
 
   if (sortKey === "created_at_desc") {
@@ -924,6 +943,36 @@ function updateVersionSortHeaders() {
   });
 }
 
+function versionAlgorithmVariants(item) {
+  return Array.isArray(item.algorithm_variants) && item.algorithm_variants.length
+    ? item.algorithm_variants
+    : [
+        {
+          model_backend_label: item.selected_model_backend_label || item.selected_model_backend || "-",
+          final_mae: item.final_mae,
+          final_rmse: item.final_rmse,
+          max_abs_error: item.rolling_30_max_abs_error,
+          direction_accuracy: item.rolling_30_direction_accuracy,
+          best_iteration_avg: item.best_iteration_avg,
+          best_iteration_max: item.best_iteration_max,
+          best_iteration_min: item.best_iteration_min,
+          valid_rows: item.sample_rows,
+          is_selected: true,
+        },
+      ];
+}
+
+function renderVersionAlgorithmCell(variant) {
+  const selectedClass = variant.is_selected ? " selected" : "";
+  const selectedText = variant.is_selected ? `<span class="algorithm-selected-mark">\u5f53\u524d</span>` : "";
+  return `
+    <span class="algorithm-chip${selectedClass}">
+      <span class="algorithm-chip-name">${htmlEscape(variant.model_backend_label || variant.model_backend || variant.variant_key || "-")}</span>
+      ${selectedText}
+    </span>
+  `;
+}
+
 function renderVersions(versions) {
   const selectedKeys = new Set(selectedVersionKeys());
   const currentVersionKey = $("#version-select")?.value || "";
@@ -939,30 +988,54 @@ function renderVersions(versions) {
 
   const tbody = $("#versions-table tbody");
   if (!displayVersions.length) {
-    tbody.innerHTML = `<tr><td colspan="10">暂无历史模型版本</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="30">暂无历史模型版本</td></tr>`;
     syncSelectAllVersionsState();
     return;
   }
   tbody.innerHTML = displayVersions
-    .map((item) => {
+    .flatMap((item) => {
       const tags = [];
-      if (item.is_default) tags.push(`<span class="status-tag default">默认模型</span>`);
-      if (item.is_previous) tags.push(`<span class="status-tag previous">上一版</span>`);
+      if (item.is_default) tags.push(`<span class="status-tag default">\u9ed8\u8ba4\u6a21\u578b</span>`);
+      if (item.is_previous) tags.push(`<span class="status-tag previous">\u4e0a\u4e00\u7248</span>`);
       const checked = selectedKeys.has(String(item.version_key)) ? " checked" : "";
-      return `
-        <tr>
-          <td><input type="checkbox" class="version-check" value="${htmlEscape(item.version_key)}"${checked}></td>
-          <td>${htmlEscape(item.version_key)}</td>
-          <td>${htmlEscape(item.created_at || "-")}</td>
-          <td>${htmlEscape(item.train_start_date || "-")} ~ ${htmlEscape(item.train_end_date || "-")}</td>
-          <td>${htmlEscape(item.sample_rows ?? "-")}</td>
-          <td>${formatMetricCell(item.baseline_mae)}</td>
-          <td>${formatMetricCell(item.baseline_rmse)}</td>
-          <td>${formatMetricCell(item.final_mae)}</td>
-          <td>${formatMetricCell(item.final_rmse)}</td>
-          <td>${tags.join(" ") || "-"}</td>
-        </tr>
-      `;
+      return versionAlgorithmVariants(item).map((variant, index) => {
+        const isFirst = index === 0;
+        const rowClass = isFirst ? "version-main-row" : "version-variant-row";
+        return `
+          <tr class="${rowClass}">
+            <td>${isFirst ? `<input type="checkbox" class="version-check" value="${htmlEscape(item.version_key)}"${checked}>` : ""}</td>
+            <td>${isFirst ? htmlEscape(item.version_key) : ""}</td>
+            <td>${isFirst ? htmlEscape(item.created_at || "-") : ""}</td>
+            <td>${renderVersionAlgorithmCell(variant)}</td>
+            <td>${isFirst ? htmlEscape(item.training_window_days ?? "-") : ""}</td>
+            <td>${isFirst ? htmlEscape(item.num_boost_round ?? "-") : ""}</td>
+            <td>${formatBestIterationCell(variant)}</td>
+            <td>${isFirst ? `${htmlEscape(item.train_start_date || "-")} ~ ${htmlEscape(item.train_end_date || "-")}` : ""}</td>
+            <td>${isFirst ? `${htmlEscape(item.segment_mode || "-")} / ${htmlEscape(item.segment_count ?? "-")}\u6bb5` : ""}</td>
+            <td>${isFirst ? htmlEscape(formatBooleanText(item.high_price_weight_enabled, "\u5f00\u542f", "\u5173\u95ed")) : ""}</td>
+            <td>${htmlEscape(variant.train_rows ?? item.sample_rows ?? "-")} / ${htmlEscape(variant.valid_rows ?? "-")}</td>
+            <td>${formatMetricCell(variant.final_mae)}</td>
+            <td>${formatMetricCell(variant.final_rmse)}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_14_mae) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_14_rmse) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_14_multi_similarity_mae) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_14_thermal_space_similarity_mae) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_mae) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_rmse) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_multi_similarity_mae) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_thermal_space_similarity_mae) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_multi_similarity_improvement) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_thermal_space_similarity_improvement) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_high_price_mae) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_high_price_multi_similarity_mae) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_high_price_thermal_space_similarity_mae) : "-"}</td>
+            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_evening_peak_mae) : "-"}</td>
+            <td>${formatPercentCell(variant.direction_accuracy)}</td>
+            <td>${formatMetricCell(variant.max_abs_error)}</td>
+            <td>${isFirst ? (tags.join(" ") || "-") : ""}</td>
+          </tr>
+        `;
+      });
     })
     .join("");
   syncSelectAllVersionsState();
@@ -2097,18 +2170,18 @@ async function startTrain() {
 
 async function startWindowOptimization() {
   const btn = $("#optimize-window-btn");
-  const originalText = btn?.textContent || "自动寻优训练窗口";
+  const originalText = btn?.textContent || "自动寻优训练使用天数";
   try {
     setButtonLoading(btn, true, originalText);
     App.statusFocus = "optimize";
     App.pendingStatus = {
       job_type: "optimize",
       progress: 3,
-      status: "正在提交训练窗口自动寻优任务...",
-      logs: ["[本地] 正在提交训练窗口自动寻优任务..."],
+      status: "正在提交训练使用天数自动寻优任务...",
+      logs: ["[本地] 正在提交训练使用天数自动寻优任务..."],
       running: true,
     };
-    applyProgressCard("optimize", { progress: 3, label: "\u63d0\u4ea4\u4e2d", status: "\u6b63\u5728\u63d0\u4ea4\u8bad\u7ec3\u7a97\u53e3\u81ea\u52a8\u5bfb\u4f18\u4efb\u52a1...", type: "running" });
+    applyProgressCard("optimize", { progress: 3, label: "\u63d0\u4ea4\u4e2d", status: "正在提交训练使用天数自动寻优任务...", type: "running" });
     renderStatusPanel({ current_job: App.pendingStatus, recent_jobs: [] });
     const data = await request("/api/window-optimization/run", {
       method: "POST",
@@ -2127,14 +2200,14 @@ async function startWindowOptimization() {
         job_id: data.job.job_id,
         job_type: "optimize",
         progress: 5,
-        status: `训练窗口自动寻优已启动：${data.job.job_id}`,
-        logs: [`[本地] 训练窗口自动寻优已启动：${data.job.job_id}`],
+        status: `训练使用天数自动寻优已启动：${data.job.job_id}`,
+        logs: [`[本地] 训练使用天数自动寻优已启动：${data.job.job_id}`],
         running: true,
       };
       App.pendingStatus = null;
       syncStopButtons();
-      applyProgressCard("optimize", { progress: 5, label: "\u5bfb\u4f18\u4e2d", status: `\u8bad\u7ec3\u7a97\u53e3\u81ea\u52a8\u5bfb\u4f18\u5df2\u542f\u52a8\uff1a${data.job.job_id}`, type: "running" });
-      showToast("训练窗口自动寻优已启动");
+      applyProgressCard("optimize", { progress: 5, label: "\u5bfb\u4f18\u4e2d", status: `训练使用天数自动寻优已启动：${data.job.job_id}`, type: "running" });
+      showToast("训练使用天数自动寻优已启动");
     } else {
       App.pendingStatus = null;
       applyProgressCard("optimize", deriveJobState(App.jobStates.optimize, "optimize"));
@@ -2273,7 +2346,8 @@ async function cleanupOutputJunk() {
   setButtonLoading(btn, true);
   try {
     const data = await request("/api/cleanup/output", { method: "POST", body: JSON.stringify({}) });
-    const summary = `已清理 ${formatBytes(data.total_bytes)} / ${data.total_files || 0} 个文件，保留最新预测结果、模型和最新异常报告。`;
+    const skippedText = data.skipped_count ? `，${data.skipped_count} 项因权限或占用未删除` : "";
+    const summary = `已清理 ${formatBytes(data.total_bytes)} / ${data.total_files || 0} 个文件${skippedText}，保留最新预测结果、模型和最新异常报告。`;
     const target = $("#cleanup-output-summary");
     if (target) target.textContent = summary;
     showToast(summary);

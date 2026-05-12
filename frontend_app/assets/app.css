@@ -1338,6 +1338,98 @@ select {
   background: rgba(114, 46, 209, 0.08);
 }
 
+.version-algorithm-stack {
+  display: grid;
+  gap: 8px;
+  min-width: 330px;
+}
+
+.algorithm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 6px 9px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+  color: #526174;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.04);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.algorithm-chip.selected {
+  border-color: rgba(15, 107, 255, 0.26);
+  background: linear-gradient(180deg, rgba(240, 247, 255, 0.96), rgba(230, 241, 255, 0.92));
+  color: #0d4fb3;
+  box-shadow: 0 8px 18px rgba(15, 107, 255, 0.1);
+}
+
+.algorithm-chip-name {
+  color: #0d1528;
+  font-weight: 950;
+}
+
+.algorithm-chip-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.algorithm-selected-mark {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: #0f6bff;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.algorithm-chip-metric {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.08);
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.algorithm-chip.selected .algorithm-chip-metric {
+  background: rgba(15, 107, 255, 0.08);
+  color: #285ea8;
+}
+
+.algorithm-chip-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+#versions-table tr.version-variant-row td {
+  background: #fbfdff;
+}
+
+#versions-table tr.version-variant-row td:first-child,
+#versions-table tr.version-variant-row td:nth-child(2),
+#versions-table tr.version-variant-row td:nth-child(3) {
+  border-bottom-color: transparent;
+}
+
+#versions-table tr.version-main-row + tr.version-variant-row td {
+  border-top: 1px dashed rgba(15, 107, 255, 0.12);
+}
+
 .status-panel {
   position: fixed;
   right: 18px;
@@ -3956,6 +4048,33 @@ html {
   background: rgba(127, 29, 29, 0.2);
   color: #fecaca;
   box-shadow: 0 12px 26px rgba(0, 0, 0, 0.2);
+}
+
+:root.dark-enabled .algorithm-chip {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(30, 41, 59, 0.72);
+  color: #cbd5e1;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
+}
+
+:root.dark-enabled .algorithm-chip.selected {
+  border-color: rgba(56, 189, 248, 0.32);
+  background: rgba(15, 107, 255, 0.16);
+  color: #dbeafe;
+}
+
+:root.dark-enabled .algorithm-chip-name {
+  color: #f8fafc;
+}
+
+:root.dark-enabled .algorithm-chip-metric {
+  background: rgba(148, 163, 184, 0.1);
+  color: #94a3b8;
+}
+
+:root.dark-enabled .algorithm-chip.selected .algorithm-chip-metric {
+  background: rgba(56, 189, 248, 0.12);
+  color: #bfdbfe;
 }
 
 @media (max-width: 820px) {

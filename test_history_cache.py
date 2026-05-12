@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import unittest
 from pathlib import Path
@@ -157,6 +158,64 @@ class HistoryCacheTests(unittest.TestCase):
                 [{"name": "low", "start_time": "00:00", "end_time": "12:00"}, {"name": "high", "start_time": "12:00", "end_time": "24:00"}],
                 {"enabled": True, "quantile": 0.8, "multiplier": 2.0},
             )
+
+    def test_model_version_list_exposes_rolling_comparison_fields(self) -> None:
+        from dayahead_core import list_model_versions
+
+        root = Path(__file__).resolve().parent / ".test_tmp" / f"versions_{time.time_ns()}"
+        run_dir = root / "history" / "run_test"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        metadata = {
+            "run_id": "run_test",
+            "created_at": "2026-05-05T12:00:00",
+            "train_start_date": "2026-02-01",
+            "train_end_date": "2026-04-16",
+            "training_window_days": 56,
+            "valid_days": 14,
+            "num_boost_round": 400,
+            "selected_model_backend_label": "CatBoost",
+            "segment_mode": "custom",
+            "segment_config": [
+                {"name": "low", "start_time": "00:00", "end_time": "12:00"},
+                {"name": "high", "start_time": "12:00", "end_time": "24:00"},
+            ],
+            "high_price_weighting": {"enabled": True, "quantile": 0.8, "multiplier": 2.0, "threshold": 380.0},
+            "metrics": {
+                "low": {"train_rows": 100, "valid_rows": 10, "best_iteration": 12, "final_mae": 20.0, "final_rmse": 30.0},
+                "high": {"train_rows": 100, "valid_rows": 10, "best_iteration": 34, "final_mae": 40.0, "final_rmse": 50.0},
+            },
+            "rolling_backtest_metrics": {
+                "30": {
+                    "overall": {"mae": 53.4, "rmse": 104.3, "direction_accuracy": 63.7, "max_abs_error": 1000.0},
+                    "baseline": {"mae": 65.2, "rmse": 115.0},
+                    "net_load_only_baseline": {"mae": 82.2, "rmse": 130.0},
+                    "model_vs_similarity": {"mae_improvement": 11.8, "mae_improvement_pct": 18.1},
+                    "model_vs_net_load_only_similarity": {"mae_improvement": 28.8, "mae_improvement_pct": 35.0},
+                    "spike_errors": {
+                        "high": {"mae": 180.0, "rmse": 270.0},
+                        "high_baseline": {"mae": 175.0},
+                        "high_net_load_only_baseline": {"mae": 183.0},
+                    },
+                    "segments": {"evening_peak": {"mae": 66.0, "rmse": 104.0}},
+                }
+            },
+        }
+        (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+
+        versions = list_model_versions(root)
+
+        self.assertEqual(len(versions), 1)
+        row = versions.iloc[0].to_dict()
+        self.assertEqual(row["selected_model_backend_label"], "CatBoost")
+        self.assertEqual(row["segment_count"], 2)
+        self.assertTrue(row["high_price_weight_enabled"])
+        self.assertEqual(row["rolling_30_mae"], 53.4)
+        self.assertEqual(row["rolling_30_multi_similarity_mae"], 65.2)
+        self.assertEqual(row["rolling_30_thermal_space_similarity_mae"], 82.2)
+        self.assertEqual(row["rolling_30_high_price_mae"], 180.0)
+        self.assertEqual(row["rolling_30_evening_peak_mae"], 66.0)
+        self.assertEqual(row["algorithm_variants"][0]["best_iteration_avg"], 23.0)
+        self.assertEqual(row["algorithm_variants"][0]["best_iteration_max"], 34)
 
     def test_prediction_variant_prefers_no_lag_and_skips_legacy_lag(self) -> None:
         from dayahead_core import select_prediction_model_variant
@@ -506,13 +565,13 @@ class HistoryCacheTests(unittest.TestCase):
         root.mkdir(exist_ok=True)
         marker = time.time_ns()
         selected_names = [
-            f"{marker}_2025年12月.xlsx",
-            f"{marker}_2026年1月.xlsx",
-            f"{marker}_2026年4月.xlsx",
+            f"{marker}_2025-12.xlsx",
+            f"{marker}_2026-01.xlsx",
+            f"{marker}_2026-04.xlsx",
         ]
         excluded_names = [
-            f"{marker}_2025年11月.xlsx",
-            f"{marker}_2026年5月.xlsx",
+            f"{marker}_2025-11.xlsx",
+            f"{marker}_2026-05.xlsx",
         ]
         for name in [*selected_names, *excluded_names]:
             (root / name).write_bytes(b"x")

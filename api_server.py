@@ -4,7 +4,9 @@ import argparse
 import json
 import math
 import mimetypes
+import os
 import shutil
+import stat
 import threading
 import traceback
 import urllib.parse
@@ -688,16 +690,41 @@ def safe_cleanup_target(path: Path) -> Path:
     return target
 
 
-def remove_cleanup_target(path: Path, label: str, removed: list[dict[str, Any]]) -> None:
+def retry_writable_remove(function: Callable[[str], None], path: str, _exc_info: object) -> None:
+    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    function(path)
+
+
+def remove_cleanup_target(
+    path: Path,
+    label: str,
+    removed: list[dict[str, Any]],
+    skipped: list[dict[str, Any]] | None = None,
+) -> None:
     target = safe_cleanup_target(path)
     if not target.exists() and not target.is_symlink():
         return
     size = path_size(target)
     files = count_path_files(target)
-    if target.is_dir() and not target.is_symlink():
-        shutil.rmtree(target)
-    else:
-        target.unlink(missing_ok=True)
+    try:
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target, onerror=retry_writable_remove)
+        else:
+            target.chmod(stat.S_IWRITE | stat.S_IREAD)
+            target.unlink(missing_ok=True)
+    except (OSError, shutil.Error) as exc:
+        if skipped is None:
+            raise
+        skipped.append(
+            {
+                "label": label,
+                "path": str(target),
+                "bytes": size,
+                "files": files,
+                "error": str(exc),
+            }
+        )
+        return
     removed.append(
         {
             "label": label,
@@ -708,20 +735,36 @@ def remove_cleanup_target(path: Path, label: str, removed: list[dict[str, Any]])
     )
 
 
-def prune_quality_reports(report_dir: Path, keep_latest: int, removed: list[dict[str, Any]]) -> None:
+def prune_quality_reports(
+    report_dir: Path,
+    keep_latest: int,
+    removed: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+) -> None:
     if not report_dir.exists():
         return
     reports = sorted(report_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
     keep = {item.resolve() for item in reports[:keep_latest]}
     for report in reports[keep_latest:]:
-        remove_cleanup_target(report, "旧数据异常报告", removed)
+        remove_cleanup_target(report, "旧数据异常报告", removed, skipped)
     for extra in report_dir.iterdir():
         if extra.resolve() in keep:
             continue
         if extra.suffix.lower() != ".json":
-            remove_cleanup_target(extra, "数据异常报告目录杂项", removed)
+            remove_cleanup_target(extra, "数据异常报告目录杂项", removed, skipped)
     if report_dir.exists() and not any(report_dir.iterdir()):
-        report_dir.rmdir()
+        try:
+            report_dir.rmdir()
+        except OSError as exc:
+            skipped.append(
+                {
+                    "label": "空数据异常报告目录",
+                    "path": str(report_dir.resolve()),
+                    "bytes": 0,
+                    "files": 0,
+                    "error": str(exc),
+                }
+            )
 
 
 def cleanup_output_junk() -> dict[str, Any]:
@@ -730,6 +773,7 @@ def cleanup_output_junk() -> dict[str, Any]:
         raise RuntimeError("当前有训练、寻优或预测任务正在运行，请任务结束后再清理")
 
     removed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     keep_quality_reports = 10
     output_file = OUTPUT_FILE.resolve()
     quality_report_dir = (OUTPUT_ROOT / "data_quality_reports").resolve()
@@ -740,19 +784,19 @@ def cleanup_output_junk() -> dict[str, Any]:
             if resolved == output_file:
                 continue
             if resolved == quality_report_dir:
-                prune_quality_reports(item, keep_quality_reports, removed)
+                prune_quality_reports(item, keep_quality_reports, removed, skipped)
                 continue
             if item.name == "window_optimization":
-                remove_cleanup_target(item, "自动寻优中间结果", removed)
+                remove_cleanup_target(item, "自动寻优中间结果", removed, skipped)
                 continue
-            remove_cleanup_target(item, "output 目录杂项", removed)
+            remove_cleanup_target(item, "output 目录杂项", removed, skipped)
 
     for folder_name in [".test_tmp", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__"]:
-        remove_cleanup_target(BASE_DIR / folder_name, folder_name, removed)
+        remove_cleanup_target(BASE_DIR / folder_name, folder_name, removed, skipped)
 
     for log_path in [BASE_DIR / "api_server.stdout.log", BASE_DIR / "api_server.stderr.log"]:
         if log_path.exists() and log_path.stat().st_size == 0:
-            remove_cleanup_target(log_path, "空日志文件", removed)
+            remove_cleanup_target(log_path, "空日志文件", removed, skipped)
 
     total_bytes = sum(item["bytes"] for item in removed)
     total_files = sum(item["files"] for item in removed)
@@ -760,6 +804,8 @@ def cleanup_output_junk() -> dict[str, Any]:
         "message": "清理完成",
         "removed": removed,
         "removed_count": len(removed),
+        "skipped": skipped,
+        "skipped_count": len(skipped),
         "total_files": total_files,
         "total_bytes": total_bytes,
         "kept": [
@@ -941,14 +987,14 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
                 "high_price_weighting": high_price_weighting,
             },
         )
-        STATE.append_log(job_id, "开始自动训练窗口寻优", 1)
+        STATE.append_log(job_id, "开始自动训练使用天数寻优", 1)
         STATE.raise_if_cancelled(job_id)
 
         history_signature = current_history_signature()
         history_df, _, _, _, _ = load_cached_history_collection(HISTORY_DIR, None, True, MODEL_ROOT, leading_days=0)
         unique_dates = sorted(pd.to_datetime(history_df["date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique().tolist())
         if len(unique_dates) <= valid_days + 1:
-            raise ValueError("历史数据天数不足，无法执行训练窗口寻优。")
+            raise ValueError("历史数据天数不足，无法执行训练使用天数寻优。")
         available_train_days = len(unique_dates) - valid_days
         max_train_days = min(available_train_days, max_history_days)
         requested_candidates = payload.get("candidate_windows")
@@ -992,7 +1038,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
         coarse_summaries = [run_window(window, "coarse", idx, total_estimated) for idx, window in enumerate(candidate_windows, start=1)]
         finite_coarse = [item for item in coarse_summaries if item.get("score") is not None]
         if not finite_coarse:
-            raise ValueError("所有候选训练窗口均未得到有效指标。")
+            raise ValueError("所有候选训练使用天数均未得到有效指标。")
         best_coarse = min(finite_coarse, key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))))
         best_coarse_window = int(best_coarse["window_days"])
         fine_start = max(1 if max_train_days < 30 else 30, best_coarse_window - fine_radius)
@@ -1004,7 +1050,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
 
         finite_results = [item for item in results if item.get("score") is not None]
         if not finite_results:
-            raise ValueError("所有候选训练窗口均未得到有效指标。")
+            raise ValueError("所有候选训练使用天数均未得到有效指标。")
         static_top = sorted(
             finite_results,
             key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))),
@@ -1025,7 +1071,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
         best_pool = [item for item in rerank_results if item.get("score") is not None] or finite_results
         best = min(best_pool, key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))))
         best_window_days = int(best["window_days"])
-        STATE.append_log(job_id, f"最优训练窗口为最近 {best_window_days} 天，正在训练正式模型", 86)
+        STATE.append_log(job_id, f"最优训练使用天数为最近 {best_window_days} 天，正在训练正式模型", 86)
         previous_metadata = load_current_metadata(MODEL_ROOT) or {}
         previous_run_id = previous_metadata.get("run_id")
         final_result = train_and_register(
@@ -1084,7 +1130,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
             "final_model": final_summary,
         }
         save_window_optimization_state(state)
-        STATE.append_log(job_id, f"窗口寻优完成，已启用最近 {best_window_days} 天模型", 100)
+        STATE.append_log(job_id, f"训练使用天数寻优完成，已启用最近 {best_window_days} 天模型", 100)
         return {"window_optimization": state, "train_result": final_summary}
 
     return worker
