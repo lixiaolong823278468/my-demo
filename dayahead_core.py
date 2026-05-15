@@ -26,6 +26,14 @@ from data_quality import (
     validate_forecast_template,
     validate_history_sheet,
 )
+from price_interval import (
+    DEFAULT_PRICE_INTERVALS,
+    append_interval_prediction_columns,
+    load_interval_model_bundle,
+    normalize_price_intervals,
+    predict_interval_probabilities,
+    train_interval_models,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,7 +50,6 @@ SIMILAR_PRICE_COLUMN = "similar_price"
 SIMILAR_GAP_COLUMN = "similar_gap"
 NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN = "net_load_only_similar_price"
 NET_LOAD_ONLY_SIMILAR_GAP_COLUMN = "net_load_only_similar_gap"
-RESIDUAL_TARGET_COLUMN = "residual_target"
 TOTAL_LOAD_COLUMN = "total_load"
 RENEWABLE_POWER_COLUMN = "renewable_power"
 DAY_TYPE_COLUMN = "day_type"
@@ -146,6 +153,7 @@ class TrainConfig:
     high_price_weight_enabled: bool = False
     high_price_quantile: float = 0.8
     high_price_weight_multiplier: float = 2.0
+    price_intervals: list[dict[str, object]] | None = None
 
 
 @dataclass
@@ -298,7 +306,7 @@ def direct_model_variants() -> OrderedDict[str, list[str]]:
 
 
 def metadata_has_direct_variants(metadata: dict) -> bool:
-    return isinstance(metadata.get("model_variants"), dict)
+    return isinstance(metadata.get("model_variants"), dict) and bool(metadata.get("model_variants"))
 
 
 def select_prediction_model_variant(metadata: dict, forecast_df: pd.DataFrame) -> str:
@@ -315,7 +323,17 @@ def select_prediction_model_variant(metadata: dict, forecast_df: pd.DataFrame) -
         feature_columns = value.get("feature_columns") or []
         if set(feature_columns).issubset(allowed_features):
             return key
-    return "legacy"
+    raise ValueError("当前模型不是多模型直接预测价格版本，请重新训练模型")
+
+
+def select_segment_prediction_model_variant(metadata: dict, segment_name: str, forecast_df: pd.DataFrame) -> str:
+    segment_models = metadata.get("selected_segment_price_models")
+    variants = metadata.get("model_variants") or {}
+    if isinstance(segment_models, dict):
+        segment_key = str(segment_models.get(segment_name) or "").strip()
+        if segment_key in variants:
+            return segment_key
+    return select_prediction_model_variant(metadata, forecast_df)
 
 
 def normalize_similarity_weights(
@@ -374,6 +392,9 @@ def excel_file_month(file_path: str | Path) -> pd.Timestamp | None:
     path = Path(file_path)
     candidates = [path.stem, path.name, *[part for part in path.parts[-3:]]]
     for text in candidates:
+        standard_match = re.search(r"(20\d{2})[-_/\.](1[0-2]|0?[1-9])", str(text))
+        if standard_match:
+            return pd.Timestamp(year=int(standard_match.group(1)), month=int(standard_match.group(2)), day=1)
         match = re.search(r"(20\d{2})\s*年?\D{0,8}(1[0-2]|0?[1-9])\s*月?", str(text))
         if match:
             return pd.Timestamp(year=int(match.group(1)), month=int(match.group(2)), day=1)
@@ -1059,7 +1080,6 @@ def attach_similarity_features(
         result.loc[current_mask, SIMILAR_GAP_COLUMN] = multi_gap
         result.loc[current_mask, NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN] = similar_price
         result.loc[current_mask, NET_LOAD_ONLY_SIMILAR_GAP_COLUMN] = similar_gap
-    result[RESIDUAL_TARGET_COLUMN] = result[TARGET_COLUMN] - result[SIMILAR_PRICE_COLUMN]
     return result
 
 
@@ -1358,6 +1378,9 @@ def train_segment_models(
     high_price_weight_enabled: bool = False,
     high_price_threshold: float | None = None,
     high_price_weight_multiplier: float = 2.0,
+    validation_records: list[dict] | None = None,
+    model_key: str | None = None,
+    model_backend_label: str | None = None,
 ) -> tuple[dict[str, dict[str, float | int | None]], list[str], list[str]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     segment_definitions = segment_definitions or normalize_segment_config()
@@ -1401,6 +1424,21 @@ def train_segment_models(
         if not valid_df.empty and final_pred is not None:
             actual = valid_df[TARGET_COLUMN].to_numpy(dtype=float)
             computed_metrics = calculate_metrics(actual, final_pred)
+            if validation_records is not None and model_key:
+                for row_index, predicted_value in enumerate(final_pred):
+                    row = valid_df.iloc[row_index]
+                    validation_records.append(
+                        {
+                            "model_key": model_key,
+                            "model_backend": model_backend,
+                            "model_backend_label": model_backend_label or model_backend,
+                            "segment": segment_name,
+                            "date": pd.Timestamp(row["date"]).strftime("%Y-%m-%d"),
+                            "period": int(row["period"]),
+                            "actual": float(row[TARGET_COLUMN]),
+                            "predicted": float(predicted_value),
+                        }
+                    )
             validation_error_summary = summarize_prediction_errors(
                 pd.DataFrame(
                     {
@@ -1485,6 +1523,141 @@ def summarize_prediction_errors(error_df: pd.DataFrame, predicted_column: str = 
         "direction_accuracy": direction_accuracy(clean_df, predicted_column),
         "over_rate": round(float(np.mean(errors > 0) * 100), 2),
         "under_rate": round(float(np.mean(errors < 0) * 100), 2),
+    }
+
+
+def filter_price_range(frame: pd.DataFrame, price_min: float | None = None, price_max: float | None = None) -> pd.DataFrame:
+    if frame.empty or "actual" not in frame.columns:
+        return frame.iloc[0:0].copy()
+    result = frame.copy()
+    actual = pd.to_numeric(result["actual"], errors="coerce")
+    mask = actual.notna()
+    if price_min is not None:
+        mask &= actual >= float(price_min)
+    if price_max is not None:
+        mask &= actual <= float(price_max)
+    return result.loc[mask].copy()
+
+
+def candidate_metric_value(summary: dict, metric: str) -> float | None:
+    if metric == "default_score":
+        mae = summary.get("mae")
+        rmse = summary.get("rmse")
+        if mae is None or rmse is None:
+            return None
+        return float(mae) + 0.2 * float(rmse)
+    value = summary.get(metric)
+    return None if value is None else float(value)
+
+
+def metric_sort_reverse(metric: str) -> bool:
+    return metric in {"direction_accuracy"}
+
+
+def segment_model_score(metrics: dict[str, float | int | None]) -> float | None:
+    mae = metrics.get("final_mae") if metrics.get("final_mae") is not None else metrics.get("mae")
+    rmse = metrics.get("final_rmse") if metrics.get("final_rmse") is not None else metrics.get("rmse")
+    if mae is None or rmse is None:
+        return None
+    return float(mae) + 0.2 * float(rmse)
+
+
+def select_best_segment_price_models(
+    variant_metrics: dict[str, dict[str, dict[str, float | int | None]]],
+    segment_names: list[str],
+    fallback_model_key: str,
+) -> dict[str, str]:
+    selected: dict[str, str] = {}
+    for segment_name in segment_names:
+        candidates: list[tuple[float, str]] = []
+        for model_key, metrics_by_segment in variant_metrics.items():
+            score = segment_model_score(metrics_by_segment.get(segment_name, {}))
+            if score is not None:
+                candidates.append((score, str(model_key)))
+        selected[segment_name] = min(candidates, key=lambda item: (item[0], item[1]))[1] if candidates else fallback_model_key
+    return selected
+
+
+def load_validation_prediction_records(model_dir: Path, metadata: dict) -> pd.DataFrame:
+    relative_path = metadata.get("validation_predictions_path") or "validation_predictions.jsonl"
+    path = model_dir / str(relative_path)
+    if not path.exists():
+        return pd.DataFrame()
+    rows = []
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return pd.DataFrame(rows)
+
+
+def rank_model_candidates(
+    model_root: Path = DEFAULT_MODEL_ROOT,
+    metric: str = "default_score",
+    price_min: float | None = None,
+    price_max: float | None = None,
+) -> dict:
+    active_dir = resolve_active_model_dir(model_root)
+    metadata = read_model_metadata(active_dir) or {}
+    records = load_validation_prediction_records(active_dir, metadata)
+    allowed_metrics = {"default_score", "mae", "rmse", "p90_abs_error", "max_abs_error", "direction_accuracy", "mae_range"}
+    metric_key = metric if metric in allowed_metrics else "default_score"
+    metric_for_summary = "mae" if metric_key == "mae_range" else metric_key
+    scoped_records = filter_price_range(records, price_min, price_max) if metric_key == "mae_range" else records
+    selected_segment_models = metadata.get("selected_segment_price_models") if isinstance(metadata.get("selected_segment_price_models"), dict) else {}
+    segments: list[dict] = []
+    if scoped_records.empty:
+        return {
+            "metric": metric_key,
+            "price_min": price_min,
+            "price_max": price_max,
+            "segments": [],
+            "selected_segment_price_models": selected_segment_models,
+            "available_metrics": sorted(allowed_metrics),
+            "message": "当前模型缺少候选模型验证明细，请重新训练模型",
+        }
+    for segment_name, segment_df in scoped_records.groupby("segment"):
+        rankings = []
+        for model_key, model_df in segment_df.groupby("model_key"):
+            summary = summarize_prediction_errors(model_df)
+            value = candidate_metric_value(summary, metric_for_summary)
+            rankings.append(
+                {
+                    "model_key": str(model_key),
+                    "model_backend": str(model_df["model_backend"].iloc[0]) if "model_backend" in model_df.columns else "",
+                    "model_backend_label": str(model_df["model_backend_label"].iloc[0]) if "model_backend_label" in model_df.columns else str(model_key),
+                    "metric_value": value,
+                    "rows": summary.get("rows"),
+                    "mae": summary.get("mae"),
+                    "rmse": summary.get("rmse"),
+                    "p90_abs_error": summary.get("p90_abs_error"),
+                    "max_abs_error": summary.get("max_abs_error"),
+                    "direction_accuracy": summary.get("direction_accuracy"),
+                }
+            )
+        reverse = metric_sort_reverse(metric_for_summary)
+        rankings.sort(key=lambda item: (item["metric_value"] is None, -(item["metric_value"] or 0) if reverse else (item["metric_value"] or float("inf")), item["model_key"]))
+        segments.append(
+            {
+                "segment": str(segment_name),
+                "current_model_key": selected_segment_models.get(str(segment_name)) or metadata.get("selected_model_key"),
+                "rankings": rankings,
+            }
+        )
+    segment_order = {str(item.get("name")): index for index, item in enumerate(metadata.get("segments") or [])}
+    segments.sort(key=lambda item: segment_order.get(item["segment"], 999))
+    return {
+        "metric": metric_key,
+        "price_min": price_min,
+        "price_max": price_max,
+        "segments": segments,
+        "selected_segment_price_models": selected_segment_models,
+        "available_metrics": sorted(allowed_metrics),
     }
 
 
@@ -1725,6 +1898,7 @@ def default_training_preferences() -> dict:
         "segment_mode": "default",
         "segment_config": DEFAULT_SEGMENT_CONFIG,
         "high_price_weighting": {"enabled": False, "quantile": 0.8, "multiplier": 2.0},
+        "price_intervals": normalize_price_intervals(DEFAULT_PRICE_INTERVALS),
     }
 
 
@@ -1749,6 +1923,8 @@ def load_training_preferences(model_root: str | Path = DEFAULT_MODEL_ROOT) -> di
             "quantile": min(0.99, max(0.5, float(high_config.get("quantile", 0.8)))),
             "multiplier": max(1.0, float(high_config.get("multiplier", 2.0))),
         }
+    if isinstance(data, dict) and isinstance(data.get("price_intervals"), list):
+        preferences["price_intervals"] = normalize_price_intervals(data["price_intervals"])
     return preferences
 
 
@@ -1767,6 +1943,8 @@ def save_training_preferences(model_root: str | Path, preferences: dict) -> dict
             "quantile": min(0.99, max(0.5, float(high_config.get("quantile", 0.8)))),
             "multiplier": max(1.0, float(high_config.get("multiplier", 2.0))),
         }
+    if isinstance(preferences.get("price_intervals"), list):
+        current["price_intervals"] = normalize_price_intervals(preferences["price_intervals"])
     path = training_preferences_path(model_root)
     write_json(path, current)
     return current
@@ -1862,6 +2040,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     model_variants: OrderedDict[str, dict[str, object]] = OrderedDict()
     similarity_weights = normalize_similarity_weights(config.similarity_weights)
     variant_metrics: dict[str, dict[str, dict[str, float | int | None]]] = {}
+    validation_records: list[dict] = []
     train_dates: list[str] = []
     valid_dates: list[str] = []
     total_variants = max(1, len(feature_variants) * len(model_backends))
@@ -1889,6 +2068,9 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
                 high_price_weight_enabled=config.high_price_weight_enabled,
                 high_price_threshold=high_price_threshold,
                 high_price_weight_multiplier=config.high_price_weight_multiplier,
+                validation_records=validation_records,
+                model_key=variant_key,
+                model_backend_label=backend_label,
             )
             model_variants[variant_key] = {
                 "feature_columns": feature_columns,
@@ -1913,8 +2095,28 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         return float(mae) + 0.2 * float(rmse), key
 
     selected_model_key = min(variant_quality_metrics.items(), key=variant_score)[0]
-    metrics_summary = variant_metrics[selected_model_key]
+    segment_names = [str(item.get("name")) for item in segment_config_metadata]
+    selected_segment_price_models = select_best_segment_price_models(variant_metrics, segment_names, selected_model_key)
+    metrics_summary = {
+        segment_name: variant_metrics.get(selected_segment_price_models.get(segment_name, selected_model_key), {}).get(
+            segment_name,
+            variant_metrics[selected_model_key].get(segment_name, {}),
+        )
+        for segment_name in segment_names
+    }
     selected_variant_meta = model_variants[selected_model_key]
+    price_intervals = normalize_price_intervals(config.price_intervals or load_training_preferences(config.model_root).get("price_intervals"))
+    emit_progress(progress_callback, "正在训练价格区间分类模型", 76)
+    price_interval_model = train_interval_models(
+        history_df,
+        target_column=TARGET_COLUMN,
+        feature_columns=list(selected_variant_meta["feature_columns"]),
+        segment_config=segment_config_metadata,
+        output_dir=staging_dir,
+        intervals=price_intervals,
+        valid_days=config.valid_days,
+        num_boost_round=config.num_boost_round,
+    )
     if config.enable_rolling_backtest:
         emit_progress(progress_callback, "正在执行最近 14/30 天滚动回测", 78)
         rolling_backtest_metrics = rolling_backtest_selected_model(
@@ -1941,10 +2143,12 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "feature_columns": selected_variant_meta["feature_columns"],
         "model_variants": dict(model_variants),
         "selected_model_key": selected_model_key,
+        "selected_segment_price_models": selected_segment_price_models,
         "selected_model_backend": selected_variant_meta["model_backend"],
         "selected_model_backend_label": selected_variant_meta["model_backend_label"],
         "model_backend_candidates": dict(model_backends),
         "variant_quality_metrics": variant_quality_metrics,
+        "price_interval_model": price_interval_model,
         "rolling_backtest_metrics": rolling_backtest_metrics,
         "segments": segment_config_metadata,
         "segment_config": segment_config_metadata,
@@ -1966,6 +2170,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "train_end_date": train_dates[-1] if train_dates else None,
         "train_dates": train_dates,
         "valid_dates": valid_dates,
+        "validation_predictions_path": "validation_predictions.jsonl",
         "sample_rows": int(len(history_df)),
         "skipped_sheets": skipped_sheets,
         "quality_report_path": str(quality_report_path),
@@ -1987,6 +2192,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
                 "multiplier": float(config.high_price_weight_multiplier),
                 "threshold": round(float(high_price_threshold), 4) if high_price_threshold is not None else None,
             },
+            "price_intervals": price_intervals,
         },
         "prediction_method": "direct_price_multi_model",
         "similarity_usage": "prediction_reference_only",
@@ -1997,6 +2203,9 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     }
     metadata_path = staging_dir / "metadata.json"
     emit_progress(progress_callback, "正在写入模型元数据", 82)
+    validation_path = staging_dir / "validation_predictions.jsonl"
+    for row in validation_records:
+        append_jsonl(validation_path, row)
     write_json(metadata_path, metadata)
     emit_progress(progress_callback, "正在注册当前模型版本", 90)
     current_dir, history_dir = finalize_model_version(config.model_root, staging_dir, run_id)
@@ -2020,7 +2229,9 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "metrics": metrics_summary,
         "variant_metrics": variant_metrics,
         "selected_model_key": selected_model_key,
+        "selected_segment_price_models": selected_segment_price_models,
         "selected_model_backend": selected_variant_meta["model_backend"],
+        "price_interval_model": price_interval_model,
         "variant_quality_metrics": variant_quality_metrics,
         "rolling_backtest_metrics": rolling_backtest_metrics,
         "segment_config": segment_config_metadata,
@@ -2110,11 +2321,11 @@ def load_models(model_root: str | Path) -> tuple[dict, dict[str, object], Path]:
                     model_path = variant_dir / f"{segment_name}.json"
                     backend = "xgboost"
                 models[variant_key][segment_name] = {"backend": backend, "model": load_backend_model(model_path, backend)}
+        interval_bundle = load_interval_model_bundle(active_dir, metadata.get("price_interval_model"))
+        if interval_bundle is not None:
+            models["__price_interval__"] = interval_bundle
     else:
-        for segment in metadata["segments"]:
-            segment_name = segment["name"]
-            model_path = active_dir / f"{segment_name}.json"
-            models[segment_name] = {"backend": "xgboost", "model": load_backend_model(model_path, "xgboost")}
+        raise ValueError("当前模型缺少多模型直接预测配置，请重新训练模型")
     return metadata, models, active_dir
 
 
@@ -2582,15 +2793,6 @@ def run_prediction_with_strategy(
 
     prediction_frames: list[pd.DataFrame] = []
     total_segments = len(metadata["segments"])
-    if metadata_has_direct_variants(metadata):
-        variant_key = select_prediction_model_variant(metadata, strategy_forecast_df)
-        variant_meta = metadata["model_variants"][variant_key]
-        feature_columns = variant_meta["feature_columns"]
-        variant_models = models[variant_key]
-    else:
-        variant_key = "legacy"
-        feature_columns = metadata["feature_columns"]
-        variant_models = models
     for idx, segment in enumerate(metadata["segments"], start=1):
         segment_name = segment["name"]
         if progress_callback is not None:
@@ -2599,15 +2801,16 @@ def run_prediction_with_strategy(
         segment_df = strategy_forecast_df[strategy_forecast_df["segment"] == segment_name].copy()
         if segment_df.empty:
             continue
+        variant_key = select_segment_prediction_model_variant(metadata, segment_name, strategy_forecast_df)
+        variant_meta = metadata["model_variants"][variant_key]
+        feature_columns = variant_meta["feature_columns"]
+        variant_models = models[variant_key]
         model_entry = variant_models[segment_name]
         if isinstance(model_entry, dict) and "model" in model_entry:
             model_pred = predict_backend_model(model_entry["model"], str(model_entry.get("backend") or "xgboost"), segment_df, feature_columns)
         else:
             model_pred = predict_backend_model(model_entry, "xgboost", segment_df, feature_columns)
-        if metadata_has_direct_variants(metadata):
-            raw_predicted_price = model_pred
-        else:
-            raw_predicted_price = segment_df[SIMILAR_PRICE_COLUMN].to_numpy(dtype=float) + model_pred
+        raw_predicted_price = model_pred
         clipped_predicted_price = clip_price_series(raw_predicted_price)
         segment_df["predicted_price"] = clipped_predicted_price
         segment_df["model_variant"] = variant_key
@@ -2616,6 +2819,12 @@ def run_prediction_with_strategy(
         prediction_frames.append(segment_df)
 
     result_df = pd.concat(prediction_frames, ignore_index=True).sort_values(["date", "period"]).reset_index(drop=True)
+    interval_bundle = models.get("__price_interval__") if isinstance(models, dict) else None
+    if interval_bundle is not None:
+        interval_metadata = metadata.get("price_interval_model") or {}
+        intervals = normalize_price_intervals(interval_metadata.get("intervals"))
+        interval_result = predict_interval_probabilities(result_df, interval_bundle)
+        result_df = append_interval_prediction_columns(result_df, interval_result, intervals)
     return result_df, reference_dates, strategy_key, strategy_label
 
 
@@ -2773,6 +2982,13 @@ def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:
         "model_variant",
         "model_similarity_diff",
         "predicted_price",
+        "predicted_interval",
+        "predicted_interval_probability",
+        "interval_probabilities",
+        "high_price_probability",
+        "extreme_price_probability",
+        "interval_backtest_accuracy",
+        "price_interval_consistency",
     ]
     export_df = result_df[[column for column in export_columns if column in result_df.columns]].copy()
     export_df["date"] = pd.to_datetime(export_df["date"]).dt.strftime("%Y-%m-%d")

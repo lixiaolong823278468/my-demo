@@ -649,9 +649,9 @@ flowchart TD
 | `models/_staging/run_xxx` | 训练中临时目录，成功后删除 |
 | `models/training_runs.jsonl` | 训练日志 |
 
-## 21. 自动训练窗口寻优
+## 21. 手动训练窗口寻优
 
-系统还支持自动寻找最优训练窗口。
+系统支持通过页面按钮手动寻找最优训练窗口，并在寻优完成后训练和启用最优模型。程序启动和状态刷新不会自动触发寻优。
 
 入口在 `api_server.py` 的 `build_window_optimization_worker()`。
 
@@ -659,7 +659,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  A["自动/手动触发窗口寻优"] --> B["读取历史数据签名"]
+  A["手动点击自动寻优并训练最优模型"] --> B["读取历史数据签名"]
   B --> C["获取可用历史日期"]
   C --> D["生成候选窗口"]
   D --> E["粗搜 coarse：每个窗口训练一次临时模型"]
@@ -673,7 +673,7 @@ flowchart TD
   L --> M["保存 window_optimization.json"]
 ```
 
-自动寻优不会直接把每个候选窗口都覆盖到 `models/current`。
+训练窗口寻优不会直接把每个候选窗口都覆盖到 `models/current`。
 
 它会先在临时输出目录里训练候选模型，最后只把最佳窗口对应的正式训练结果启用为默认模型。
 
@@ -732,7 +732,27 @@ model_similarity_diff = 模型预测价格 - 相似法参考价格
 
 `model_similarity_diff` 只是对比差值，不是训练残差。
 
-## 24. 当前模型实际状态
+## 24. 价格区间分类模型
+
+价格区间分类模型与具体价格回归模型分开训练、分开评估，最终只在预测结果中合并展示。
+
+训练时：
+
+1. 系统读取训练中心保存的 `price_intervals` 配置。
+2. 按真实日前价格生成区间标签，例如 `300-400` 或 `>1000`。
+3. 复用当前价格模型的基础特征和分时段配置。
+4. 训练 `interval_xgboost` 等区间分类候选模型。
+5. 按区间命中率、Top2 命中率、概率质量和高价召回率选择最佳区间模型。
+6. 将区间模型文件和 `price_interval_model` 元数据写入当前模型版本。
+
+预测时：
+
+1. 先执行原有具体价格预测。
+2. 如果当前模型版本包含 `price_interval_model`，再加载区间分类模型。
+3. 给每个时点追加 `predicted_interval`、`predicted_interval_probability`、`high_price_probability`、`interval_backtest_accuracy` 和 `price_interval_consistency`。
+4. 如果当前模型没有区间模型，具体价格预测仍可正常运行。
+
+## 25. 当前模型实际状态
 
 当前 `models/current/metadata.json` 显示：
 
@@ -753,7 +773,7 @@ model_similarity_diff = 模型预测价格 - 相似法参考价格
 | 高价阈值 | `315.0` |
 | 高价权重倍数 | `2.0` |
 
-## 25. 当前训练逻辑的关键特点
+## 26. 当前训练逻辑的关键特点
 
 1. **直接价格模型**：训练目标是日前价格本身，不是相似法残差。
 2. **分时段模型**：每个时段一套模型，降低全天统一建模的平均化问题。
@@ -763,4 +783,3 @@ model_similarity_diff = 模型预测价格 - 相似法参考价格
 6. **滚动回测复核**：训练完成后可用最近 14/30 天滚动评估稳定性。
 7. **版本可回退**：`current`、`previous`、`history` 三层结构支持回退和复盘。
 8. **相似法退居参考**：相似法仍输出曲线，但不控制主模型预测结果。
-

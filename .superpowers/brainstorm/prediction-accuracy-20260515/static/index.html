@@ -1,0 +1,23 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>预测准确率回查布局草图</title>
+<style>
+  body{margin:0;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;padding:28px;}
+  .wrap{max-width:1180px;margin:0 auto;}
+  h1{margin:0 0 8px;font-size:28px}.sub{color:#667085;margin:0 0 22px}.card{background:#fff;border:1px solid #e5eaf3;border-radius:22px;box-shadow:0 18px 50px rgba(16,24,40,.08);overflow:hidden}.head{padding:16px 20px;background:linear-gradient(90deg,#1677ff,#69b1ff);color:#fff;font-weight:800}.body{padding:20px}.filters{display:grid;grid-template-columns:1.1fr 1fr 1fr auto;gap:10px;align-items:end;margin-bottom:16px}.label{font-size:12px;color:#667085;font-weight:800;margin-bottom:6px}.input{height:38px;border:1px solid #d7dfed;border-radius:12px;padding:0 12px;background:#f8fbff}.btn{height:40px;border:0;border-radius:12px;padding:0 18px;background:#1677ff;color:white;font-weight:800}.chart{height:310px;border:1px solid #d9e7ff;border-radius:18px;background:linear-gradient(180deg,#fafdff,#eef5ff);padding:18px;position:relative}.axis{position:absolute;left:44px;right:28px;bottom:42px;top:70px;border-left:2px solid #cbd5e1;border-bottom:2px solid #cbd5e1}.line{position:absolute;left:0;right:0;border-top-style:solid;border-radius:50%}.predict{top:45px;border-top:4px solid #1677ff;transform:rotate(-2deg)}.actual{top:92px;border-top:4px solid #ff4d4f;transform:rotate(1deg)}.base{top:142px;border-top:3px dashed #52c41a;transform:rotate(-1deg)}.legend{position:absolute;right:36px;top:74px;background:#fff;padding:10px 12px;border-radius:14px;box-shadow:0 10px 24px rgba(16,24,40,.12);font-size:13px;line-height:1.9}.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:14px 0}.metric{border:1px solid #e5eaf3;border-radius:16px;padding:12px;background:#fbfdff}.metric b{display:block;color:#667085;font-size:12px}.metric span{font-size:24px;font-weight:900;color:#1677ff}.fold{border:1px solid #e5eaf3;border-radius:16px;padding:14px;background:#fff}.fold summary{cursor:pointer;font-weight:900}.detail{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.box{background:#f8fbff;border:1px solid #e5eaf3;border-radius:14px;padding:12px;line-height:1.8;font-size:13px}.options{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px}.option{background:#fff;border:2px solid #e5eaf3;border-radius:18px;padding:16px}.option h3{margin:0 0 8px}.option.rec{border-color:#1677ff;background:#f5f9ff}@media(max-width:900px){.filters,.metrics,.detail,.options{grid-template-columns:1fr}}
+</style>
+</head>
+<body><div class="wrap">
+<h1>预测准确率回查：页面布局草图</h1>
+<p class="sub">按日期回查当时点击“预测价格”留下的曲线；实际日前价格出来后，叠加实际曲线并计算误差。</p>
+<div class="card"><div class="head">预测页面新增模块：预测准确率回查</div><div class="body">
+  <div class="filters"><div><div class="label">预测日期</div><div class="input">2026-05-15</div></div><div><div class="label">预测记录</div><div class="input">09:54｜当前最佳分时段模型</div></div><div><div class="label">实际价格来源</div><div class="input">自动从历史/上传文件匹配</div></div><button class="btn">查询对比</button></div>
+  <div class="chart"><strong>96点价格曲线对比</strong><span style="float:right;color:#667085;font-size:12px">图表只放关键信息</span><div class="axis"><div class="line predict"></div><div class="line actual"></div><div class="line base"></div></div><div class="legend"><div><b style="color:#1677ff">━</b> 预测价格</div><div><b style="color:#ff4d4f">━</b> 实际日前价格</div><div><b style="color:#52c41a">--</b> 多条件相似基线</div></div></div>
+  <div class="metrics"><div class="metric"><b>MAE</b><span>32.4</span></div><div class="metric"><b>RMSE</b><span>48.9</span></div><div class="metric"><b>最大误差</b><span style="color:#fa8c16">156</span></div><div class="metric"><b>P90误差</b><span style="color:#722ed1">88</span></div><div class="metric"><b>方向准确率</b><span style="color:#52c41a">67%</span></div></div>
+  <details class="fold"><summary>展开查看本次预测保存的信息（默认折叠）</summary><div class="detail"><div class="box">模型版本：run_20260515_001129<br>时段结构：6段<br>每段使用模型：segment_1=XGBoost，segment_2=CatBoost...</div><div class="box">预测参数：参考天数、参考策略、相似法权重、价格区间配置、预测文件路径、点击时间等</div></div></details>
+</div></div>
+<div class="options"><div class="option rec"><h3>A 推荐布局</h3><p>图表显示预测价格、实际价格和少量关键参考线；模型信息默认折叠。</p></div><div class="option"><h3>B 极简布局</h3><p>图表只显示预测和实际两条线，其余全部放到折叠面板。</p></div></div>
+</div></body></html>

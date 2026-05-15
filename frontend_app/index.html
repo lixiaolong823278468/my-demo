@@ -111,8 +111,8 @@
             <div class="train-card-accent">AUTO</div>
             <div class="section-header">
               <div>
-                <div class="section-title">自动训练使用天数寻优</div>
-                <div class="hint-text">先测试不同“训练使用天数”，再围绕最优天数局部细搜；寻优完成后自动训练并启用最优模型。</div>
+                <div class="section-title">训练使用天数寻优</div>
+                <div class="hint-text">点击按钮后测试不同“训练使用天数”，再围绕最优天数局部细搜；寻优完成后自动训练并启用最优模型。</div>
               </div>
             </div>
 
@@ -146,7 +146,7 @@
                   <span class="progress-title">寻优进度</span>
                   <span class="progress-state-text" id="optimize-progress-text">未开始</span>
                 </div>
-                <div class="progress-status-line" id="optimize-progress-status">等待自动寻优</div>
+                <div class="progress-status-line" id="optimize-progress-status">等待手动点击寻优</div>
                 <div class="progress-track">
                   <div class="progress-fill" id="optimize-progress-fill"></div>
                 </div>
@@ -160,7 +160,7 @@
             <div class="section-header compact">
               <div>
                 <div class="section-title">模型结构配置</div>
-                <div class="hint-text">这里的配置会同时用于自动寻优和手动训练；预测时会读取模型自己的配置，保证训练和预测一致。</div>
+                <div class="hint-text">这里的配置会同时用于训练使用天数寻优和手动训练；预测时会读取模型自己的配置，保证训练和预测一致。</div>
               </div>
             </div>
 
@@ -214,6 +214,48 @@
                 </thead>
                 <tbody></tbody>
               </table>
+            </div>
+          </div>
+
+          <div class="train-workflow-card train-workflow-card-interval">
+            <div class="train-card-accent">RANGE</div>
+            <div class="section-header compact">
+              <div>
+                <div class="section-title">价格区间模型训练</div>
+                <div class="hint-text">区间模型独立于具体价格模型训练；修改区间后会保存为默认配置，需要重新训练后才会影响预测。</div>
+              </div>
+            </div>
+            <div class="form-grid four-col">
+              <label class="field">
+                <span>区间模型训练窗口</span>
+                <input type="number" id="interval-training-window-days" min="7" max="730" value="60" disabled />
+              </label>
+              <label class="field">
+                <span>区间模型验证集天数</span>
+                <input type="number" id="interval-valid-days" min="1" max="90" value="14" disabled />
+              </label>
+              <label class="field">
+                <span>高价区间召回权重</span>
+                <input type="number" id="interval-high-recall-weight" min="0" max="5" step="0.1" value="0.5" disabled />
+              </label>
+              <div class="field hint-text">区间模型当前复用手动训练窗口、验证集和训练轮数，保证两套模型样本口径一致。</div>
+            </div>
+            <div class="table-shell table-frame table-frame-sm">
+              <table class="data-table" id="price-interval-table">
+                <thead>
+                  <tr>
+                    <th>价格区间</th>
+                    <th>下限</th>
+                    <th>上限</th>
+                    <th>说明</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="actions-row">
+              <button class="ghost-btn" id="reset-price-intervals-btn" type="button">恢复默认区间</button>
+              <button class="ghost-btn" id="save-price-intervals-btn" type="button">保存区间配置</button>
             </div>
           </div>
 
@@ -460,7 +502,7 @@
 
           <div class="chart-card">
             <div class="table-toolbar">
-              <div class="toolbar-title">96 点预测曲线</div>
+              <div class="toolbar-title">96 点预测曲线 + 区间风险</div>
               <div class="toolbar-meta" id="prediction-meta">尚未执行预测</div>
               <div class="segmented-control" id="prediction-chart-layout-control" aria-label="图表布局">
                 <span class="segmented-label">图表布局</span>
@@ -474,6 +516,7 @@
               <span class="chart-stat">预测均价：-</span>
               <span class="chart-stat">参考日期：-</span>
             </div>
+            <div class="interval-strip" id="prediction-interval-strip"></div>
             <div class="prediction-chart-grid" id="prediction-chart-grid">
               <article class="strategy-chart-panel">
                 <div class="strategy-chart-title">最近 N 天</div>
@@ -486,11 +529,73 @@
             </div>
           </div>
 
+          <div class="model-rank-card">
+            <div class="model-rank-head">
+              <div>
+                <div class="toolbar-title">分时段模型选择 <button class="help-trigger static-help" type="button" data-help-key="segmentModelSelection" aria-expanded="false">?</button></div>
+                <div class="toolbar-meta" id="model-rank-meta">按验证集指标排序，可把某个时段切换到更适合的算法</div>
+              </div>
+              <div class="model-rank-controls">
+                <label class="compact-field">
+                  <span>排序指标 <button class="help-trigger static-help" type="button" data-help-key="rankMetric" aria-expanded="false">?</button></span>
+                  <select id="model-rank-metric">
+                    <option value="default_score">综合分</option>
+                    <option value="mae">MAE</option>
+                    <option value="rmse">RMSE</option>
+                    <option value="mae_range">MAE(价格范围)</option>
+                    <option value="p90_abs_error">P90误差</option>
+                    <option value="max_abs_error">最大误差</option>
+                    <option value="direction_accuracy">方向准确率</option>
+                  </select>
+                </label>
+                <label class="compact-field price-range-field">
+                  <span>价格范围 <button class="help-trigger static-help" type="button" data-help-key="rangeMae" aria-expanded="false">?</button></span>
+                  <div class="inline-range">
+                    <input type="number" id="model-rank-price-min" value="250" step="10" />
+                    <span>-</span>
+                    <input type="number" id="model-rank-price-max" value="1000" step="10" />
+                  </div>
+                </label>
+                <button class="ghost-btn compact-btn" id="refresh-model-rank-btn" type="button">刷新排序</button>
+                <button class="primary-btn compact-btn" id="save-segment-models-btn" type="button">保存选择</button>
+              </div>
+            </div>
+            <div class="table-shell model-rank-table-shell">
+              <table class="data-table compact-rank-table" id="model-rank-table"></table>
+            </div>
+          </div>
+
           <div class="table-toolbar">
             <div class="toolbar-title">策略对比</div>
             <div class="toolbar-meta">对比不同参考策略的均价、最高价和最低价。</div>
           </div>
           <div class="card-grid metrics-grid" id="comparison-cards"></div>
+
+          <div class="accuracy-review-card">
+            <div class="accuracy-review-head">
+              <div>
+                <div class="toolbar-title">预测准确率回查</div>
+                <div class="toolbar-meta" id="archive-review-meta">按日期查看已保存的预测曲线；有实际价格后自动计算误差</div>
+              </div>
+              <div class="archive-review-controls">
+                <label class="compact-field">
+                  <span>预测日期</span>
+                  <input type="date" id="archive-review-date" />
+                </label>
+                <label class="compact-field archive-record-field">
+                  <span>预测记录</span>
+                  <select id="archive-review-select"></select>
+                </label>
+                <button class="ghost-btn compact-btn" id="archive-review-refresh-btn" type="button">查询</button>
+              </div>
+            </div>
+            <div class="archive-metric-strip" id="archive-review-metrics"></div>
+            <div class="archive-review-chart" id="archive-review-chart"></div>
+            <details class="archive-review-details">
+              <summary>查看本次预测保存的信息</summary>
+              <div class="archive-detail-grid" id="archive-review-details"></div>
+            </details>
+          </div>
 
           <details class="advanced-panel">
             <summary>查看和编辑明细数据</summary>

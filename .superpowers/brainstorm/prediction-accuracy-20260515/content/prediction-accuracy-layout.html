@@ -1,0 +1,73 @@
+﻿<h2>预测准确率回查：推荐页面布局</h2>
+<p class="subtitle">目标：按日期回查当时点击“预测价格”留下的曲线，并在实际日前价格出来后做直观对比。</p>
+
+<div class="mockup">
+  <div class="mockup-header">预测页面新增模块：预测准确率回查</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:1.1fr 1fr 1fr auto;gap:10px;align-items:end;margin-bottom:14px;">
+      <div>
+        <div class="label">预测日期</div>
+        <input class="mock-input" value="2026-05-15" />
+      </div>
+      <div>
+        <div class="label">预测记录</div>
+        <input class="mock-input" value="09:54｜当前最佳分时段模型" />
+      </div>
+      <div>
+        <div class="label">实际价格来源</div>
+        <input class="mock-input" value="自动从历史/上传文件匹配" />
+      </div>
+      <button class="mock-button">查询对比</button>
+    </div>
+
+    <div class="placeholder" style="height:280px;background:linear-gradient(180deg,#f8fbff,#eef5ff);border:1px solid #d9e7ff;display:block;padding:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <strong>96点价格曲线对比</strong>
+        <span style="font-size:12px;color:#667085;">只放关键曲线，避免图表太乱</span>
+      </div>
+      <div style="height:190px;border-left:2px solid #d0d7e2;border-bottom:2px solid #d0d7e2;position:relative;margin:12px 20px;">
+        <div style="position:absolute;left:0;right:0;top:38px;border-top:3px solid #1677ff;border-radius:50%;transform:rotate(-2deg);"></div>
+        <div style="position:absolute;left:0;right:0;top:78px;border-top:3px solid #ff4d4f;border-radius:50%;transform:rotate(1deg);"></div>
+        <div style="position:absolute;left:0;right:0;top:118px;border-top:2px dashed #52c41a;border-radius:50%;transform:rotate(-1deg);"></div>
+        <div style="position:absolute;right:12px;top:10px;background:white;padding:8px 10px;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,.08);font-size:12px;line-height:1.8;">
+          <div><span style="color:#1677ff;font-weight:700;">━</span> 预测价格</div>
+          <div><span style="color:#ff4d4f;font-weight:700;">━</span> 实际日前价格</div>
+          <div><span style="color:#52c41a;font-weight:700;">--</span> 多条件相似基线</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:12px 0;">
+      <div class="placeholder" style="padding:12px;height:auto;"><strong>MAE</strong><br><span style="font-size:22px;color:#1677ff;">32.4</span></div>
+      <div class="placeholder" style="padding:12px;height:auto;"><strong>RMSE</strong><br><span style="font-size:22px;color:#1677ff;">48.9</span></div>
+      <div class="placeholder" style="padding:12px;height:auto;"><strong>最大误差</strong><br><span style="font-size:22px;color:#fa8c16;">156.2</span></div>
+      <div class="placeholder" style="padding:12px;height:auto;"><strong>P90误差</strong><br><span style="font-size:22px;color:#722ed1;">88.0</span></div>
+      <div class="placeholder" style="padding:12px;height:auto;"><strong>方向准确率</strong><br><span style="font-size:22px;color:#52c41a;">67%</span></div>
+    </div>
+
+    <details style="border:1px solid #e5e7eb;border-radius:14px;padding:12px;background:#fff;">
+      <summary style="cursor:pointer;font-weight:700;">展开查看本次预测保存的信息</summary>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;font-size:13px;">
+        <div class="placeholder" style="height:auto;padding:12px;text-align:left;">模型版本：run_20260515_001129<br>时段结构：6段<br>每段使用模型：segment_1=XGBoost，segment_2=CatBoost...</div>
+        <div class="placeholder" style="height:auto;padding:12px;text-align:left;">预测参数：参考天数、参考策略、相似法权重、价格区间配置、预测文件路径、点击时间等</div>
+      </div>
+    </details>
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="recommended" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>推荐：日期查询 + 主图对比 + 默认折叠详情</h3>
+      <p>图表只显示预测价格、实际价格和少量关键参考线；模型信息放到折叠面板里，符合你说的“图表不用太多信息”。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="compact" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>更紧凑：只显示预测 vs 实际</h3>
+      <p>主图只放两条线，基线和模型信息全部进入折叠详情，最清爽但参考信息少一些。</p>
+    </div>
+  </div>
+</div>

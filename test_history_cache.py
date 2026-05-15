@@ -4,6 +4,7 @@ import json
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -26,6 +27,28 @@ class HistoryCacheTests(unittest.TestCase):
         self.assertEqual(list(variants), ["no_lag_96"])
         self.assertNotIn(self.removed_previous_day_feature, variants["no_lag_96"])
         self.assertNotIn("similar_price", variants["no_lag_96"])
+
+    def test_similarity_features_do_not_create_residual_training_target(self) -> None:
+        from dayahead_core import TARGET_COLUMN, attach_similarity_features
+
+        rows = []
+        for date_text, price_base in [("2026-05-01", 100.0), ("2026-05-02", 120.0)]:
+            for period in [1, 2]:
+                rows.append(
+                    {
+                        "date": pd.Timestamp(date_text),
+                        "period": period,
+                        "net_load": 100.0 + period,
+                        "renewable_power": 20.0,
+                        "thermal_on_capacity": 1000.0,
+                        "day_type": "workday",
+                        TARGET_COLUMN: price_base + period,
+                    }
+                )
+
+        frame = attach_similarity_features(pd.DataFrame(rows), reference_days=1)
+
+        self.assertNotIn("residual_target", frame.columns)
 
     def test_prediction_error_summary_includes_plain_language_metrics(self) -> None:
         from dayahead_core import summarize_model_vs_baseline, summarize_prediction_errors
@@ -104,6 +127,22 @@ class HistoryCacheTests(unittest.TestCase):
         self.assertEqual(worker_payload["high_price_weighting"]["quantile"], 0.85)
         self.assertEqual(worker_payload["high_price_weighting"]["multiplier"], 3.0)
         self.assertTrue(worker_payload["force"])
+
+    def test_status_refresh_does_not_start_window_optimization_check(self) -> None:
+        from api_server import ApiHandler
+
+        handler = object.__new__(ApiHandler)
+
+        with (
+            patch("api_server.check_window_optimization") as check_window_optimization,
+            patch("api_server.STATE.status", return_value={}),
+            patch("api_server.load_current_metadata", return_value={}),
+            patch("api_server.window_optimization_state", return_value={"history_cache_key": "old"}),
+        ):
+            status = handler.get_status()
+
+        check_window_optimization.assert_not_called()
+        self.assertEqual(status["window_optimization"], {"history_cache_key": "old"})
 
     def test_window_optimization_payload_uses_saved_advanced_preferences(self) -> None:
         import api_server
@@ -238,6 +277,165 @@ class HistoryCacheTests(unittest.TestCase):
             }
         }
         self.assertEqual(select_prediction_model_variant(legacy_metadata, forecast_df), "legacy_direct")
+
+    def test_segment_prediction_variant_uses_saved_segment_selection(self) -> None:
+        from dayahead_core import select_segment_prediction_model_variant
+
+        metadata = {
+            "selected_model_key": "global_model",
+            "selected_segment_price_models": {"peak": "peak_model"},
+            "model_variants": {
+                "global_model": {"feature_columns": ["net_load"]},
+                "peak_model": {"feature_columns": ["net_load"]},
+            },
+        }
+
+        forecast_df = pd.DataFrame({"net_load": [100.0]})
+
+        self.assertEqual(select_segment_prediction_model_variant(metadata, "peak", forecast_df), "peak_model")
+        self.assertEqual(select_segment_prediction_model_variant(metadata, "valley", forecast_df), "global_model")
+
+    def test_training_default_segment_selection_can_choose_different_models(self) -> None:
+        from dayahead_core import select_best_segment_price_models
+
+        selected = select_best_segment_price_models(
+            {
+                "model_a": {
+                    "night": {"final_mae": 10.0, "final_rmse": 20.0},
+                    "peak": {"final_mae": 80.0, "final_rmse": 100.0},
+                },
+                "model_b": {
+                    "night": {"final_mae": 20.0, "final_rmse": 30.0},
+                    "peak": {"final_mae": 40.0, "final_rmse": 50.0},
+                },
+            },
+            ["night", "peak"],
+            "model_a",
+        )
+
+        self.assertEqual(selected, {"night": "model_a", "peak": "model_b"})
+
+    def test_model_candidate_ranking_filters_range_by_actual_price(self) -> None:
+        from dayahead_core import rank_model_candidates
+
+        root = Path(__file__).resolve().parent / ".test_tmp" / f"ranking_{time.time_ns()}"
+        current_dir = root / "current"
+        current_dir.mkdir(parents=True, exist_ok=True)
+        metadata = {
+            "selected_model_key": "model_a",
+            "selected_segment_price_models": {"peak": "model_b"},
+            "segments": [{"name": "peak", "start_time": "00:00", "end_time": "24:00"}],
+            "validation_predictions_path": "validation_predictions.jsonl",
+        }
+        (current_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+        rows = [
+            {"model_key": "model_a", "model_backend": "xgboost", "model_backend_label": "XGBoost", "segment": "peak", "date": "2026-05-01", "period": 1, "actual": 200.0, "predicted": 1000.0},
+            {"model_key": "model_b", "model_backend": "catboost", "model_backend_label": "CatBoost", "segment": "peak", "date": "2026-05-01", "period": 1, "actual": 200.0, "predicted": 200.0},
+            {"model_key": "model_a", "model_backend": "xgboost", "model_backend_label": "XGBoost", "segment": "peak", "date": "2026-05-01", "period": 2, "actual": 500.0, "predicted": 510.0},
+            {"model_key": "model_b", "model_backend": "catboost", "model_backend_label": "CatBoost", "segment": "peak", "date": "2026-05-01", "period": 2, "actual": 500.0, "predicted": 550.0},
+        ]
+        with (current_dir / "validation_predictions.jsonl").open("w", encoding="utf-8") as file:
+            for row in rows:
+                file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        ranking = rank_model_candidates(root, metric="mae_range", price_min=250, price_max=1000)
+
+        segment = ranking["segments"][0]
+        self.assertEqual(segment["current_model_key"], "model_b")
+        self.assertEqual([item["model_key"] for item in segment["rankings"]], ["model_a", "model_b"])
+        self.assertEqual(segment["rankings"][0]["metric_value"], 10.0)
+        self.assertEqual(segment["rankings"][0]["rows"], 1)
+
+    def test_api_segment_selection_updates_current_and_history_metadata(self) -> None:
+        from api_server import update_segment_price_model_selection
+
+        root = Path(__file__).resolve().parent / ".test_tmp" / f"segment_selection_{time.time_ns()}"
+        current_dir = root / "current"
+        history_dir = root / "history" / "run_test"
+        current_dir.mkdir(parents=True, exist_ok=True)
+        history_dir.mkdir(parents=True, exist_ok=True)
+        metadata = {
+            "run_id": "run_test",
+            "segments": [{"name": "peak", "start_time": "00:00", "end_time": "24:00"}],
+            "model_variants": {
+                "model_a": {"feature_columns": ["net_load"]},
+                "model_b": {"feature_columns": ["net_load"]},
+            },
+            "selected_model_key": "model_a",
+        }
+        for path in [current_dir / "metadata.json", history_dir / "metadata.json"]:
+            path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+
+        updated = update_segment_price_model_selection(root, {"peak": "model_b"})
+
+        self.assertEqual(updated["selected_segment_price_models"], {"peak": "model_b"})
+        history_metadata = json.loads((history_dir / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(history_metadata["selected_segment_price_models"], {"peak": "model_b"})
+
+    def test_prediction_variant_rejects_residual_only_legacy_metadata(self) -> None:
+        from dayahead_core import select_prediction_model_variant
+
+        with self.assertRaises(ValueError):
+            select_prediction_model_variant({"feature_columns": ["net_load"]}, pd.DataFrame({"net_load": [100.0]}))
+
+    def test_price_interval_selection_is_per_segment(self) -> None:
+        from price_interval import select_interval_segment_models
+
+        model_variants = {
+            "interval_xgboost": {"model_backend": "xgboost"},
+            "interval_catboost": {"model_backend": "catboost"},
+        }
+        variant_metrics = {
+            "interval_xgboost": {
+                "overall": {"score": -0.1},
+                "segments": {
+                    "segment_1": {"score": -0.9},
+                    "segment_2": {"score": -0.2},
+                },
+            },
+            "interval_catboost": {
+                "overall": {"score": -0.2},
+                "segments": {
+                    "segment_1": {"score": -0.3},
+                    "segment_2": {"score": -0.8},
+                },
+            },
+        }
+
+        selected = select_interval_segment_models(model_variants, variant_metrics, ["segment_1", "segment_2"])
+
+        self.assertEqual(selected["segment_1"], "interval_xgboost")
+        self.assertEqual(selected["segment_2"], "interval_catboost")
+
+    def test_price_interval_loader_uses_segment_selected_variant(self) -> None:
+        import price_interval
+
+        root = Path(__file__).resolve().parent / ".test_tmp" / f"interval_loader_{time.time_ns()}"
+        (root / "interval_xgboost").mkdir(parents=True, exist_ok=True)
+        (root / "interval_catboost").mkdir(parents=True, exist_ok=True)
+        (root / "interval_xgboost" / "segment_1.json").write_text("xgb", encoding="utf-8")
+        (root / "interval_catboost" / "segment_2.cbm").write_text("cat", encoding="utf-8")
+        metadata = {
+            "enabled": True,
+            "selected_model_key": "interval_xgboost",
+            "selected_segment_models": {"segment_1": "interval_xgboost", "segment_2": "interval_catboost"},
+            "model_variants": {
+                "interval_xgboost": {"model_dir": "interval_xgboost", "model_backend": "xgboost"},
+                "interval_catboost": {"model_dir": "interval_catboost", "model_backend": "catboost"},
+            },
+            "metrics": {"segments": {"segment_1": {}, "segment_2": {}}},
+        }
+        loaded: list[tuple[str, str]] = []
+        original_loader = price_interval.load_interval_backend_model
+        try:
+            price_interval.load_interval_backend_model = lambda path, backend: loaded.append((path.name, backend)) or f"{backend}:{path.name}"
+            bundle = price_interval.load_interval_model_bundle(root, metadata)
+        finally:
+            price_interval.load_interval_backend_model = original_loader
+
+        self.assertEqual(loaded, [("segment_1.json", "xgboost"), ("segment_2.cbm", "catboost")])
+        self.assertEqual(bundle.models["segment_1"]["backend"], "xgboost")
+        self.assertEqual(bundle.models["segment_2"]["backend"], "catboost")
 
     def test_training_window_resolves_latest_train_and_validation_range(self) -> None:
         from dayahead_core import TrainConfig, resolve_training_date_range

@@ -43,9 +43,17 @@ from dayahead_core import (
     normalize_segment_config,
     normalize_similarity_weights,
     predict_prices_compare,
+    rank_model_candidates,
     rollback_to_previous,
     save_training_preferences,
     train_and_register,
+)
+from price_interval import normalize_price_intervals
+from prediction_archive import (
+    DEFAULT_PREDICTION_ARCHIVE_ROOT,
+    archive_prediction_bundle,
+    list_prediction_archives,
+    load_prediction_archive_detail,
 )
 
 
@@ -59,6 +67,7 @@ FORECAST_FILE = Path(DEFAULT_FORECAST_FILE)
 HISTORY_DIR = Path(DEFAULT_HISTORY_DIR)
 OUTPUT_FILE = Path(DEFAULT_OUTPUT_FILE)
 OUTPUT_ROOT = BASE_DIR / "output"
+PREDICTION_ARCHIVE_ROOT = DEFAULT_PREDICTION_ARCHIVE_ROOT
 WINDOW_OPTIMIZATION_STATE_FILE = MODEL_ROOT / "window_optimization.json"
 WINDOW_OPTIMIZATION_OUTPUT_ROOT = OUTPUT_ROOT / "window_optimization"
 AUTO_WINDOW_CANDIDATES = [30, 45, 60, 75, 90, 120, 150, 180, 240, 365]
@@ -121,6 +130,13 @@ def parse_high_price_weighting_payload(payload: dict[str, Any]) -> dict[str, Any
         "quantile": min(0.99, max(0.5, quantile)),
         "multiplier": max(1.0, multiplier),
     }
+
+
+def parse_price_intervals_payload(payload: dict[str, Any]) -> list[dict[str, object]]:
+    intervals = payload.get("price_intervals")
+    if intervals is None:
+        intervals = load_training_preferences(MODEL_ROOT).get("price_intervals")
+    return normalize_price_intervals(intervals if isinstance(intervals, list) else None)
 
 
 def now_text() -> str:
@@ -200,6 +216,44 @@ def read_json_file(path: Path) -> dict[str, Any]:
 def write_json_file(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(to_jsonable(data), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def parse_optional_float(value: str | None) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return float(value)
+
+
+def update_segment_price_model_selection(model_root: Path, selected: dict[str, Any]) -> dict[str, Any]:
+    current_dir = model_root / "current"
+    metadata_path = current_dir / "metadata.json"
+    metadata = read_json_file(metadata_path)
+    if not metadata:
+        raise FileNotFoundError("当前模型元数据不存在，请先训练模型")
+    variants = metadata.get("model_variants") if isinstance(metadata.get("model_variants"), dict) else {}
+    segments = metadata.get("segments") if isinstance(metadata.get("segments"), list) else metadata.get("segment_config")
+    segment_names = {str(item.get("name")) for item in segments or [] if isinstance(item, dict) and item.get("name")}
+    if not isinstance(selected, dict):
+        raise ValueError("selected_segment_price_models 必须是对象")
+    normalized: dict[str, str] = {}
+    for raw_segment, raw_model_key in selected.items():
+        segment_name = str(raw_segment).strip()
+        model_key = str(raw_model_key).strip()
+        if not segment_name or not model_key:
+            continue
+        if segment_names and segment_name not in segment_names:
+            raise ValueError(f"未知时段：{segment_name}")
+        if model_key not in variants:
+            raise ValueError(f"未知模型：{model_key}")
+        normalized[segment_name] = model_key
+    metadata["selected_segment_price_models"] = normalized
+    metadata["segment_price_model_selection_updated_at"] = now_text()
+    write_json_file(metadata_path, metadata)
+    run_id = str(metadata.get("run_id") or "").strip()
+    history_path = model_root / "history" / run_id / "metadata.json" if run_id else None
+    if history_path and history_path.exists():
+        write_json_file(history_path, metadata)
+    return metadata
 
 
 def read_first_sheet(file_path: Path) -> tuple[str, pd.DataFrame]:
@@ -589,6 +643,7 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
         training_window_days = int(payload.get("training_window_days") or 60) if training_mode == "rolling_window" else None
         segment_config = parse_segment_config_payload(payload)
         high_price_weighting = parse_high_price_weighting_payload(payload)
+        price_intervals = parse_price_intervals_payload(payload)
         STATE.append_log(job_id, describe_training_options(segment_config, high_price_weighting), 3)
         save_training_preferences(
             model_root,
@@ -596,6 +651,7 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
                 "segment_mode": "custom" if segment_config else "default",
                 "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
                 "high_price_weighting": high_price_weighting,
+                "price_intervals": price_intervals,
             },
         )
         previous_metadata = load_current_metadata(model_root) or {}
@@ -614,6 +670,7 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
                 high_price_weight_enabled=high_price_weighting["enabled"],
                 high_price_quantile=high_price_weighting["quantile"],
                 high_price_weight_multiplier=high_price_weighting["multiplier"],
+                price_intervals=price_intervals,
             ),
             progress_callback=build_progress_callback(job_id),
         )
@@ -640,7 +697,18 @@ def build_predict_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, A
             similarity_weights=similarity_weights,
             progress_callback=build_progress_callback(job_id),
         )
-        return summarize_predict_result(result)
+        summary = summarize_predict_result(result)
+        metadata = load_current_metadata(model_root) or {}
+        archive_result = archive_prediction_bundle(
+            summary["prediction"],
+            metadata,
+            PREDICTION_ARCHIVE_ROOT,
+            Path(payload.get("forecast_file") or FORECAST_FILE),
+            Path(payload.get("output_file") or OUTPUT_FILE),
+        )
+        summary["prediction_archive"] = archive_result
+        summary["prediction"]["archive_result"] = archive_result
+        return summary
 
     return worker
 
@@ -876,6 +944,7 @@ def build_window_optimization_worker_payload(
     )
     segment_source = payload if has_segment_payload else preferences
     high_price_source = payload if has_high_price_payload else preferences
+    price_interval_source = payload if isinstance(payload.get("price_intervals"), list) else preferences
 
     worker_payload: dict[str, Any] = {
         "reason": reason,
@@ -886,6 +955,7 @@ def build_window_optimization_worker_payload(
         "segment_mode": segment_source.get("segment_mode", "default"),
         "segment_config": segment_source.get("segment_config"),
         "high_price_weighting": parse_high_price_weighting_payload(high_price_source),
+        "price_intervals": normalize_price_intervals(price_interval_source.get("price_intervals")),
     }
     if force is not None:
         worker_payload["force"] = force
@@ -985,6 +1055,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
                 "segment_mode": "custom" if segment_config else "default",
                 "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
                 "high_price_weighting": high_price_weighting,
+                "price_intervals": payload.get("price_intervals"),
             },
         )
         STATE.append_log(job_id, "开始自动训练使用天数寻优", 1)
@@ -1027,6 +1098,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
                     high_price_weight_enabled=high_price_weighting["enabled"],
                     high_price_quantile=high_price_weighting["quantile"],
                     high_price_weight_multiplier=high_price_weighting["multiplier"],
+                    price_intervals=payload.get("price_intervals"),
                 ),
                 progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
             )
@@ -1085,6 +1157,7 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
                 high_price_weight_enabled=high_price_weighting["enabled"],
                 high_price_quantile=high_price_weighting["quantile"],
                 high_price_weight_multiplier=high_price_weighting["multiplier"],
+                price_intervals=payload.get("price_intervals"),
             ),
             progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
         )
@@ -1210,6 +1283,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self.send_json({"state": window_optimization_state(), "current_job": STATE.snapshot()})
             if path == "/api/model/current":
                 return self.send_json({"metadata": load_current_metadata(MODEL_ROOT) or {}})
+            if path == "/api/model/candidate-rankings":
+                query = urllib.parse.parse_qs(parsed.query)
+                metric = str((query.get("metric") or ["default_score"])[0] or "default_score")
+                price_min = parse_optional_float((query.get("price_min") or [None])[0])
+                price_max = parse_optional_float((query.get("price_max") or [None])[0])
+                return self.send_json(rank_model_candidates(MODEL_ROOT, metric=metric, price_min=price_min, price_max=price_max))
             if path == "/api/model/versions":
                 return self.send_json(self.get_versions())
             if path == "/api/training/logs":
@@ -1227,6 +1306,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self.send_json(load_forecast_template_preview())
             if path == "/api/prediction/latest":
                 return self.send_json({"prediction": load_latest_prediction_output()})
+            if path == "/api/prediction-archive":
+                query = urllib.parse.parse_qs(parsed.query)
+                forecast_date = str((query.get("date") or [""])[0] or "").strip() or None
+                return self.send_json({"records": list_prediction_archives(PREDICTION_ARCHIVE_ROOT, forecast_date)})
+            if path.startswith("/api/prediction-archive/"):
+                archive_id = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+                return self.send_json(
+                    load_prediction_archive_detail(
+                        PREDICTION_ARCHIVE_ROOT,
+                        archive_id,
+                        history_dir=HISTORY_DIR,
+                        model_root=MODEL_ROOT,
+                    )
+                )
             if path.startswith("/api/jobs/"):
                 job_id = path.rsplit("/", 1)[-1]
                 snapshot = STATE.snapshot(job_id)
@@ -1273,6 +1366,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                             "segment_mode": "custom" if segment_config else "default",
                             "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
                             "high_price_weighting": parse_high_price_weighting_payload(payload),
+                            "price_intervals": parse_price_intervals_payload(payload),
                         }
                     )
                 preferences = save_training_preferences(MODEL_ROOT, preference_payload)
@@ -1288,6 +1382,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return self.send_error_json(HTTPStatus.BAD_REQUEST, "缺少 version_key")
                 activate_model_version(MODEL_ROOT, version_key)
                 return self.send_json({"message": f"已切换默认模型：{version_key}"})
+            if path == "/api/model/segment-selection":
+                metadata = update_segment_price_model_selection(MODEL_ROOT, payload.get("selected_segment_price_models") or {})
+                return self.send_json({"message": "分时段预测模型已保存", "metadata": metadata})
             if path == "/api/model/rollback":
                 current_dir = rollback_to_previous(MODEL_ROOT)
                 return self.send_json({"message": "已回退到上一版模型", "current_model_dir": str(current_dir)})
@@ -1303,6 +1400,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self.send_error_json(HTTPStatus.NOT_FOUND, "未找到接口")
         except RuntimeError as exc:
             return self.send_error_json(HTTPStatus.CONFLICT, str(exc))
+        except ValueError as exc:
+            return self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:  # noqa: BLE001
             return self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
 
@@ -1337,11 +1436,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         }
 
     def get_status(self) -> dict[str, Any]:
-        auto_check = check_window_optimization("status_check")
         status = STATE.status()
         status["current_model"] = load_current_metadata(MODEL_ROOT) or {}
         status["window_optimization"] = window_optimization_state()
-        status["window_optimization_auto_check"] = auto_check
         return status
 
     def get_versions(self) -> dict[str, Any]:
@@ -1446,7 +1543,6 @@ def main() -> None:
     print(f"模型目录：{MODEL_ROOT}")
     if args.open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    threading.Timer(1.0, lambda: check_window_optimization("startup")).start()
     server.serve_forever()
 
 

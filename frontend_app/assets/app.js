@@ -30,6 +30,12 @@ const App = {
   qualityReports: [],
   latestQualityReport: null,
   segmentRows: [],
+  priceIntervals: [],
+  modelCandidateRankings: null,
+  selectedSegmentPriceModels: {},
+  predictionArchiveRecords: [],
+  predictionArchiveDetail: null,
+  archiveChart: null,
 };
 
 const defaultSegmentRows = [
@@ -40,6 +46,14 @@ const defaultSegmentRows = [
   { name: "late_night", start_time: "20:00", end_time: "24:00" },
 ];
 const segmentDraftStorageKey = "dayahead_segment_drafts_by_count";
+const defaultPriceIntervals = [
+  { label: "<250", min: null, max: 250 },
+  { label: "250-300", min: 250, max: 300 },
+  { label: "300-400", min: 300, max: 400 },
+  { label: "400-600", min: 400, max: 600 },
+  { label: "600-1000", min: 600, max: 1000 },
+  { label: ">1000", min: 1000, max: null },
+];
 
 const columnTitleMap = {
   date: "日期",
@@ -52,7 +66,12 @@ const columnTitleMap = {
   net_load_only_similar_price: "仅火电空间相似参考",
   residual_pred: "模型与相似法差值",
   model_similarity_diff: "模型与相似法差值",
-  predicted_price: "模型预测价格",
+  predicted_price: "最终预测价格",
+  predicted_interval: "最可能价格区间",
+  predicted_interval_probability: "区间概率",
+  high_price_probability: "高价概率",
+  interval_backtest_accuracy: "区间历史命中率",
+  price_interval_consistency: "一致性提示",
   recent_n_days_similar_price: "最近 N 天多条件相似参考",
   recent_n_days_net_load_only_similar_price: "最近 N 天仅火电空间参考",
   recent_n_days_residual_pred: "最近 N 天模型与相似法差值",
@@ -84,16 +103,16 @@ const predictionSeriesNameMap = {
 const predictionChartConfigMap = {
   recent_n_days: {
     elementId: "prediction-chart-recent-n-days",
-    predictedName: "模型预测价格",
-    similarName: "多条件相似参考",
-    netLoadOnlyName: "仅火电空间相似参考",
+    predictedName: "最终预测价格",
+    similarName: "多条件相似基线",
+    netLoadOnlyName: "仅净负荷相似基线",
     residualName: "最近 N 天模型与相似法差值",
   },
   recent_same_type_days: {
     elementId: "prediction-chart-same-type-days",
-    predictedName: "模型预测价格",
-    similarName: "多条件相似参考",
-    netLoadOnlyName: "仅火电空间相似参考",
+    predictedName: "最终预测价格",
+    similarName: "多条件相似基线",
+    netLoadOnlyName: "仅净负荷相似基线",
     residualName: "同类型日模型与相似法差值",
   },
 };
@@ -101,20 +120,71 @@ const predictionChartLayoutStorageKey = "dayahead-prediction-chart-layout";
 
 const helpContentUrl = "/assets/help-content.json";
 
+const modelRankingHelpContent = {
+  segmentModelSelection: {
+    title: "分时段模型选择",
+    body: "每个时段都可以单独指定预测时使用哪个候选模型。默认来自训练时验证集表现，也可以在这里按指标重新排序后保存。",
+    tips: ["保存后立即影响下一次预测", "只改变模型选择，不会重新训练模型"],
+  },
+  rankMetric: {
+    title: "排序指标",
+    body: "用于给每个时段下的候选模型排序。误差类指标越小越好，方向准确率越高越好，综合分默认用 MAE + 0.2×RMSE。",
+    tips: ["综合分适合默认选择", "关注尖峰时可看 P90误差或最大误差"],
+  },
+  rangeMae: {
+    title: "MAE(价格范围)",
+    body: "只统计实际日前价格落在指定区间内的验证样本，再计算 MAE。这样可以暂时排除极低或极高价格对排序的影响。",
+    tips: ["区间按实际价格筛选，包含边界", "价格上下限在预测页临时输入，不需要重新训练"],
+  },
+};
+
+const archiveMetricHelpContent = {
+  archiveMetricMae: {
+    title: "MAE",
+    body: "平均绝对误差。把 96 个点每个点的“预测价格和实际日前价格差多少”取绝对值，再求平均。",
+    tips: ["越小越好", "单位是元/MWh", "直观看平均偏差有多大"],
+  },
+  archiveMetricRmse: {
+    title: "RMSE",
+    body: "均方根误差。会把大误差放大后再统计，所以对尖峰、极端偏差更敏感。",
+    tips: ["越小越好", "RMSE 明显大于 MAE 时，说明有少数点误差很大"],
+  },
+  archiveMetricMaxAbsError: {
+    title: "最大误差",
+    body: "96 个点里预测价格和实际日前价格相差最大的那个点。",
+    tips: ["越小越好", "用于看最坏情况下偏差有多大"],
+  },
+  archiveMetricP90AbsError: {
+    title: "P90误差",
+    body: "把 96 个点的绝对误差从小到大排序后，取 90% 位置附近的误差。",
+    tips: ["越小越好", "比最大误差更稳，不容易被单个极端点完全带偏"],
+  },
+  archiveMetricDirectionAccuracy: {
+    title: "方向准确率",
+    body: "比较相邻时段价格涨跌方向，统计预测方向和实际方向一致的比例。",
+    tips: ["越高越好", "主要看趋势判断是否跟实际一致"],
+  },
+  archiveMetricBias: {
+    title: "Bias",
+    body: "平均偏差，等于预测价格减实际日前价格后的平均值。",
+    tips: ["接近 0 更好", "正数表示整体预测偏高，负数表示整体预测偏低"],
+  },
+};
+
 let helpContentMap = {
   寻优最大历史天数: {
     title: "寻优最大历史天数",
-    body: "自动寻找最合适训练使用天数时，最多向历史数据回看多少天。范围越大，能测试的候选天数越多，但计算时间也会变长。",
+    body: "手动点击“自动寻优并训练最优模型”时，最多向历史数据回看多少天。范围越大，能测试的候选天数越多，但计算时间也会变长。",
     tips: ["数据变化快时可适当缩短", "数据规律稳定时可适当放大", "不确定时保持默认值即可"],
   },
   寻优验证集天数: {
     title: "寻优验证集天数",
-    body: "自动寻优时预留最近多少天作为验证集，用来判断不同窗口参数的效果。",
+    body: "手动寻优时预留最近多少天作为验证集，用来判断不同窗口参数的效果。",
     tips: ["天数太少容易偶然", "天数太多会减少训练样本", "常用 7~30 天"],
   },
   "每个模型最大训练轮数": {
     title: "每个模型最大训练轮数",
-    body: "自动寻优或手动训练时，每个时段、每种算法最多训练多少轮。XGBoost、LightGBM、CatBoost 都会使用这个上限；如果验证误差长期不再变好，会提前停止。",
+    body: "训练使用天数寻优或手动训练时，每个时段、每种算法最多训练多少轮。XGBoost、LightGBM、CatBoost 都会使用这个上限；如果验证误差长期不再变好，会提前停止。",
     tips: ["数据量较小时不用过大", "训练慢时先降低轮数", "默认值偏稳妥"],
   },
   局部细搜半径: {
@@ -482,6 +552,7 @@ async function loadHelpContent() {
     helpContentMap = {};
     console.warn("参数说明文档加载失败，暂不显示问号说明：", error);
   }
+  helpContentMap = { ...helpContentMap, ...modelRankingHelpContent, ...archiveMetricHelpContent };
 }
 
 function normalizeHelpLabel(value) {
@@ -620,6 +691,10 @@ function setActiveTab(name) {
   if (name === "predict") {
     requestAnimationFrame(() => {
       resizePredictionCharts();
+      resizeArchiveReviewChart();
+      if (App.predictionArchiveDetail) {
+        renderPredictionArchiveDetail(App.predictionArchiveDetail);
+      }
     });
   }
   if (name === "logs") {
@@ -731,6 +806,314 @@ function renderModelComparison(metadata = {}) {
       `;
     })
     .join("");
+}
+
+const modelRankMetricLabelMap = {
+  default_score: "综合分",
+  mae: "MAE",
+  rmse: "RMSE",
+  mae_range: "MAE(价格范围)",
+  p90_abs_error: "P90误差",
+  max_abs_error: "最大误差",
+  direction_accuracy: "方向准确率",
+};
+
+function modelRankPriceValue(selector) {
+  const value = Number($(selector)?.value);
+  return Number.isFinite(value) ? value : null;
+}
+
+function metricDisplayValue(value, metric) {
+  if (metric === "direction_accuracy") return formatPercentCell(value);
+  return formatMetricCell(value);
+}
+
+function modelDisplayName(item = {}) {
+  const label = item.model_backend_label || item.model_backend || item.model_key || "-";
+  return item.model_key ? `${label}｜${item.model_key}` : label;
+}
+
+function modelRankQueryString() {
+  const metric = $("#model-rank-metric")?.value || "default_score";
+  const params = new URLSearchParams({ metric });
+  if (metric === "mae_range") {
+    const priceMin = modelRankPriceValue("#model-rank-price-min");
+    const priceMax = modelRankPriceValue("#model-rank-price-max");
+    if (priceMin !== null) params.set("price_min", String(priceMin));
+    if (priceMax !== null) params.set("price_max", String(priceMax));
+  }
+  return params.toString();
+}
+
+async function loadModelCandidateRankings() {
+  const table = $("#model-rank-table");
+  if (table) table.innerHTML = `<tbody><tr><td>正在加载模型排序...</td></tr></tbody>`;
+  const data = await request(`/api/model/candidate-rankings?${modelRankQueryString()}`);
+  App.modelCandidateRankings = data;
+  App.selectedSegmentPriceModels = { ...(data.selected_segment_price_models || {}) };
+  (data.segments || []).forEach((segment) => {
+    if (!App.selectedSegmentPriceModels[segment.segment]) {
+      App.selectedSegmentPriceModels[segment.segment] = segment.current_model_key || segment.rankings?.[0]?.model_key || "";
+    }
+  });
+  renderModelCandidateRankings(data);
+  return data;
+}
+
+function renderModelCandidateRankings(data = App.modelCandidateRankings || {}) {
+  const table = $("#model-rank-table");
+  const meta = $("#model-rank-meta");
+  if (!table) return;
+  const segments = data.segments || [];
+  const metric = data.metric || $("#model-rank-metric")?.value || "default_score";
+  if (meta) {
+    const rangeText = metric === "mae_range" ? `，实际价格 ${data.price_min ?? "-∞"}~${data.price_max ?? "+∞"}` : "";
+    meta.textContent = `${modelRankMetricLabelMap[metric] || metric}${rangeText}；每行可选择该时段预测用的模型`;
+  }
+  if (!segments.length) {
+    table.innerHTML = `<tbody><tr><td>${htmlEscape(data.message || "暂无候选模型验证明细，请重新训练模型后查看。")}</td></tr></tbody>`;
+    return;
+  }
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>时段</th>
+        <th>当前使用</th>
+        <th>排序前三</th>
+        <th>${htmlEscape(modelRankMetricLabelMap[metric] || metric)}</th>
+        <th>样本数</th>
+        <th>切换模型</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${segments
+        .map((segment) => {
+          const rankings = segment.rankings || [];
+          const selectedKey = App.selectedSegmentPriceModels[segment.segment] || segment.current_model_key || rankings[0]?.model_key || "";
+          const selected = rankings.find((item) => item.model_key === selectedKey) || rankings[0] || {};
+          const topPills = rankings
+            .slice(0, 3)
+            .map((item, index) => {
+              const currentClass = item.model_key === selectedKey ? " is-current" : "";
+              return `<span class="rank-pill${currentClass}">#${index + 1} ${htmlEscape(modelDisplayName(item))} ${metricDisplayValue(item.metric_value, metric)}</span>`;
+            })
+            .join("");
+          const options = rankings
+            .map((item) => `<option value="${htmlEscape(item.model_key)}"${item.model_key === selectedKey ? " selected" : ""}>${htmlEscape(modelDisplayName(item))}</option>`)
+            .join("");
+          return `
+            <tr>
+              <td>${htmlEscape(segmentNameMap[segment.segment] || segment.segment)}</td>
+              <td>${htmlEscape(modelDisplayName(selected))}</td>
+              <td>${topPills || "-"}</td>
+              <td>${metricDisplayValue(selected.metric_value, metric)}</td>
+              <td>${selected.rows ?? "-"}</td>
+              <td><select class="rank-select" data-segment-model-select="${htmlEscape(segment.segment)}">${options}</select></td>
+            </tr>
+          `;
+        })
+        .join("")}
+    </tbody>
+  `;
+}
+
+async function saveSegmentModelSelection() {
+  const payload = { selected_segment_price_models: App.selectedSegmentPriceModels || {} };
+  const result = await request("/api/model/segment-selection", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  showToast(result.message || "分时段模型选择已保存");
+  await refreshSummary();
+  await loadModelCandidateRankings();
+}
+
+function archiveReviewDateValue() {
+  return $("#archive-review-date")?.value || App.lastPrediction?.forecast_date || new Date().toISOString().slice(0, 10);
+}
+
+function setArchiveReviewDate(dateText) {
+  const input = $("#archive-review-date");
+  if (input && dateText) input.value = String(dateText).slice(0, 10);
+}
+
+function formatArchiveRecordLabel(record) {
+  const created = record.created_at ? String(record.created_at).replace("T", " ") : "-";
+  const strategy = record.reference_strategy_label || record.reference_strategy_key || "-";
+  const segmentText = record.segment_count ? `${record.segment_count}段` : "-";
+  return `${created}｜${strategy}｜${segmentText}｜${record.model_run_id || "-"}`;
+}
+
+async function loadPredictionArchiveRecords(dateText = archiveReviewDateValue()) {
+  setArchiveReviewDate(dateText);
+  setArchiveReviewLoading("正在查询预测记录...");
+  try {
+    const data = await request(`/api/prediction-archive?date=${encodeURIComponent(dateText || "")}`);
+    App.predictionArchiveRecords = data.records || [];
+    renderPredictionArchiveRecordSelect();
+    if (App.predictionArchiveRecords.length) {
+      await loadPredictionArchiveDetail(App.predictionArchiveRecords[0].archive_id);
+    } else {
+      App.predictionArchiveDetail = null;
+      renderPredictionArchiveDetail(null, "当前日期暂无预测留痕");
+    }
+  } catch (error) {
+    App.predictionArchiveRecords = [];
+    App.predictionArchiveDetail = null;
+    renderPredictionArchiveRecordSelect();
+    renderPredictionArchiveDetail(null, `查询失败：${error.message}`);
+    throw error;
+  }
+}
+
+function renderPredictionArchiveRecordSelect() {
+  const select = $("#archive-review-select");
+  if (!select) return;
+  if (!App.predictionArchiveRecords.length) {
+    select.innerHTML = `<option value="">暂无记录</option>`;
+    return;
+  }
+  select.innerHTML = App.predictionArchiveRecords
+    .map((record) => `<option value="${htmlEscape(record.archive_id)}">${htmlEscape(formatArchiveRecordLabel(record))}</option>`)
+    .join("");
+}
+
+async function loadPredictionArchiveDetail(archiveId) {
+  if (!archiveId) return;
+  setArchiveReviewLoading("正在加载预测详情...");
+  const data = await request(`/api/prediction-archive/${encodeURIComponent(archiveId)}`);
+  App.predictionArchiveDetail = data;
+  renderPredictionArchiveDetail(data);
+}
+
+function ensureArchiveReviewChart() {
+  const target = $("#archive-review-chart");
+  if (!target || !window.echarts) return null;
+  if (!target.offsetWidth || !target.offsetHeight) return null;
+  if (!App.archiveChart) {
+    App.archiveChart = window.echarts.init(target);
+    window.addEventListener("resize", () => App.archiveChart?.resize());
+  }
+  App.archiveChart.resize();
+  return App.archiveChart;
+}
+
+function resizeArchiveReviewChart() {
+  if (App.archiveChart) {
+    App.archiveChart.resize();
+  }
+}
+
+function setArchiveReviewLoading(message) {
+  const meta = $("#archive-review-meta");
+  if (meta) meta.textContent = message;
+  renderArchiveMetrics(null, message);
+  const chart = ensureArchiveReviewChart();
+  if (chart) {
+    chart.setOption({ title: { text: message, left: "center", top: "middle", textStyle: { color: "#667085", fontSize: 14 } } }, true);
+  }
+}
+
+function archiveSeriesValue(row, key) {
+  const value = Number(row?.[key]);
+  return Number.isFinite(value) ? Number(value.toFixed(4)) : null;
+}
+
+function renderArchiveMetrics(metrics, message) {
+  const target = $("#archive-review-metrics");
+  if (!target) return;
+  if (!metrics) {
+    target.innerHTML = `<div class="archive-metric-chip"><span>状态</span><strong style="font-size:14px;">${htmlEscape(message || "暂无实际价格数据")}</strong></div>`;
+    return;
+  }
+  const items = [
+    ["MAE", "archiveMetricMae", formatMetricCell(metrics.mae)],
+    ["RMSE", "archiveMetricRmse", formatMetricCell(metrics.rmse)],
+    ["最大误差", "archiveMetricMaxAbsError", formatMetricCell(metrics.max_abs_error)],
+    ["P90误差", "archiveMetricP90AbsError", formatMetricCell(metrics.p90_abs_error)],
+    ["方向准确率", "archiveMetricDirectionAccuracy", formatPercentCell(metrics.direction_accuracy)],
+    ["Bias", "archiveMetricBias", formatMetricCell(metrics.bias)],
+  ];
+  target.innerHTML = items
+    .map(
+      ([label, helpKey, value]) => `
+        <div class="archive-metric-chip">
+          <span class="metric-label">${htmlEscape(label)} <button class="help-trigger static-help" type="button" data-help-key="${helpKey}" aria-expanded="false">?</button></span>
+          <strong>${value}</strong>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function renderArchiveDetails(record = {}) {
+  const target = $("#archive-review-details");
+  if (!target) return;
+  if (!record.archive_id) {
+    target.innerHTML = `<div class="archive-detail-item">暂无预测记录</div>`;
+    return;
+  }
+  const segmentModels = record.selected_segment_price_models || {};
+  const segmentModelText = Object.entries(segmentModels)
+    .map(([segment, model]) => `${segment}: ${model}`)
+    .join("<br/>") || "-";
+  const weights = record.similarity_weights || {};
+  const weightsText = Object.entries(weights)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join("<br/>") || "-";
+  const items = [
+    ["模型版本", record.model_run_id || "-"],
+    ["预测策略", `${record.reference_strategy_label || record.reference_strategy_key || "-"} / ${record.reference_days_requested || "-"}天`],
+    ["时段结构", `${record.segment_count || "-"} 段`],
+    ["每段使用模型", segmentModelText],
+    ["相似法权重", weightsText],
+    ["预测文件", record.forecast_file || "-"],
+    ["输出文件", record.output_file || "-"],
+    ["保存时间", record.created_at || "-"],
+  ];
+  target.innerHTML = items
+    .map(([label, value]) => `<div class="archive-detail-item"><strong>${htmlEscape(label)}</strong><br/>${String(value).includes("<br/>") ? value : htmlEscape(value)}</div>`)
+    .join("");
+}
+
+function renderPredictionArchiveDetail(data, fallbackMessage = "暂无预测留痕") {
+  const meta = $("#archive-review-meta");
+  const chart = ensureArchiveReviewChart();
+  const record = data?.record || {};
+  const rows = data?.rows || [];
+  renderArchiveMetrics(data?.metrics, data?.message || fallbackMessage);
+  renderArchiveDetails(record);
+  if (meta) {
+    meta.textContent = record.archive_id
+      ? `${record.forecast_date || "-"}｜${record.reference_strategy_label || record.reference_strategy_key || "-"}｜${data?.message || "已匹配实际价格"}`
+      : fallbackMessage;
+  }
+  if (!chart) return;
+  if (!rows.length) {
+    chart.setOption({ title: { text: fallbackMessage, left: "center", top: "middle", textStyle: { color: "#667085", fontSize: 14 } } }, true);
+    return;
+  }
+  const periods = rows.map((row) => row.period);
+  const predicted = rows.map((row) => archiveSeriesValue(row, "predicted_price"));
+  const actual = rows.map((row) => archiveSeriesValue(row, "actual_price"));
+  const netLoadOnly = rows.map((row) => archiveSeriesValue(row, "net_load_only_similar_price"));
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      color: ["#1677ff", "#ff4d4f", "#52c41a"],
+      tooltip: { trigger: "axis", confine: true },
+      legend: { top: 8, data: ["最终预测价格", "实际日前价格", "仅净负荷相似基线"] },
+      grid: { left: 56, right: 28, top: 52, bottom: 42 },
+      xAxis: { type: "category", boundaryGap: false, data: periods },
+      yAxis: { type: "value", name: "元/MWh", scale: true },
+      series: [
+        { name: "最终预测价格", type: "line", smooth: true, showSymbol: false, data: predicted, lineStyle: { width: 3 } },
+        { name: "实际日前价格", type: "line", smooth: true, showSymbol: false, data: actual, lineStyle: { width: 3 } },
+        { name: "仅净负荷相似基线", type: "line", smooth: true, showSymbol: false, data: netLoadOnly, lineStyle: { width: 2, type: "dashed" } },
+      ],
+    },
+    true,
+  );
 }
 
 function renderRollingBacktest(metadata = {}) {
@@ -878,6 +1261,12 @@ function formatPercentCell(value) {
   return formatted === "-" ? "-" : `${formatted}%`;
 }
 
+function formatPercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "-";
+  return `${(numeric * 100).toFixed(1)}%`;
+}
+
 function formatBestIterationCell(variant) {
   const averageValue = Number(variant.best_iteration_avg);
   const maxValue = Number(variant.best_iteration_max);
@@ -900,6 +1289,17 @@ function formatChartTooltipValue(value) {
   return new Intl.NumberFormat("zh-CN", {
     maximumFractionDigits: 2,
   }).format(numericValue);
+}
+
+function formatPeriodClockTime(period) {
+  const numericPeriod = Number(period);
+  if (!Number.isFinite(numericPeriod)) return "";
+  const totalMinutes = Math.round(numericPeriod * 15);
+  if (totalMinutes < 0 || totalMinutes > 1440) return "";
+  if (totalMinutes === 1440) return "24:00";
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
 function sortVersionsForDisplay(versions) {
@@ -1472,10 +1872,66 @@ function collectHighPriceWeighting() {
   };
 }
 
+function normalizePriceIntervalRows(rows) {
+  const source = Array.isArray(rows) && rows.length >= 2 ? rows : defaultPriceIntervals;
+  return source.map((row) => ({
+    label: String(row.label || "").trim(),
+    min: row.min === null || row.min === undefined || row.min === "" ? null : Number(row.min),
+    max: row.max === null || row.max === undefined || row.max === "" ? null : Number(row.max),
+  }));
+}
+
+function renderPriceIntervalTable() {
+  const body = $("#price-interval-table tbody");
+  if (!body) return;
+  body.innerHTML = App.priceIntervals
+    .map((row, index) => {
+      const first = index === 0;
+      const last = index === App.priceIntervals.length - 1;
+      return `
+        <tr>
+          <td><input class="table-input interval-label-input" data-index="${index}" value="${htmlEscape(row.label)}" /></td>
+          <td><input class="table-input interval-min-input" data-index="${index}" type="number" step="0.01" value="${row.min ?? ""}" ${first ? "disabled" : ""} /></td>
+          <td><input class="table-input interval-max-input" data-index="${index}" type="number" step="0.01" value="${row.max ?? ""}" ${last ? "disabled" : ""} /></td>
+          <td>${first ? "最低价档" : last ? "最高价档" : "中间价档"}</td>
+        </tr>
+      `;
+    })
+    .join("");
+  injectHelpAffordances(body);
+}
+
+function collectPriceIntervals() {
+  const rows = App.priceIntervals.map((row) => ({ ...row }));
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    row.label = $(`.interval-label-input[data-index="${index}"]`)?.value?.trim() || row.label;
+    const minInput = $(`.interval-min-input[data-index="${index}"]`);
+    const maxInput = $(`.interval-max-input[data-index="${index}"]`);
+    row.min = minInput?.disabled || minInput?.value === "" ? null : Number(minInput.value);
+    row.max = maxInput?.disabled || maxInput?.value === "" ? null : Number(maxInput.value);
+  }
+  for (let index = 0; index < rows.length; index += 1) {
+    if (index === 0) rows[index].min = null;
+    if (index === rows.length - 1) rows[index].max = null;
+    if (index > 0) rows[index].min = rows[index - 1].max;
+    if (index < rows.length - 1 && !Number.isFinite(Number(rows[index].max))) {
+      throw new Error("价格区间上限必须填写");
+    }
+    if (index < rows.length - 1 && Number(rows[index].max) <= Number(rows[index].min ?? -Infinity)) {
+      throw new Error("价格区间上限必须大于下限");
+    }
+  }
+  App.priceIntervals = rows;
+  renderPriceIntervalTable();
+  return rows;
+}
+
 function collectTrainingAdvancedConfig() {
   return {
     ...collectSegmentConfig(),
     high_price_weighting: collectHighPriceWeighting(),
+    price_intervals: collectPriceIntervals(),
   };
 }
 
@@ -1496,6 +1952,8 @@ function initializeAdvancedTrainingControls() {
   if ($("#high-price-weight-enabled")) $("#high-price-weight-enabled").checked = Boolean(highConfig.enabled);
   if ($("#high-price-quantile")) $("#high-price-quantile").value = highConfig.quantile ?? 0.8;
   if ($("#high-price-multiplier")) $("#high-price-multiplier").value = highConfig.multiplier ?? 2;
+  App.priceIntervals = normalizePriceIntervalRows(preferences.price_intervals);
+  renderPriceIntervalTable();
   renderSegmentConfigTable();
 }
 
@@ -1593,6 +2051,11 @@ function renderPredictionTable(prediction) {
   const columns = [
     "date",
     "period",
+    "predicted_interval",
+    "predicted_interval_probability",
+    "high_price_probability",
+    "interval_backtest_accuracy",
+    "price_interval_consistency",
     "recent_n_days_similar_price",
     "recent_n_days_net_load_only_similar_price",
     "recent_n_days_residual_pred",
@@ -1613,6 +2076,11 @@ function renderPredictionTable(prediction) {
     return {
       date: row.date,
       period: row.period,
+      predicted_interval: row.predicted_interval || "-",
+      predicted_interval_probability: formatPercent(row.predicted_interval_probability),
+      high_price_probability: formatPercent(row.high_price_probability),
+      interval_backtest_accuracy: formatPercent(row.interval_backtest_accuracy),
+      price_interval_consistency: row.price_interval_consistency || "-",
       recent_n_days_similar_price: recentRow ? Number(recentRow.similar_price || 0).toFixed(2) : "",
       recent_n_days_net_load_only_similar_price: recentRow ? Number(recentRow.net_load_only_similar_price || 0).toFixed(2) : "",
       recent_n_days_residual_pred: recentRow ? modelSimilarityDiff(recentRow).toFixed(2) : "",
@@ -1670,6 +2138,17 @@ function renderPredictionStats(prediction) {
   target.innerHTML = variants
     .flatMap(([key, variant]) => {
       const values = variant.rows.map((row) => Number(row.predicted_price || 0));
+      const intervalCounts = {};
+      variant.rows.forEach((row) => {
+        const label = row.predicted_interval || "-";
+        intervalCounts[label] = (intervalCounts[label] || 0) + 1;
+      });
+      const mainInterval = Object.entries(intervalCounts).sort((left, right) => right[1] - left[1])[0]?.[0] || "-";
+      const highRiskCount = variant.rows.filter((row) => Number(row.high_price_probability || 0) >= 0.5).length;
+      const intervalAccuracyValues = variant.rows.map((row) => Number(row.interval_backtest_accuracy)).filter(Number.isFinite);
+      const intervalAccuracy = intervalAccuracyValues.length
+        ? intervalAccuracyValues.reduce((sum, value) => sum + value, 0) / intervalAccuracyValues.length
+        : null;
       const minValue = Math.min(...values);
       const maxValue = Math.max(...values);
       const avgValue = values.reduce((sum, item) => sum + item, 0) / Math.max(1, values.length);
@@ -1679,6 +2158,9 @@ function renderPredictionStats(prediction) {
       return [
         `${strategyLabel}均价：${avgValue.toFixed(2)}`,
         `${strategyLabel}范围：${minValue.toFixed(2)} ~ ${maxValue.toFixed(2)}`,
+        `${strategyLabel}主要区间：${mainInterval}`,
+        `${strategyLabel}高价风险点：${highRiskCount}`,
+        `${strategyLabel}区间命中率：${formatPercent(intervalAccuracy)}`,
         `${strategyLabel}参考日：${referenceLabel}`,
       ];
     })
@@ -1688,6 +2170,7 @@ function renderPredictionStats(prediction) {
 
 function renderPredictionChart(prediction) {
   renderPredictionStats(prediction);
+  renderPredictionIntervalStrip(prediction);
   const variants = orderedPredictionComparisons(prediction);
   const variantMap = Object.fromEntries(variants);
   if (!variants.length) {
@@ -1696,6 +2179,8 @@ function renderPredictionChart(prediction) {
       App.predictionChartSignature = "";
     }
     $("#prediction-meta").textContent = "暂无预测数据";
+    const strip = $("#prediction-interval-strip");
+    if (strip) strip.innerHTML = "";
     return;
   }
 
@@ -1715,6 +2200,51 @@ function renderPredictionChart(prediction) {
   $("#prediction-meta").textContent = `预测日期：${forecastDate} | 参考天数：${referenceDays} 天 | 已同时展示最近天与同类型日两种预测`;
 }
 
+function intervalClassName(label) {
+  const text = String(label || "");
+  if (text.includes(">") || text.includes("1000")) return "interval-extreme";
+  if (text.includes("600")) return "interval-high";
+  if (text.includes("400")) return "interval-mid-high";
+  if (text.includes("300")) return "interval-mid";
+  if (text.includes("250")) return "interval-low-mid";
+  return "interval-low";
+}
+
+function intervalChartColor(label, alpha = 0.18) {
+  const palette = {
+    "interval-low": `rgba(96, 165, 250, ${alpha})`,
+    "interval-low-mid": `rgba(34, 211, 238, ${alpha})`,
+    "interval-mid": `rgba(34, 197, 94, ${alpha})`,
+    "interval-mid-high": `rgba(245, 158, 11, ${alpha})`,
+    "interval-high": `rgba(239, 68, 68, ${alpha})`,
+    "interval-extreme": `rgba(127, 29, 29, ${alpha})`,
+  };
+  return palette[intervalClassName(label)] || `rgba(148, 163, 184, ${alpha})`;
+}
+
+function renderPredictionIntervalStrip(prediction) {
+  const strip = $("#prediction-interval-strip");
+  if (!strip) return;
+  const variants = orderedPredictionComparisons(prediction);
+  if (!variants.length) {
+    strip.innerHTML = "";
+    return;
+  }
+  const primary = variants[0][1];
+  strip.innerHTML = `
+    <div class="interval-strip-label">区间色带</div>
+    <div class="interval-strip-bars">
+      ${(primary.rows || [])
+        .map((row) => {
+          const label = row.predicted_interval || "-";
+          const probability = formatPercent(row.predicted_interval_probability);
+          return `<span class="interval-strip-cell ${intervalClassName(label)}" title="时段 ${htmlEscape(row.period)}：${htmlEscape(label)}，概率 ${htmlEscape(probability)}"></span>`;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
 function renderStrategyChart(strategyKey, variant, referenceDays) {
   const chart = ensureChart(strategyKey);
   if (!chart) return;
@@ -1727,6 +2257,14 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
   const rows = variant.rows;
   const periods = rows.map((row) => row.period);
   const predicted = rows.map((row) => Number(row.predicted_price || 0));
+  const rowByPeriod = new Map(rows.map((row) => [String(row.period), row]));
+  const intervalBackground = rows.map((row) => ({
+    value: 1500,
+    itemStyle: { color: intervalChartColor(row.predicted_interval, 0.14) },
+  }));
+  const highRiskPoints = rows
+    .filter((row) => Number(row.high_price_probability || 0) >= 0.5 || Number(row.extreme_price_probability || 0) >= 0.2)
+    .map((row) => [row.period, Number(row.predicted_price || 0), row.predicted_interval || "-", Number(row.high_price_probability || 0)]);
   const similar = rows.map((row) => Number(row.similar_price || 0));
   const netLoadOnlySimilar = rows.map((row) => {
     const value = Number(row.net_load_only_similar_price);
@@ -1755,14 +2293,29 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
         formatter(params) {
           const items = Array.isArray(params) ? params : [params];
           const title = items[0]?.axisValueLabel ?? items[0]?.name ?? "";
+          const row = rowByPeriod.get(String(title));
+          const periodLabel = row?.period ?? title;
+          const periodTime = formatPeriodClockTime(periodLabel);
+          const periodTitle = periodTime ? `时段 ${periodLabel}（${periodTime}）` : `时段 ${periodLabel}`;
           const lines = items
-            .filter((item) => item?.value !== null && item?.value !== undefined && item?.value !== "")
+            .filter((item) => item?.value !== null && item?.value !== undefined && item?.value !== "" && item.seriesName !== "区间背景")
             .map(
               (item) =>
                 `${item.marker || ""}<span style="margin-right:12px;">${item.seriesName}</span><strong>${formatChartTooltipValue(item.value)}</strong>`,
             )
             .join("<br/>");
-          return `<div style="font-weight:800;margin-bottom:6px;">${title}</div>${lines}`;
+          const intervalLines = row
+            ? `
+              <div style="height:1px;background:rgba(255,255,255,0.16);margin:8px 0;"></div>
+              <div>最可能区间：<strong>${htmlEscape(row.predicted_interval || "-")}</strong></div>
+              <div>区间概率：<strong>${formatPercent(row.predicted_interval_probability)}</strong></div>
+              <div>高价概率：<strong>${formatPercent(row.high_price_probability)}</strong></div>
+              <div>&gt;1000 概率：<strong>${formatPercent(row.extreme_price_probability)}</strong></div>
+              <div>历史命中率：<strong>${formatPercent(row.interval_backtest_accuracy)}</strong></div>
+              <div>一致性：<strong>${htmlEscape(row.price_interval_consistency || "-")}</strong></div>
+            `
+            : "";
+          return `<div style="font-weight:800;margin-bottom:6px;">${htmlEscape(periodTitle)}</div>${lines}${intervalLines}`;
         },
       },
       legend: {
@@ -1814,6 +2367,16 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
       ],
       series: [
         {
+          name: "区间背景",
+          type: "bar",
+          barWidth: "98%",
+          barGap: "-100%",
+          silent: true,
+          z: 0,
+          itemStyle: { opacity: 1 },
+          data: intervalBackground,
+        },
+        {
           name: predictedName,
           type: "line",
           smooth: false,
@@ -1821,7 +2384,17 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
           symbolSize: 5,
           lineStyle: { width: 3 },
           areaStyle: { color: "rgba(22,119,255,0.08)" },
+          z: 4,
           data: predicted,
+        },
+        {
+          name: "高价风险点",
+          type: "scatter",
+          symbol: "pin",
+          symbolSize: 18,
+          z: 6,
+          itemStyle: { color: "#ef4444", borderColor: "#fff", borderWidth: 1 },
+          data: highRiskPoints,
         },
         {
           name: similarName,
@@ -2048,6 +2621,19 @@ async function savePredictionPreferences() {
   });
 }
 
+async function saveTrainingPreferences() {
+  const preferences = await request("/api/training/preferences", {
+    method: "POST",
+    body: JSON.stringify(collectTrainingAdvancedConfig()),
+  });
+  App.config = {
+    ...App.config,
+    training_preferences: preferences.preferences,
+    prediction_preferences: preferences.preferences,
+  };
+  showToast("训练配置已保存，重新训练后生效");
+}
+
 async function refreshSummary() {
   const [statusData, currentModel, versionsData] = await Promise.all([
     request("/api/status"),
@@ -2170,18 +2756,18 @@ async function startTrain() {
 
 async function startWindowOptimization() {
   const btn = $("#optimize-window-btn");
-  const originalText = btn?.textContent || "自动寻优训练使用天数";
+  const originalText = btn?.textContent || "自动寻优并训练最优模型";
   try {
     setButtonLoading(btn, true, originalText);
     App.statusFocus = "optimize";
     App.pendingStatus = {
       job_type: "optimize",
       progress: 3,
-      status: "正在提交训练使用天数自动寻优任务...",
-      logs: ["[本地] 正在提交训练使用天数自动寻优任务..."],
+      status: "正在提交训练使用天数寻优任务...",
+      logs: ["[本地] 正在提交训练使用天数寻优任务..."],
       running: true,
     };
-    applyProgressCard("optimize", { progress: 3, label: "\u63d0\u4ea4\u4e2d", status: "正在提交训练使用天数自动寻优任务...", type: "running" });
+    applyProgressCard("optimize", { progress: 3, label: "\u63d0\u4ea4\u4e2d", status: "正在提交训练使用天数寻优任务...", type: "running" });
     renderStatusPanel({ current_job: App.pendingStatus, recent_jobs: [] });
     const data = await request("/api/window-optimization/run", {
       method: "POST",
@@ -2200,14 +2786,14 @@ async function startWindowOptimization() {
         job_id: data.job.job_id,
         job_type: "optimize",
         progress: 5,
-        status: `训练使用天数自动寻优已启动：${data.job.job_id}`,
-        logs: [`[本地] 训练使用天数自动寻优已启动：${data.job.job_id}`],
+        status: `训练使用天数寻优已启动：${data.job.job_id}`,
+        logs: [`[本地] 训练使用天数寻优已启动：${data.job.job_id}`],
         running: true,
       };
       App.pendingStatus = null;
       syncStopButtons();
-      applyProgressCard("optimize", { progress: 5, label: "\u5bfb\u4f18\u4e2d", status: `训练使用天数自动寻优已启动：${data.job.job_id}`, type: "running" });
-      showToast("训练使用天数自动寻优已启动");
+      applyProgressCard("optimize", { progress: 5, label: "\u5bfb\u4f18\u4e2d", status: `训练使用天数寻优已启动：${data.job.job_id}`, type: "running" });
+      showToast("训练使用天数寻优已启动");
     } else {
       App.pendingStatus = null;
       applyProgressCard("optimize", deriveJobState(App.jobStates.optimize, "optimize"));
@@ -2274,6 +2860,9 @@ async function startPredict() {
       showToast("预测已完成");
     }
     await refreshSummary();
+    if (App.lastPrediction?.forecast_date) {
+      await loadPredictionArchiveRecords(App.lastPrediction.forecast_date);
+    }
     await loadDataQuality();
   } catch (error) {
     showToast(error.message, "error");
@@ -2725,6 +3314,27 @@ function bindEvents() {
   $("#save-template-btn").addEventListener("click", () => saveTemplate().catch((error) => showToast(error.message, "error")));
   $("#predict-btn").addEventListener("click", () => startPredict().catch((error) => showToast(error.message, "error")));
   $("#stop-predict-btn").addEventListener("click", () => cancelJob("predict"));
+  $("#refresh-model-rank-btn")?.addEventListener("click", () => loadModelCandidateRankings().then(() => showToast("模型排序已刷新")).catch((error) => showToast(error.message, "error")));
+  $("#save-segment-models-btn")?.addEventListener("click", () => saveSegmentModelSelection().catch((error) => showToast(error.message, "error")));
+  $("#model-rank-metric")?.addEventListener("change", () => loadModelCandidateRankings().catch((error) => showToast(error.message, "error")));
+  ["#model-rank-price-min", "#model-rank-price-max"].forEach((selector) => {
+    $(selector)?.addEventListener("change", () => {
+      if ($("#model-rank-metric")?.value === "mae_range") {
+        loadModelCandidateRankings().catch((error) => showToast(error.message, "error"));
+      }
+    });
+  });
+  $("#model-rank-table")?.addEventListener("change", (event) => {
+    const select = event.target.closest("[data-segment-model-select]");
+    if (!select) return;
+    App.selectedSegmentPriceModels[select.dataset.segmentModelSelect] = select.value;
+    renderModelCandidateRankings();
+  });
+  $("#archive-review-refresh-btn")?.addEventListener("click", () => loadPredictionArchiveRecords().catch((error) => showToast(error.message, "error")));
+  $("#archive-review-date")?.addEventListener("change", () => loadPredictionArchiveRecords().catch((error) => showToast(error.message, "error")));
+  $("#archive-review-select")?.addEventListener("change", (event) => {
+    loadPredictionArchiveDetail(event.target.value).catch((error) => showToast(error.message, "error"));
+  });
   $("#refresh-quality-btn")?.addEventListener("click", () => loadDataQuality().then(() => showToast("数据异常报告已刷新")).catch((error) => showToast(error.message, "error")));
   $$("#prediction-chart-layout-control [data-chart-layout]").forEach((button) => {
     button.addEventListener("click", () => setPredictionChartLayout(button.dataset.chartLayout));
@@ -2772,6 +3382,19 @@ function bindEvents() {
     saveSegmentDraftForCount(App.segmentRows.length, App.segmentRows);
     renderSegmentConfigTable();
   });
+  $("#price-interval-table")?.addEventListener("change", () => {
+    try {
+      collectPriceIntervals();
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  });
+  $("#reset-price-intervals-btn")?.addEventListener("click", () => {
+    App.priceIntervals = normalizePriceIntervalRows(defaultPriceIntervals);
+    renderPriceIntervalTable();
+    showToast("已恢复默认价格区间，保存并重训后生效");
+  });
+  $("#save-price-intervals-btn")?.addEventListener("click", () => saveTrainingPreferences().catch((error) => showToast(error.message, "error")));
   $("#enable-start").addEventListener("change", (event) => {
     if (currentTrainingMode() === "rolling_window") {
       syncTrainingModeControls();
@@ -2818,7 +3441,8 @@ async function initialLoad() {
   await loadConfig();
   initializeAdvancedTrainingControls();
   renderConfigPaths();
-  const initResults = await Promise.allSettled([refreshSummary(), loadLogs(), loadTemplate()]);
+  setArchiveReviewDate(new Date().toISOString().slice(0, 10));
+  const initResults = await Promise.allSettled([refreshSummary(), loadLogs(), loadTemplate(), loadModelCandidateRankings(), loadPredictionArchiveRecords()]);
   initResults.forEach((result) => {
     if (result.status === "rejected") {
       console.error(result.reason);

@@ -11,43 +11,22 @@
     {
       "name": "segment_1",
       "start": 1,
-      "end": 20,
+      "end": 32,
       "start_time": "00:00",
-      "end_time": "05:00"
+      "end_time": "08:00"
     },
     {
       "name": "segment_2",
-      "start": 21,
-      "end": 34,
-      "start_time": "05:00",
-      "end_time": "08:30"
+      "start": 33,
+      "end": 64,
+      "start_time": "08:00",
+      "end_time": "16:00"
     },
     {
       "name": "segment_3",
-      "start": 35,
-      "end": 66,
-      "start_time": "08:30",
-      "end_time": "16:30"
-    },
-    {
-      "name": "segment_4",
-      "start": 67,
-      "end": 72,
-      "start_time": "16:30",
-      "end_time": "18:00"
-    },
-    {
-      "name": "segment_5",
-      "start": 73,
-      "end": 86,
-      "start_time": "18:00",
-      "end_time": "21:30"
-    },
-    {
-      "name": "segment_6",
-      "start": 87,
+      "start": 65,
       "end": 96,
-      "start_time": "21:30",
+      "start_time": "16:00",
       "end_time": "24:00"
     }
   ],
@@ -55,5 +34,37 @@
     "enabled": true,
     "quantile": 0.8,
     "multiplier": 2.0
-  }
+  },
+  "price_intervals": [
+    {
+      "label": "<250",
+      "min": null,
+      "max": 250.0
+    },
+    {
+      "label": "250-300",
+      "min": 250.0,
+      "max": 300.0
+    },
+    {
+      "label": "300-400",
+      "min": 300.0,
+      "max": 400.0
+    },
+    {
+      "label": "400-600",
+      "min": 400.0,
+      "max": 600.0
+    },
+    {
+      "label": "600-1000",
+      "min": 600.0,
+      "max": 1000.0
+    },
+    {
+      "label": ">1000",
+      "min": 1000.0,
+      "max": null
+    }
+  ]
 }
