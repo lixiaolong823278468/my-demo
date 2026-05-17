@@ -21,11 +21,8 @@ from dayahead_core import (
     list_model_versions,
     load_current_metadata,
     load_training_log,
-    load_training_preferences,
-    normalize_similarity_weights,
     predict_prices,
     rollback_to_previous,
-    save_training_preferences,
     train_and_register,
 )
 
@@ -364,14 +361,6 @@ def render_predict_tab() -> None:
     render_chip_row([f"当前表共 {len(sheet_df)} 行", "可直接在页面编辑", "支持保存后再预测"])
     edited_df = st.data_editor(sheet_df, num_rows="fixed", width="stretch", key="forecast_editor")
     reference_days = st.number_input("参考天数", min_value=1, max_value=30, value=1, step=1)
-    default_weights = normalize_similarity_weights(load_training_preferences(MODEL_ROOT).get("similarity_weights"))
-    st.markdown('<div class="subsection-title">相似法参考曲线设置</div>', unsafe_allow_html=True)
-    weight_col1, weight_col2, weight_col3, weight_col4, weight_col5 = st.columns(5)
-    net_load_weight = weight_col1.number_input("火电空间权重", min_value=0.0, value=float(default_weights["thermal_space"]), step=0.01)
-    renewable_weight = weight_col2.number_input("新能源权重", min_value=0.0, value=float(default_weights["renewable_power"]), step=0.01)
-    thermal_weight = weight_col3.number_input("火电容量权重", min_value=0.0, value=float(default_weights["thermal_on_capacity"]), step=0.01)
-    day_type_weight = weight_col4.number_input("日期类型权重", min_value=0.0, value=float(default_weights["day_type"]), step=0.01)
-    ratio_weight = weight_col5.number_input("供需比权重", min_value=0.0, value=float(default_weights["thermal_space_load_ratio"]), step=0.01)
 
     progress_bar = st.progress(0)
     status_placeholder = st.empty()
@@ -386,14 +375,6 @@ def render_predict_tab() -> None:
 
     if col_predict.button("执行预测", type="primary", use_container_width=True):
         add_log("收到执行预测指令")
-        similarity_weights = {
-            "thermal_space": float(net_load_weight),
-            "renewable_power": float(renewable_weight),
-            "thermal_on_capacity": float(thermal_weight),
-            "day_type": float(day_type_weight),
-            "thermal_space_load_ratio": float(ratio_weight),
-        }
-        save_training_preferences(MODEL_ROOT, {"similarity_weights": similarity_weights})
         with pd.ExcelWriter(FORECAST_FILE, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
             edited_df.to_excel(writer, index=False, sheet_name=sheet_name)
         result = predict_prices(
@@ -402,7 +383,6 @@ def render_predict_tab() -> None:
             model_root=MODEL_ROOT,
             output_file=OUTPUT_FILE,
             reference_days=int(reference_days),
-            similarity_weights=similarity_weights,
             progress_callback=callback,
         )
         st.session_state.last_predict_df = result.result_df.copy()
@@ -482,10 +462,10 @@ def render_version_tab() -> None:
     selected_row = versions_df[versions_df["显示名称"] == selected_label].iloc[0]
 
     action_col1, action_col2 = st.columns(2)
-    if action_col1.button("设为默认模型", type="primary", use_container_width=True):
+    if action_col1.button("设为默认模型版本", type="primary", use_container_width=True):
         current_dir = activate_model_version(MODEL_ROOT, selected_row["version_key"])
-        add_log(f"已切换默认模型为：{selected_row['version_key']}")
-        st.success(f"已设为默认模型：{selected_row['version_key']} ({current_dir})")
+        add_log(f"已切换默认模型版本为：{selected_row['version_key']}")
+        st.success(f"已设为默认模型版本：{selected_row['version_key']} ({current_dir})")
         st.rerun()
 
     if action_col2.button("回退到上一版模型", use_container_width=True):

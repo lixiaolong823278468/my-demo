@@ -26,11 +26,42 @@ class PriceIntervalCoreTests(unittest.TestCase):
 
         self.assertEqual(
             [item["label"] for item in intervals],
-            ["<250", "250-300", "300-400", "400-600", "600-1000", ">1000"],
+            ["0-250", "250-300", "300-400", "400-600", "600-1000", "1000-1500"],
         )
-        self.assertEqual(interval_label_for_price(249.99, intervals), "<250")
+        self.assertEqual(interval_label_for_price(0.0, intervals), "0-250")
+        self.assertEqual(interval_label_for_price(249.99, intervals), "0-250")
         self.assertEqual(interval_label_for_price(250.0, intervals), "250-300")
-        self.assertEqual(interval_label_for_price(1000.0, intervals), ">1000")
+        self.assertEqual(interval_label_for_price(1000.0, intervals), "1000-1500")
+        self.assertEqual(interval_label_for_price(1499.99, intervals), "1000-1500")
+
+    def test_price_intervals_require_closed_zero_to_1500_range(self) -> None:
+        from price_interval import normalize_price_intervals
+
+        intervals = normalize_price_intervals(
+            [
+                {"label": "low", "min": 0, "max": 500},
+                {"label": "high", "min": 500, "max": 1500},
+            ]
+        )
+
+        self.assertEqual(intervals[0]["min"], 0.0)
+        self.assertEqual(intervals[-1]["max"], 1500.0)
+
+        with self.assertRaisesRegex(ValueError, "第一个价格区间下限必须为 0"):
+            normalize_price_intervals(
+                [
+                    {"label": "low", "min": None, "max": 500},
+                    {"label": "high", "min": 500, "max": 1500},
+                ]
+            )
+
+        with self.assertRaisesRegex(ValueError, "最后一个价格区间上限必须为 1500"):
+            normalize_price_intervals(
+                [
+                    {"label": "low", "min": 0, "max": 500},
+                    {"label": "high", "min": 500, "max": None},
+                ]
+            )
 
     def test_interval_metrics_include_accuracy_top2_and_high_recall(self) -> None:
         from price_interval import compute_interval_metrics, normalize_price_intervals
@@ -44,7 +75,7 @@ class PriceIntervalCoreTests(unittest.TestCase):
         probabilities[2, 1] = 0.7
         probabilities[2, 3] = 0.3
 
-        metrics = compute_interval_metrics(["300-400", ">1000", "300-400"], probabilities, intervals)
+        metrics = compute_interval_metrics(["300-400", "1000-1500", "300-400"], probabilities, intervals)
 
         self.assertAlmostEqual(metrics["interval_accuracy"], 1 / 3)
         self.assertAlmostEqual(metrics["top2_accuracy"], 2 / 3)
@@ -125,14 +156,14 @@ class PriceIntervalCoreTests(unittest.TestCase):
                 root,
                 {
                     "price_intervals": [
-                        {"label": "cheap", "min": None, "max": 300},
-                        {"label": "expensive", "min": 300, "max": None},
+                        {"label": "cheap", "min": 0, "max": 300},
+                        {"label": "expensive", "min": 300, "max": 1500},
                     ]
                 },
             )
 
-            self.assertEqual(prefs["price_intervals"][0]["label"], "cheap")
-            self.assertEqual(load_training_preferences(root)["price_intervals"][1]["label"], "expensive")
+            self.assertEqual(prefs["price_intervals"][0]["label"], "0-300")
+            self.assertEqual(load_training_preferences(root)["price_intervals"][1]["label"], "300-1500")
 
 
 if __name__ == "__main__":

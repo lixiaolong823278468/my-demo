@@ -75,6 +75,45 @@ class PredictionArchiveTests(unittest.TestCase):
         self.assertEqual(len(second["skipped_duplicates"]), 1)
         self.assertEqual(len(archives), 1)
 
+    def test_archive_combines_reference_strategies_into_one_record(self) -> None:
+        from prediction_archive import archive_prediction_bundle, load_prediction_archive_detail, list_prediction_archives
+
+        root = Path(__file__).resolve().parent / ".test_tmp" / f"archive_combined_{time.time_ns()}"
+        prediction = {
+            "forecast_date": "2026-05-15",
+            "selected_strategy_key": "recent_n_days",
+            "comparison_predictions": {
+                "recent_n_days": {
+                    "forecast_date": "2026-05-15",
+                    "reference_strategy_key": "recent_n_days",
+                    "reference_strategy_label": "最近 N 天",
+                    "reference_days_requested": 3,
+                    "reference_dates": ["2026-05-14", "2026-05-13", "2026-05-12"],
+                    "rows": [{"date": "2026-05-15", "period": 1, "predicted_price": 100.0}],
+                },
+                "recent_same_type_days": {
+                    "forecast_date": "2026-05-15",
+                    "reference_strategy_key": "recent_same_type_days",
+                    "reference_strategy_label": "最近 N 个同类型日",
+                    "reference_days_requested": 8,
+                    "reference_dates": ["2026-05-08"],
+                    "rows": [{"date": "2026-05-15", "period": 1, "predicted_price": 102.0}],
+                },
+            },
+        }
+        metadata = {"run_id": "run_a", "selected_segment_price_models": {}}
+
+        saved = archive_prediction_bundle(prediction, metadata, root, "forecast.xlsx", "output.xlsx")
+        archives = list_prediction_archives(root, "2026-05-15")
+        detail = load_prediction_archive_detail(root, saved["saved"][0]["archive_id"], history_dir=root / "empty_history")
+
+        self.assertEqual(len(saved["saved"]), 1)
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0]["reference_days_by_strategy"]["recent_n_days"], 3)
+        self.assertEqual(archives[0]["reference_days_by_strategy"]["recent_same_type_days"], 8)
+        self.assertIn("recent_n_days", detail["comparison_predictions"])
+        self.assertIn("recent_same_type_days", detail["comparison_predictions"])
+
     def test_archive_detail_reports_missing_actual_prices(self) -> None:
         from prediction_archive import archive_prediction_bundle, load_prediction_archive_detail
 

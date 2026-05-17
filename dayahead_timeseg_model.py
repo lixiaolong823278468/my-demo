@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 from dayahead_core import (
@@ -32,14 +31,12 @@ def parse_args() -> argparse.Namespace:
     predict_parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE), help="预测结果输出文件")
     predict_parser.add_argument("--holiday-file", help="节假日文件")
     predict_parser.add_argument("--reference-days", type=int, default=1, help="相似法参考最近天数")
-    add_prediction_similarity_args(predict_parser)
 
     train_predict_parser = subparsers.add_parser("train_predict", help="先训练后预测")
     add_train_args(train_predict_parser)
     train_predict_parser.add_argument("--forecast-file", default=str(DEFAULT_FORECAST_FILE), help="预测文件路径")
     train_predict_parser.add_argument("--output-file", default=str(DEFAULT_OUTPUT_FILE), help="预测结果输出文件")
     train_predict_parser.add_argument("--reference-days", type=int, default=1, help="相似法参考最近天数")
-    add_prediction_similarity_args(train_predict_parser)
 
     rollback_parser = subparsers.add_parser("rollback", help="回退到上一版模型")
     rollback_parser.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT), help="模型根目录")
@@ -60,13 +57,6 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--start-date", help="训练起始日期，格式 YYYY-MM-DD")
     parser.add_argument("--end-date", help="训练结束日期，格式 YYYY-MM-DD")
     parser.add_argument("--similarity-reference-days", type=int, default=100, help="记录到模型元数据的相似法参考天数")
-
-
-def add_prediction_similarity_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--similarity-weights",
-        help='相似法参考曲线权重 JSON，例如 {"thermal_space":0.45,"renewable_power":0.15,"thermal_on_capacity":0.2,"day_type":0.1,"thermal_space_load_ratio":0.1}',
-    )
 
 
 def build_train_config(args: argparse.Namespace) -> TrainConfig:
@@ -103,7 +93,6 @@ def main() -> None:
             output_file=args.output_file,
             holiday_file=args.holiday_file,
             reference_days=args.reference_days,
-            similarity_weights=json.loads(args.similarity_weights) if args.similarity_weights else None,
         )
         print(f"预测完成，预测日: {result.forecast_date}")
         print(f"结果文件: {result.output_file}")
@@ -121,7 +110,6 @@ def main() -> None:
             output_file=args.output_file,
             holiday_file=args.holiday_file,
             reference_days=args.reference_days,
-            similarity_weights=json.loads(args.similarity_weights) if args.similarity_weights else None,
         )
         print(f"预测完成，预测日: {predict_result.forecast_date}")
         print(f"结果文件: {predict_result.output_file}")

@@ -135,12 +135,6 @@ python dayahead_timeseg_model.py train --valid-days 14 --num-boost-round 500
 python dayahead_timeseg_model.py predict --forecast-file ".\预测文件\预测文件.xlsx"
 ```
 
-调整预测时的相似法参考权重：
-
-```bash
-python dayahead_timeseg_model.py predict --similarity-weights "{\"thermal_space\":0.45,\"renewable_power\":0.15,\"thermal_on_capacity\":0.2,\"day_type\":0.1,\"thermal_space_load_ratio\":0.1}"
-```
-
 执行后会：
 
 - 输出结果到 `D:\每日工作\代码示例\预测程序-------\demo1\output\dayahead_price_prediction.xlsx`
@@ -301,7 +295,7 @@ python dayahead_timeseg_model.py rollback
 - 价格模型继续输出 `模型预测价格`，用于查看 96 点价格曲线。
 - 区间模型单独训练，输出 `最可能价格区间`、`区间概率`、`高价概率` 和 `区间历史命中率`。
 - 默认区间为 `<250`、`250-300`、`300-400`、`400-600`、`600-1000`、`>1000`。
-- 区间配置位于训练中心的 `价格区间模型训练` 区块，保存后会写入 `models/training_preferences.json`。
+- 区间配置位于训练中心的 `价格区间概率模型训练配置` 区块，保存后会写入 `models/training_preferences.json`。
 - 修改区间边界会改变历史标签，因此需要重新训练模型后才会影响预测。
 - 预测页将价格曲线、区间色带和明细表放在一起展示，方便同时判断价格水平和高价风险。
 

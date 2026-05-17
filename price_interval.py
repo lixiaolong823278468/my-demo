@@ -10,13 +10,15 @@ import pandas as pd
 
 
 DEFAULT_PRICE_INTERVALS: list[dict[str, float | str | None]] = [
-    {"label": "<250", "min": None, "max": 250.0},
+    {"label": "0-250", "min": 0.0, "max": 250.0},
     {"label": "250-300", "min": 250.0, "max": 300.0},
     {"label": "300-400", "min": 300.0, "max": 400.0},
     {"label": "400-600", "min": 400.0, "max": 600.0},
     {"label": "600-1000", "min": 600.0, "max": 1000.0},
-    {"label": ">1000", "min": 1000.0, "max": None},
+    {"label": "1000-1500", "min": 1000.0, "max": 1500.0},
 ]
+PRICE_INTERVAL_MIN = 0.0
+PRICE_INTERVAL_MAX = 1500.0
 
 
 @dataclass
@@ -35,7 +37,11 @@ class IntervalPredictionResult:
     backtest_accuracy: list[float | None]
 
 
-def normalize_price_intervals(intervals: list[dict[str, Any]] | None) -> list[dict[str, float | str | None]]:
+def normalize_price_intervals(
+    intervals: list[dict[str, Any]] | None,
+    *,
+    allow_legacy_open_bounds: bool = False,
+) -> list[dict[str, float | str | None]]:
     raw_intervals = intervals if intervals else DEFAULT_PRICE_INTERVALS
     normalized: list[dict[str, float | str | None]] = []
     previous_max: float | None = None
@@ -46,15 +52,19 @@ def normalize_price_intervals(intervals: list[dict[str, Any]] | None) -> list[di
         upper = item.get("max")
         lower_value = None if lower is None or lower == "" else float(lower)
         upper_value = None if upper is None or upper == "" else float(upper)
-        if index == 0 and lower_value is not None:
-            raise ValueError("第一个价格区间下限必须为空")
-        if index == len(raw_intervals) - 1 and upper_value is not None:
-            raise ValueError("最后一个价格区间上限必须为空")
+        if index == 0 and lower_value is None and allow_legacy_open_bounds:
+            lower_value = PRICE_INTERVAL_MIN
+        if index == len(raw_intervals) - 1 and upper_value is None and allow_legacy_open_bounds:
+            upper_value = PRICE_INTERVAL_MAX
+        if index == 0 and lower_value != PRICE_INTERVAL_MIN:
+            raise ValueError("第一个价格区间下限必须为 0")
+        if index == len(raw_intervals) - 1 and upper_value != PRICE_INTERVAL_MAX:
+            raise ValueError("最后一个价格区间上限必须为 1500")
         if lower_value is not None and previous_max is not None and abs(lower_value - previous_max) > 1e-9:
             raise ValueError("价格区间必须首尾连续")
         if lower_value is not None and upper_value is not None and lower_value >= upper_value:
             raise ValueError("价格区间上限必须大于下限")
-        label = str(item.get("label") or interval_label_text(lower_value, upper_value)).strip()
+        label = interval_label_text(lower_value, upper_value)
         normalized.append({"label": label, "min": lower_value, "max": upper_value})
         previous_max = upper_value
     if len(normalized) < 2:
@@ -80,14 +90,14 @@ def format_interval_number(value: float | None) -> str:
 
 def interval_label_for_price(price: float, intervals: list[dict[str, Any]]) -> str:
     value = float(price)
-    for item in intervals:
+    for index, item in enumerate(intervals):
         lower = item.get("min")
         upper = item.get("max")
         lower_ok = lower is None or value >= float(lower)
-        upper_ok = upper is None or value < float(upper)
+        upper_ok = upper is None or value < float(upper) or (index == len(intervals) - 1 and value <= float(upper))
         if lower_ok and upper_ok:
             return str(item["label"])
-    return str(intervals[-1]["label"])
+    raise ValueError(f"价格 {value} 超出价格区间范围")
 
 
 def interval_index_for_price(price: float, intervals: list[dict[str, Any]]) -> int:
@@ -175,7 +185,7 @@ def low_price_indices(intervals: list[dict[str, Any]]) -> set[int]:
 
 
 def extreme_price_indices(intervals: list[dict[str, Any]]) -> set[int]:
-    return {index for index, item in enumerate(intervals) if item.get("max") is None and item.get("min") is not None and float(item["min"]) >= 1000.0}
+    return {index for index, item in enumerate(intervals) if item.get("min") is not None and float(item["min"]) >= 1000.0}
 
 
 def normalize_probability_matrix(probabilities: np.ndarray, class_count: int) -> np.ndarray:

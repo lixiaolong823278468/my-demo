@@ -74,10 +74,20 @@ def rounded_prediction_prices(rows: list[dict[str, Any]]) -> list[float | None]:
 
 
 def prediction_fingerprint(record: dict[str, Any]) -> str:
+    comparisons = record.get("comparison_predictions") if isinstance(record.get("comparison_predictions"), dict) else {}
+    comparison_payload = {
+        key: {
+            "reference_days_requested": value.get("reference_days_requested"),
+            "rounded_predicted_price": rounded_prediction_prices(value.get("rows") or []),
+        }
+        for key, value in sorted(comparisons.items())
+    }
     payload = {
         "forecast_date": record.get("forecast_date"),
         "reference_strategy_key": record.get("reference_strategy_key"),
         "reference_days_requested": record.get("reference_days_requested"),
+        "reference_days_by_strategy": record.get("reference_days_by_strategy") or {},
+        "comparison_predictions": comparison_payload,
         "model_run_id": record.get("model_run_id"),
         "selected_segment_price_models": record.get("selected_segment_price_models") or {},
         "rounded_predicted_price": rounded_prediction_prices(record.get("rows") or []),
@@ -113,7 +123,6 @@ def build_prediction_archive_record(
         "reference_strategy_label": variant.get("reference_strategy_label"),
         "reference_days_requested": variant.get("reference_days_requested"),
         "reference_dates": variant.get("reference_dates") or [],
-        "similarity_weights": metadata.get("similarity_weights") or {},
         "price_interval_model": metadata.get("price_interval_model") or {},
         "forecast_file": str(forecast_file),
         "output_file": str(output_file),
@@ -126,6 +135,37 @@ def build_prediction_archive_record(
     return record
 
 
+def build_prediction_archive_bundle_record(
+    prediction: dict[str, Any],
+    metadata: dict[str, Any],
+    forecast_file: str | Path,
+    output_file: str | Path,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    comparisons = prediction.get("comparison_predictions") if isinstance(prediction.get("comparison_predictions"), dict) else {}
+    if not comparisons:
+        return build_prediction_archive_record(prediction, metadata, forecast_file, output_file, created_at=created_at)
+    selected_key = prediction.get("selected_strategy_key") or "recent_n_days"
+    selected_variant = comparisons.get(selected_key) or next(iter(comparisons.values()))
+    record = build_prediction_archive_record(selected_variant, metadata, forecast_file, output_file, created_at=created_at)
+    record["reference_strategy_key"] = "comparison"
+    record["reference_strategy_label"] = "双参考口径"
+    record["selected_strategy_key"] = selected_key
+    record["reference_days_by_strategy"] = {
+        key: value.get("reference_days_requested")
+        for key, value in comparisons.items()
+    }
+    record["reference_dates_by_strategy"] = {
+        key: value.get("reference_dates") or []
+        for key, value in comparisons.items()
+    }
+    record["comparison_predictions"] = comparisons
+    fingerprint = prediction_fingerprint(record)
+    record["fingerprint"] = fingerprint
+    record["archive_id"] = f"{record['forecast_date']}_comparison_{fingerprint[:12]}"
+    return record
+
+
 def record_summary(record: dict[str, Any], relative_path: str) -> dict[str, Any]:
     return {
         "archive_id": record.get("archive_id"),
@@ -135,6 +175,7 @@ def record_summary(record: dict[str, Any], relative_path: str) -> dict[str, Any]
         "reference_strategy_key": record.get("reference_strategy_key"),
         "reference_strategy_label": record.get("reference_strategy_label"),
         "reference_days_requested": record.get("reference_days_requested"),
+        "reference_days_by_strategy": record.get("reference_days_by_strategy") or {},
         "segment_count": record.get("segment_count"),
         "fingerprint": record.get("fingerprint"),
         "path": relative_path,
@@ -165,19 +206,15 @@ def archive_prediction_bundle(
     forecast_file: str | Path = "",
     output_file: str | Path = "",
 ) -> dict[str, Any]:
-    comparisons = prediction.get("comparison_predictions") if isinstance(prediction.get("comparison_predictions"), dict) else {}
-    if not comparisons:
-        comparisons = {prediction.get("reference_strategy_key") or "selected": prediction}
     saved: list[dict[str, Any]] = []
     skipped_duplicates: list[dict[str, Any]] = []
     created_at = datetime.now().isoformat(timespec="seconds")
-    for variant in comparisons.values():
-        record = build_prediction_archive_record(variant, metadata, forecast_file, output_file, created_at=created_at)
-        result = save_prediction_archive_record(record, archive_root)
-        if result["saved"]:
-            saved.append(result["record"])
-        else:
-            skipped_duplicates.append(result["duplicate"])
+    record = build_prediction_archive_bundle_record(prediction, metadata, forecast_file, output_file, created_at=created_at)
+    result = save_prediction_archive_record(record, archive_root)
+    if result["saved"]:
+        saved.append(result["record"])
+    else:
+        skipped_duplicates.append(result["duplicate"])
     return {"saved": saved, "skipped_duplicates": skipped_duplicates}
 
 
@@ -272,11 +309,22 @@ def load_prediction_archive_detail(
     record = load_archive_record(archive_root, archive_id)
     actual_df = load_actual_prices_for_date(record["forecast_date"], history_dir, model_root, holiday_file)
     rows, metrics = compare_archive_with_actual(record, actual_df)
+    comparison_details: dict[str, Any] = {}
+    comparisons = record.get("comparison_predictions") if isinstance(record.get("comparison_predictions"), dict) else {}
+    for key, variant in comparisons.items():
+        variant_record = {**record, **variant, "rows": variant.get("rows") or []}
+        variant_rows, variant_metrics = compare_archive_with_actual(variant_record, actual_df)
+        comparison_details[key] = {
+            **variant,
+            "rows": variant_rows,
+            "metrics": variant_metrics,
+        }
     actual_available = not actual_df.empty and metrics is not None
     return {
         "record": record,
         "rows": rows,
         "metrics": metrics,
+        "comparison_predictions": comparison_details,
         "actual_available": bool(actual_available),
         "message": None if actual_available else "暂无实际价格数据",
     }

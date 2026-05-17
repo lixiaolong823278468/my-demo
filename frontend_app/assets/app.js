@@ -46,13 +46,16 @@ const defaultSegmentRows = [
   { name: "late_night", start_time: "20:00", end_time: "24:00" },
 ];
 const segmentDraftStorageKey = "dayahead_segment_drafts_by_count";
+const segmentSearchCountsStorageKey = "dayahead_segment_search_counts";
+const priceIntervalMin = 0;
+const priceIntervalMax = 1500;
 const defaultPriceIntervals = [
-  { label: "<250", min: null, max: 250 },
+  { label: "0-250", min: 0, max: 250 },
   { label: "250-300", min: 250, max: 300 },
   { label: "300-400", min: 300, max: 400 },
   { label: "400-600", min: 400, max: 600 },
   { label: "600-1000", min: 600, max: 1000 },
-  { label: ">1000", min: 1000, max: null },
+  { label: "1000-1500", min: 1000, max: 1500 },
 ];
 
 const columnTitleMap = {
@@ -62,23 +65,24 @@ const columnTitleMap = {
   hour: "小时",
   net_load: "火电空间",
   thermal_on_capacity: "火电开机容量(MW)",
-  similar_price: "多条件相似参考",
-  net_load_only_similar_price: "仅火电空间相似参考",
-  residual_pred: "模型与相似法差值",
-  model_similarity_diff: "模型与相似法差值",
-  predicted_price: "最终预测价格",
+  net_load_only_similar_price: "净负荷相似法预测价格",
+  knn_similar_price: "KNN相似法预测价格",
+  weighted_knn_regression_price: "加权KNN回归预测价格",
+  residual_pred: "模型差值（模型预测-净负荷相似法）",
+  model_similarity_diff: "模型差值（模型预测-净负荷相似法）",
+  predicted_price: "模型预测价格",
   predicted_interval: "最可能价格区间",
-  predicted_interval_probability: "区间概率",
+  predicted_interval_probability: "价格区间概率",
   high_price_probability: "高价概率",
   interval_backtest_accuracy: "区间历史命中率",
   price_interval_consistency: "一致性提示",
-  recent_n_days_similar_price: "最近 N 天多条件相似参考",
-  recent_n_days_net_load_only_similar_price: "最近 N 天仅火电空间参考",
-  recent_n_days_residual_pred: "最近 N 天模型与相似法差值",
+  recent_n_days_net_load_only_similar_price: "最近 N 天净负荷相似法预测价格",
+  recent_n_days_knn_similar_price: "最近 N 天KNN相似法预测价格",
+  recent_n_days_weighted_knn_regression_price: "最近 N 天加权KNN回归预测价格",
   recent_n_days_predicted_price: "最近 N 天模型预测价格",
-  recent_same_type_days_similar_price: "同类型日多条件相似参考",
-  recent_same_type_days_net_load_only_similar_price: "同类型日仅火电空间参考",
-  recent_same_type_days_residual_pred: "同类型日模型与相似法差值",
+  recent_same_type_days_net_load_only_similar_price: "同类型日净负荷相似法预测价格",
+  recent_same_type_days_knn_similar_price: "同类型日KNN相似法预测价格",
+  recent_same_type_days_weighted_knn_regression_price: "同类型日加权KNN回归预测价格",
   recent_same_type_days_predicted_price: "同类型日模型预测价格",
   prediction_price_diff: "两策略价差",
 };
@@ -103,17 +107,15 @@ const predictionSeriesNameMap = {
 const predictionChartConfigMap = {
   recent_n_days: {
     elementId: "prediction-chart-recent-n-days",
-    predictedName: "最终预测价格",
-    similarName: "多条件相似基线",
-    netLoadOnlyName: "仅净负荷相似基线",
-    residualName: "最近 N 天模型与相似法差值",
+    predictedName: "模型预测价格",
+    netLoadOnlyName: "净负荷相似法预测价格",
+    showDiff: false,
   },
   recent_same_type_days: {
     elementId: "prediction-chart-same-type-days",
-    predictedName: "最终预测价格",
-    similarName: "多条件相似基线",
-    netLoadOnlyName: "仅净负荷相似基线",
-    residualName: "同类型日模型与相似法差值",
+    predictedName: "模型预测价格",
+    netLoadOnlyName: "净负荷相似法预测价格",
+    showDiff: false,
   },
 };
 const predictionChartLayoutStorageKey = "dayahead-prediction-chart-layout";
@@ -121,10 +123,20 @@ const predictionChartLayoutStorageKey = "dayahead-prediction-chart-layout";
 const helpContentUrl = "/assets/help-content.json";
 
 const modelRankingHelpContent = {
+  最近天数: {
+    title: "最近天数",
+    body: "最近 N 天参考曲线使用预测日前连续最近多少天的数据。它只影响相似法参考曲线，不改变具体价格模型或价格区间概率模型的预测结果。",
+    tips: ["数值小更贴近近期波动", "与同类型日个数独立设置", "用于对照模型预测，不参与模型版本选择"],
+  },
+  同类型日个数: {
+    title: "同类型日个数",
+    body: "同类型日参考曲线使用预测日前最近多少个同类型日期，例如工作日、周末或节假日。它和最近天数不是同一个参数。",
+    tips: ["节假日或周末差异明显时可适当调大", "只影响同类型日参考曲线", "不会改变模型训练或模型预测"],
+  },
   segmentModelSelection: {
-    title: "分时段模型选择",
-    body: "每个时段都可以单独指定预测时使用哪个候选模型。默认来自训练时验证集表现，也可以在这里按指标重新排序后保存。",
-    tips: ["保存后立即影响下一次预测", "只改变模型选择，不会重新训练模型"],
+    title: "当前版本内分时段算法选择",
+    body: "每个时段都可以在当前默认模型版本内部单独指定预测时使用哪个候选算法变体。默认来自训练时验证集表现，也可以在这里按指标重新排序后保存。",
+    tips: ["保存后立即影响下一次预测", "只改变当前版本内部的时段算法选择，不会切换历史模型版本"],
   },
   rankMetric: {
     title: "排序指标",
@@ -135,6 +147,39 @@ const modelRankingHelpContent = {
     title: "MAE(价格范围)",
     body: "只统计实际日前价格落在指定区间内的验证样本，再计算 MAE。这样可以暂时排除极低或极高价格对排序的影响。",
     tips: ["区间按实际价格筛选，包含边界", "价格上下限在预测页临时输入，不需要重新训练"],
+  },
+};
+
+const predictionSimilarityHelpContent = {
+  预测模型版本: {
+    title: "预测模型版本",
+    body: "选择本次执行预测时使用哪个模型版本。留空表示使用当前默认模型版本；选择历史版本只影响本次预测，不会切换默认模型。",
+    tips: ["方便对比不同模型版本", "不会改变模型训练结果"],
+  },
+  净负荷相似法: {
+    title: "净负荷相似法",
+    body: "只用净负荷/火电空间这个核心条件，在历史数据里找最接近的点，再按距离加权得到参考价格。",
+    tips: ["区别：它只看一个核心条件，KNN/加权KNN会同时看多个因素", "逻辑最简单，适合作为基础参考线", "只影响参考曲线，不改变模型预测"],
+  },
+  KNN相似法: {
+    title: "KNN相似法",
+    body: "同时参考净负荷、总负荷、新能源、火电开机、供需比例、时段和日期类型等因素，找出整体最相似的历史点，然后对保留下来的价格做普通平均。历史候选范围共用左侧净负荷相似法里的最近天数/同类型日个数。",
+    tips: ["最大距离阈值不是 net_load 原始差值，而是多因素标准化后的综合距离", "区别：KNN相似法对保留点普通平均，每个保留点影响一样", "K 越大参考点越多，最大距离阈值越小过滤越严格"],
+  },
+  加权KNN回归: {
+    title: "加权KNN回归",
+    body: "和 KNN 相似法使用相同类型的多因素相似度，但最后不是普通平均，而是让越相似的历史点权重越大，离得远的点影响越小。历史候选范围共用左侧净负荷相似法里的最近天数/同类型日个数。",
+    tips: ["最大距离阈值不是 net_load 原始差值，而是多因素标准化后的综合距离", "区别：加权KNN更偏向最像的历史点，不太让较远点拉偏结果", "适合相似点质量差异比较明显时参考"],
+  },
+  "相似点数量 K": {
+    title: "相似点数量 K",
+    body: "最多先取多少个最相似的历史点作为候选。最终还会经过最大距离阈值过滤，太远的点不会强行参与计算。",
+    tips: ["K 小更敏感", "K 大更平滑", "常用 3~10"],
+  },
+  最大距离阈值: {
+    title: "最大距离阈值",
+    body: "控制多因素相似点最多允许有多远。它不是 net_load 的原始差距，而是把净负荷、总负荷、新能源、火电开机、供需比例、时段、日期类型等因素综合后算出来的标准化距离。简单说：不是单看火电空间差多少，而是看整体场景像不像。",
+    tips: ["太小可能可用点少", "太大可能混入不像的历史场景", "默认 3.0 较稳妥"],
   },
 };
 
@@ -184,7 +229,7 @@ let helpContentMap = {
   },
   "每个模型最大训练轮数": {
     title: "每个模型最大训练轮数",
-    body: "训练使用天数寻优或手动训练时，每个时段、每种算法最多训练多少轮。XGBoost、LightGBM、CatBoost 都会使用这个上限；如果验证误差长期不再变好，会提前停止。",
+    body: "自动寻优或手动训练时，每个时段、每种算法最多训练多少轮。XGBoost、LightGBM、CatBoost 都会使用这个上限；如果验证误差长期不再变好，会提前停止。",
     tips: ["数据量较小时不用过大", "训练慢时先降低轮数", "默认值偏稳妥"],
   },
   局部细搜半径: {
@@ -272,50 +317,25 @@ let helpContentMap = {
     body: "手动训练时，每个时段、每种算法最多训练多少轮。轮数越多上限越高、耗时可能越长，但模型会根据验证集表现提前停止。",
     tips: ["训练变慢可降低", "效果不稳定可配合验证集观察"],
   },
-  参考天数: {
-    title: "参考天数",
-    body: "预测时相似法参考曲线使用最近多少天或多少个同类型日。",
+  相似法参考: {
+    title: "相似法参考",
+    body: "预测页的最近天数和同类型日个数是两套独立参数，只影响相似法参考曲线，不影响模型预测本身。",
     tips: ["数值小更贴近近期", "数值大更平滑稳定"],
   },
-  火电空间权重: {
-    title: "火电空间权重",
-    body: "相似日匹配时，火电空间相似程度占多大权重。",
-    tips: ["越大越强调供需剩余空间", "只影响参考曲线展示"],
-  },
-  新能源权重: {
-    title: "新能源权重",
-    body: "相似日匹配时，新能源出力相似程度占多大权重。",
-    tips: ["新能源波动明显时可提高", "只影响参考曲线展示"],
-  },
-  火电容量权重: {
-    title: "火电容量权重",
-    body: "相似日匹配时，火电开机容量相似程度占多大权重。",
-    tips: ["机组开停变化大时可提高", "只影响参考曲线展示"],
-  },
-  日期类型权重: {
-    title: "日期类型权重",
-    body: "相似日匹配时，工作日、周末、节假日等日期类型占多大权重。",
-    tips: ["节假日影响明显时可提高", "只影响参考曲线展示"],
-  },
-  供需比权重: {
-    title: "供需比权重",
-    body: "相似日匹配时，供需比例相似程度占多大权重。",
-    tips: ["供需紧张度影响价格时可提高", "只影响参考曲线展示"],
-  },
-  历史模型下拉列表: {
-    title: "历史模型下拉列表",
-    body: "选择已经训练完成的历史模型版本，用于设为默认、回退或删除。",
-    tips: ["默认模型会用于后续预测", "删除前建议确认不是常用版本"],
+  历史模型版本下拉列表: {
+    title: "历史模型版本下拉列表",
+    body: "选择已经训练完成的历史模型版本，用于设为默认模型版本、回退或删除。",
+    tips: ["默认模型版本会用于后续预测", "删除前建议确认不是常用版本"],
   },
   排序方式: {
     title: "排序方式",
     body: "控制历史模型列表的排列顺序，便于按时间或误差快速筛选。",
     tips: ["MAE/RMSE 越小通常越好", "也要结合训练日期和样本范围判断"],
   },
-  当前默认模型分时段指标: {
-    title: "当前默认模型分时段指标",
-    body: "按不同时段展示当前默认模型在验证集上的表现，帮助判断模型在哪些时段更准或更弱。",
-    tips: ["重点关注晚高峰和高价时段", "和相似法参考对比更直观"],
+  当前默认模型版本分时段指标: {
+    title: "当前默认模型版本分时段指标",
+    body: "按不同时段展示当前默认模型版本在验证集上的表现，帮助判断模型在哪些时段更准或更弱。",
+    tips: ["重点关注晚高峰和高价时段", "和净负荷相似法对比更直观"],
   },
   模型算法对比: {
     title: "模型算法对比",
@@ -342,14 +362,14 @@ let helpContentMap = {
     body: "把一天按价格或业务规律拆成多个时段，分别统计模型表现。",
     tips: ["不同时段误差差异可能很大"],
   },
-  "相似法参考 MAE": {
-    title: "相似法参考 MAE",
-    body: "相似法参考价格的平均绝对误差，用作模型效果的基准线。",
-    tips: ["模型 MAE 小于它，说明模型优于相似法"],
+  "净负荷相似法 MAE": {
+    title: "净负荷相似法 MAE",
+    body: "只按净负荷寻找历史相似点得到的参考价格 MAE，用作模型效果的基准线。",
+    tips: ["模型 MAE 小于它，说明模型优于净负荷相似法"],
   },
-  "相似法参考 RMSE": {
-    title: "相似法参考 RMSE",
-    body: "相似法参考价格的均方根误差，对大误差更敏感。",
+  "净负荷相似法 RMSE": {
+    title: "净负荷相似法 RMSE",
+    body: "只按净负荷寻找历史相似点得到的参考价格 RMSE，对大误差更敏感。",
     tips: ["RMSE 越大，说明存在更明显的大偏差"],
   },
   "模型 MAE": {
@@ -397,24 +417,14 @@ let helpContentMap = {
     body: "滚动回测统计的时间范围，例如最近 14 天或 30 天。",
     tips: ["短窗口看近期", "长窗口看稳定性"],
   },
-  "多条件相似法 MAE": {
-    title: "多条件相似法 MAE",
-    body: "综合多个特征寻找相似日后得到的参考价格误差。",
-    tips: ["用于和模型预测进行横向比较"],
+  "净负荷相似法 MAE": {
+    title: "净负荷相似法 MAE",
+    body: "只按净负荷寻找历史相似点得到的参考价格误差。",
+    tips: ["用于判断净负荷单因素的参考价值"],
   },
-  较多条件提升: {
-    title: "较多条件提升",
-    body: "模型相对多条件相似法减少了多少 MAE。正数越大表示模型提升越明显。",
-    tips: ["为负数时说明模型不如该参考法"],
-  },
-  "仅火电空间相似法 MAE": {
-    title: "仅火电空间相似法 MAE",
-    body: "只按火电空间寻找相似日得到的参考价格误差。",
-    tips: ["用于判断火电空间单因素的参考价值"],
-  },
-  较火电空间提升: {
-    title: "较火电空间提升",
-    body: "模型相对仅火电空间相似法减少了多少 MAE。正数表示模型更好。",
+  较净负荷相似法提升: {
+    title: "较净负荷相似法提升",
+    body: "模型相对净负荷相似法减少了多少 MAE。正数表示模型更好。",
     tips: ["可判断模型是否超过简单基线"],
   },
   方向准确率: {
@@ -478,11 +488,11 @@ const pageMetaMap = {
   },
   predict: {
     title: "日前电价预测",
-    subtitle: "输入参考天数后执行预测，同时对比最近天和同类型日两条 96 点价格曲线。",
+    subtitle: "分别设置最近天数和同类型日个数后执行预测，同时对比两条 96 点相似法参考曲线。",
   },
   versions: {
     title: "模型版本管理",
-    subtitle: "管理历史模型版本，支持默认切换与快速回退。",
+    subtitle: "管理历史模型版本，支持默认模型版本切换与快速回退。",
   },
   logs: {
     title: "训练日志复盘",
@@ -552,7 +562,7 @@ async function loadHelpContent() {
     helpContentMap = {};
     console.warn("参数说明文档加载失败，暂不显示问号说明：", error);
   }
-  helpContentMap = { ...helpContentMap, ...modelRankingHelpContent, ...archiveMetricHelpContent };
+  helpContentMap = { ...helpContentMap, ...modelRankingHelpContent, ...predictionSimilarityHelpContent, ...archiveMetricHelpContent };
 }
 
 function normalizeHelpLabel(value) {
@@ -727,7 +737,7 @@ function renderTopStatus(statusData) {
       ? `寻优上限：最近 ${windowState.max_search_history_days} 天`
       : `寻优上限：最近 ${currentWindowOptimizationMaxHistoryDays()} 天`,
   );
-  items.push(windowState.final_model?.run_id ? `默认模型已更新：${windowState.final_model.run_id}` : "默认模型更新：待执行");
+  items.push(windowState.final_model?.run_id ? `默认模型版本已更新：${windowState.final_model.run_id}` : "默认模型版本更新：待执行");
   $("#top-status").innerHTML = items
     .map((item) => `<div class="status-chip"><span class="status-chip-dot"></span>${htmlEscape(item)}</div>`)
     .join("");
@@ -868,7 +878,7 @@ function renderModelCandidateRankings(data = App.modelCandidateRankings || {}) {
   const metric = data.metric || $("#model-rank-metric")?.value || "default_score";
   if (meta) {
     const rangeText = metric === "mae_range" ? `，实际价格 ${data.price_min ?? "-∞"}~${data.price_max ?? "+∞"}` : "";
-    meta.textContent = `${modelRankMetricLabelMap[metric] || metric}${rangeText}；每行可选择该时段预测用的模型`;
+    meta.textContent = `${modelRankMetricLabelMap[metric] || metric}${rangeText}；每行可选择该时段预测用的算法变体`;
   }
   if (!segments.length) {
     table.innerHTML = `<tbody><tr><td>${htmlEscape(data.message || "暂无候选模型验证明细，请重新训练模型后查看。")}</td></tr></tbody>`;
@@ -882,7 +892,7 @@ function renderModelCandidateRankings(data = App.modelCandidateRankings || {}) {
         <th>排序前三</th>
         <th>${htmlEscape(modelRankMetricLabelMap[metric] || metric)}</th>
         <th>样本数</th>
-        <th>切换模型</th>
+        <th>切换算法</th>
       </tr>
     </thead>
     <tbody>
@@ -923,7 +933,7 @@ async function saveSegmentModelSelection() {
     method: "POST",
     body: JSON.stringify(payload),
   });
-  showToast(result.message || "分时段模型选择已保存");
+  showToast(result.message || "分时段算法选择已保存");
   await refreshSummary();
   await loadModelCandidateRankings();
 }
@@ -939,9 +949,8 @@ function setArchiveReviewDate(dateText) {
 
 function formatArchiveRecordLabel(record) {
   const created = record.created_at ? String(record.created_at).replace("T", " ") : "-";
-  const strategy = record.reference_strategy_label || record.reference_strategy_key || "-";
   const segmentText = record.segment_count ? `${record.segment_count}段` : "-";
-  return `${created}｜${strategy}｜${segmentText}｜${record.model_run_id || "-"}`;
+  return `${created}｜${segmentText}｜${record.model_run_id || "-"}`;
 }
 
 async function loadPredictionArchiveRecords(dateText = archiveReviewDateValue()) {
@@ -1057,16 +1066,17 @@ function renderArchiveDetails(record = {}) {
   const segmentModelText = Object.entries(segmentModels)
     .map(([segment, model]) => `${segment}: ${model}`)
     .join("<br/>") || "-";
-  const weights = record.similarity_weights || {};
-  const weightsText = Object.entries(weights)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join("<br/>") || "-";
+  const referenceDaysByStrategy = record.reference_days_by_strategy || {};
+  const recentDays = referenceDaysByStrategy.recent_n_days || record.reference_days_requested || "-";
+  const sameTypeDays = referenceDaysByStrategy.recent_same_type_days || "-";
+  const referenceText = record.reference_strategy_key === "comparison" || record.comparison_predictions
+    ? `最近天数：${recentDays}天<br/>同类型日个数：${sameTypeDays}个`
+    : `${record.reference_strategy_label || record.reference_strategy_key || "-"} / ${record.reference_days_requested || "-"}天`;
   const items = [
     ["模型版本", record.model_run_id || "-"],
-    ["预测策略", `${record.reference_strategy_label || record.reference_strategy_key || "-"} / ${record.reference_days_requested || "-"}天`],
+    ["相似法参考", referenceText],
     ["时段结构", `${record.segment_count || "-"} 段`],
     ["每段使用模型", segmentModelText],
-    ["相似法权重", weightsText],
     ["预测文件", record.forecast_file || "-"],
     ["输出文件", record.output_file || "-"],
     ["保存时间", record.created_at || "-"],
@@ -1084,8 +1094,11 @@ function renderPredictionArchiveDetail(data, fallbackMessage = "暂无预测留�
   renderArchiveMetrics(data?.metrics, data?.message || fallbackMessage);
   renderArchiveDetails(record);
   if (meta) {
+    const archiveReferenceLabel = record.reference_strategy_key === "comparison" || record.comparison_predictions
+      ? "双参考口径"
+      : record.reference_strategy_label || record.reference_strategy_key || "-";
     meta.textContent = record.archive_id
-      ? `${record.forecast_date || "-"}｜${record.reference_strategy_label || record.reference_strategy_key || "-"}｜${data?.message || "已匹配实际价格"}`
+      ? `${record.forecast_date || "-"}｜${archiveReferenceLabel}｜${data?.message || "已匹配实际价格"}`
       : fallbackMessage;
   }
   if (!chart) return;
@@ -1093,24 +1106,98 @@ function renderPredictionArchiveDetail(data, fallbackMessage = "暂无预测留�
     chart.setOption({ title: { text: fallbackMessage, left: "center", top: "middle", textStyle: { color: "#667085", fontSize: 14 } } }, true);
     return;
   }
-  const periods = rows.map((row) => row.period);
-  const predicted = rows.map((row) => archiveSeriesValue(row, "predicted_price"));
-  const actual = rows.map((row) => archiveSeriesValue(row, "actual_price"));
-  const netLoadOnly = rows.map((row) => archiveSeriesValue(row, "net_load_only_similar_price"));
+  const comparisonEntries = referenceStrategyOrder
+    .map((strategyKey) => [strategyKey, data?.comparison_predictions?.[strategyKey]])
+    .filter(([, variant]) => variant?.rows?.length);
+  const baseRows = comparisonEntries[0]?.[1]?.rows || rows;
+  const periods = baseRows.map((row) => row.period);
+  const actual = baseRows.map((row) => archiveSeriesValue(row, "actual_price"));
+  const legendData = [];
+  const series = [];
+  const appendArchiveSeries = (name, targetRows, column, lineStyle = {}) => {
+    const dataPoints = targetRows.map((row) => archiveSeriesValue(row, column));
+    if (!dataPoints.some((value) => value !== null)) return;
+    legendData.push(name);
+    series.push({
+      name,
+      type: "line",
+      smooth: true,
+      showSymbol: false,
+      data: dataPoints,
+      lineStyle: { width: 2, ...lineStyle },
+    });
+  };
+  if (comparisonEntries.length) {
+    comparisonEntries.forEach(([strategyKey, variant]) => {
+      const referenceDays = predictionReferenceDaysForStrategy(strategyKey, variant);
+      const strategyLabel = formatReferenceStrategyLabel(strategyKey, variant.reference_strategy_label || referenceStrategyLabelMap[strategyKey], referenceDays);
+      legendData.push(`${strategyLabel}模型预测`, `${strategyLabel}相似参考`);
+      series.push(
+        {
+          name: `${strategyLabel}模型预测`,
+          type: "line",
+          smooth: true,
+          showSymbol: false,
+          data: variant.rows.map((row) => archiveSeriesValue(row, "predicted_price")),
+          lineStyle: { width: 3 },
+        },
+        {
+          name: `${strategyLabel}相似参考`,
+          type: "line",
+          smooth: true,
+          showSymbol: false,
+          data: variant.rows.map((row) => archiveSeriesValue(row, "net_load_only_similar_price")),
+          lineStyle: { width: 2, type: "dashed" },
+        },
+      );
+    });
+  } else {
+    legendData.push("模型预测价格");
+    series.push(
+      { name: "模型预测价格", type: "line", smooth: true, showSymbol: false, data: rows.map((row) => archiveSeriesValue(row, "predicted_price")), lineStyle: { width: 3 } },
+    );
+    appendArchiveSeries("净负荷相似法预测价格", rows, "net_load_only_similar_price", { type: "dashed" });
+    appendArchiveSeries("KNN相似法预测价格", rows, "knn_similar_price", { type: "dotted" });
+    appendArchiveSeries("加权KNN回归预测价格", rows, "weighted_knn_regression_price", { type: "dashed" });
+  }
+  if (comparisonEntries.length) {
+    const selectedKey = record.selected_strategy_key || "recent_n_days";
+    const selectedVariant = data?.comparison_predictions?.[selectedKey]?.rows?.length
+      ? data.comparison_predictions[selectedKey]
+      : comparisonEntries[0][1];
+    legendData.length = 0;
+    series.length = 0;
+    legendData.push("模型预测");
+    series.push({
+      name: "模型预测",
+      type: "line",
+      smooth: true,
+      showSymbol: false,
+      data: selectedVariant.rows.map((row) => archiveSeriesValue(row, "predicted_price")),
+      lineStyle: { width: 3 },
+    });
+    comparisonEntries.forEach(([strategyKey, variant]) => {
+      const referenceDays = predictionReferenceDaysForStrategy(strategyKey, variant);
+      const strategyLabel = formatReferenceStrategyLabel(strategyKey, variant.reference_strategy_label || referenceStrategyLabelMap[strategyKey], referenceDays);
+      appendArchiveSeries(`${strategyLabel}净负荷相似法`, variant.rows, "net_load_only_similar_price", { type: "dashed" });
+      appendArchiveSeries(`${strategyLabel}KNN相似法`, variant.rows, "knn_similar_price", { type: "dotted" });
+      appendArchiveSeries(`${strategyLabel}加权KNN回归`, variant.rows, "weighted_knn_regression_price", { type: "dashed" });
+    });
+  }
+  if (actual.some((value) => value !== null)) {
+    legendData.splice(1, 0, "实际日前价格");
+    series.splice(1, 0, { name: "实际日前价格", type: "line", smooth: true, showSymbol: false, data: actual, lineStyle: { width: 3 } });
+  }
   chart.setOption(
     {
       backgroundColor: "transparent",
-      color: ["#1677ff", "#ff4d4f", "#52c41a"],
+      color: ["#1677ff", "#ff4d4f", "#52c41a", "#13c2c2", "#722ed1", "#fa8c16", "#2f54eb", "#a0d911", "#eb2f96"],
       tooltip: { trigger: "axis", confine: true },
-      legend: { top: 8, data: ["最终预测价格", "实际日前价格", "仅净负荷相似基线"] },
+      legend: { top: 8, data: legendData },
       grid: { left: 56, right: 28, top: 52, bottom: 42 },
       xAxis: { type: "category", boundaryGap: false, data: periods },
       yAxis: { type: "value", name: "元/MWh", scale: true },
-      series: [
-        { name: "最终预测价格", type: "line", smooth: true, showSymbol: false, data: predicted, lineStyle: { width: 3 } },
-        { name: "实际日前价格", type: "line", smooth: true, showSymbol: false, data: actual, lineStyle: { width: 3 } },
-        { name: "仅净负荷相似基线", type: "line", smooth: true, showSymbol: false, data: netLoadOnly, lineStyle: { width: 2, type: "dashed" } },
-      ],
+      series,
     },
     true,
   );
@@ -1122,25 +1209,21 @@ function renderRollingBacktest(metadata = {}) {
   const backtests = metadata.rolling_backtest_metrics || {};
   const rows = Object.entries(backtests);
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="12">暂无滚动回测数据</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10">暂无滚动回测数据</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
     .map(([days, row]) => {
       const overall = row.overall || {};
-      const baseline = row.baseline || {};
       const netLoadOnlyBaseline = row.net_load_only_baseline || {};
       const high = row.spike_errors?.high || {};
       const evening = row.segments?.evening_peak || {};
-      const compare = row.model_vs_similarity || {};
       const netLoadOnlyCompare = row.model_vs_net_load_only_similarity || {};
       return `
         <tr>
           <td>最近 ${htmlEscape(days)} 天</td>
           <td>${formatMetricCell(overall.mae)}</td>
           <td>${formatMetricCell(overall.rmse)}</td>
-          <td>${formatMetricCell(baseline.mae)}</td>
-          <td>${formatMetricCell(compare.mae_improvement)}</td>
           <td>${formatMetricCell(netLoadOnlyBaseline.mae)}</td>
           <td>${formatMetricCell(netLoadOnlyCompare.mae_improvement)}</td>
           <td>${formatPercentCell(overall.direction_accuracy)}</td>
@@ -1177,9 +1260,7 @@ function renderModelHealth(metadata = {}) {
   const overall30 = backtest30.overall || {};
   const high30 = backtest30.spike_errors?.high || backtest14.spike_errors?.high || {};
   const evening30 = backtest30.segments?.evening_peak || backtest14.segments?.evening_peak || {};
-  const compare30 = backtest30.model_vs_similarity || backtest14.model_vs_similarity || {};
   const netLoadOnlyCompare30 = backtest30.model_vs_net_load_only_similarity || backtest14.model_vs_net_load_only_similarity || {};
-  const similarityImprovement = Number(compare30.mae_improvement);
   const netLoadOnlyImprovement = Number(netLoadOnlyCompare30.mae_improvement);
   const rows = [
     ["最近14天整体", overall14.mae, "平均每个点差多少钱", healthText(overall14.mae, 35, 55)],
@@ -1187,8 +1268,7 @@ function renderModelHealth(metadata = {}) {
     ["高价尖峰", high30.mae, "价格冲高时能不能跟上", healthText(high30.mae, 80, 150)],
     ["晚高峰", evening30.mae, "最容易影响交易判断的时段", healthText(evening30.mae, 50, 80)],
     ["方向判断", overall30.direction_accuracy ?? overall14.direction_accuracy, "上涨/下跌方向是否判断对", healthText(overall30.direction_accuracy ?? overall14.direction_accuracy, 65, 55, false)],
-    ["相似法对比", compare30.mae_improvement, "正数表示模型比相似法平均误差更小", Number.isFinite(similarityImprovement) ? (similarityImprovement > 0 ? "模型更好" : "相似法更好或持平") : "暂无数据"],
-    ["仅火电空间相似法对比", netLoadOnlyCompare30.mae_improvement, "正数表示模型比仅火电空间相似法平均误差更小", Number.isFinite(netLoadOnlyImprovement) ? (netLoadOnlyImprovement > 0 ? "模型更好" : "仅火电空间相似法更好或持平") : "暂无数据"],
+    ["净负荷相似法对比", netLoadOnlyCompare30.mae_improvement, "正数表示模型比净负荷相似法平均误差更小", Number.isFinite(netLoadOnlyImprovement) ? (netLoadOnlyImprovement > 0 ? "模型更好" : "净负荷相似法更好或持平") : "暂无数据"],
   ];
   tbody.innerHTML = rows
     .map(
@@ -1312,7 +1392,6 @@ function sortVersionsForDisplay(versions) {
     rolling_30_mae_asc: "rolling_30_mae",
     rolling_30_high_price_mae_asc: "rolling_30_high_price_mae",
     rolling_30_evening_peak_mae_asc: "rolling_30_evening_peak_mae",
-    rolling_30_multi_similarity_mae_asc: "rolling_30_multi_similarity_mae",
     rolling_30_thermal_space_similarity_mae_asc: "rolling_30_thermal_space_similarity_mae",
   };
 
@@ -1373,12 +1452,30 @@ function renderVersionAlgorithmCell(variant) {
   `;
 }
 
+function renderPredictionModelSelect(versions) {
+  const select = $("#predict-model-version");
+  if (!select) return;
+  const currentValue = select.value || "";
+  const options = (versions || []).map((item) => {
+    const tags = [];
+    if (item.is_default) tags.push("默认");
+    if (item.segment_count) tags.push(`${item.segment_count}段`);
+    const label = `${item.version_key}${tags.length ? `（${tags.join(" / ")}）` : ""}`;
+    return `<option value="${htmlEscape(item.version_key)}">${htmlEscape(label)}</option>`;
+  });
+  select.innerHTML = `<option value="">默认启用模型</option>${options.join("")}`;
+  if ([...select.options].some((option) => option.value === currentValue)) {
+    select.value = currentValue;
+  }
+}
+
 function renderVersions(versions) {
   const selectedKeys = new Set(selectedVersionKeys());
   const currentVersionKey = $("#version-select")?.value || "";
   const displayVersions = sortVersionsForDisplay(versions);
   App.versions = displayVersions;
   setVersionSort(currentVersionSort());
+  renderPredictionModelSelect(displayVersions);
   $("#version-select").innerHTML = displayVersions.length
     ? displayVersions.map((item) => `<option value="${htmlEscape(item.version_key)}">${htmlEscape(item.label || item.version_key)}</option>`).join("")
     : `<option value="">暂无历史模型</option>`;
@@ -1388,7 +1485,7 @@ function renderVersions(versions) {
 
   const tbody = $("#versions-table tbody");
   if (!displayVersions.length) {
-    tbody.innerHTML = `<tr><td colspan="30">暂无历史模型版本</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="26">暂无历史模型版本</td></tr>`;
     syncSelectAllVersionsState();
     return;
   }
@@ -1418,16 +1515,12 @@ function renderVersions(versions) {
             <td>${formatMetricCell(variant.final_rmse)}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_14_mae) : "-"}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_14_rmse) : "-"}</td>
-            <td>${variant.is_selected ? formatMetricCell(item.rolling_14_multi_similarity_mae) : "-"}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_14_thermal_space_similarity_mae) : "-"}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_30_mae) : "-"}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_30_rmse) : "-"}</td>
-            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_multi_similarity_mae) : "-"}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_30_thermal_space_similarity_mae) : "-"}</td>
-            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_multi_similarity_improvement) : "-"}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_30_thermal_space_similarity_improvement) : "-"}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_30_high_price_mae) : "-"}</td>
-            <td>${variant.is_selected ? formatMetricCell(item.rolling_30_high_price_multi_similarity_mae) : "-"}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_30_high_price_thermal_space_similarity_mae) : "-"}</td>
             <td>${variant.is_selected ? formatMetricCell(item.rolling_30_evening_peak_mae) : "-"}</td>
             <td>${formatPercentCell(variant.direction_accuracy)}</td>
@@ -1688,19 +1781,75 @@ function orderedPredictionComparisons(prediction) {
   return orderedKeys.map((key) => [key, comparisons[key]]).filter(([, item]) => item?.rows?.length);
 }
 
-function currentReferenceDays() {
-  const value = Number($("#reference-days")?.value || App.config?.default_reference_days || 1);
+function clampReferenceDays(value, fallback = 1) {
   const maxValue = Number(App.config?.max_reference_days || 100);
-  return Number.isFinite(value) && value >= 1 ? Math.min(value, maxValue) : 1;
+  return Number.isFinite(value) && value >= 1 ? Math.min(Math.round(value), maxValue) : fallback;
+}
+
+function currentRecentReferenceDays() {
+  const value = Number($("#recent-reference-days")?.value || App.config?.default_recent_reference_days || App.config?.default_reference_days || 1);
+  return clampReferenceDays(value, 1);
+}
+
+function currentSameTypeReferenceDays() {
+  const value = Number($("#same-type-reference-days")?.value || App.config?.default_same_type_reference_days || App.config?.default_reference_days || 1);
+  return clampReferenceDays(value, 1);
+}
+
+function currentReferenceDays() {
+  return Math.max(currentRecentReferenceDays(), currentSameTypeReferenceDays());
+}
+
+function predictionReferenceDaysForStrategy(strategyKey, variant = null) {
+  const requested = Number(variant?.reference_days_requested);
+  if (Number.isFinite(requested) && requested >= 1) return clampReferenceDays(requested, 1);
+  if (strategyKey === "recent_same_type_days") return currentSameTypeReferenceDays();
+  return currentRecentReferenceDays();
 }
 
 function currentTrainingMode() {
-  return $("#training-mode")?.value || App.config?.default_training_mode || "rolling_window";
+  return currentModelTrainingMode("price");
 }
 
-function currentTrainingWindowDays() {
-  const value = Number($("#training-window-days")?.value || App.config?.default_training_window_days || 60);
-  return Number.isFinite(value) && value >= 1 ? Math.round(value) : 60;
+function readPositiveInt(selector, fallback) {
+  const value = Number($(selector)?.value || fallback);
+  return Number.isFinite(value) && value >= 1 ? Math.round(value) : fallback;
+}
+
+function readPositiveNumber(selector, fallback) {
+  const value = Number($(selector)?.value || fallback);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function currentKnnSimilarityConfig() {
+  return {
+    knn_k: readPositiveInt("#knn-similar-k", App.config?.default_knn_similarity?.knn_k || 5),
+    knn_max_distance: readPositiveNumber("#knn-similar-max-distance", App.config?.default_knn_similarity?.knn_max_distance || 3.0),
+    weighted_knn_k: readPositiveInt("#weighted-knn-k", App.config?.default_knn_similarity?.weighted_knn_k || 5),
+    weighted_knn_max_distance: readPositiveNumber("#weighted-knn-max-distance", App.config?.default_knn_similarity?.weighted_knn_max_distance || 3.0),
+  };
+}
+
+function currentModelTrainingMode(prefix) {
+  return $(`#${prefix}-training-mode`)?.value || App.config?.default_training_mode || "rolling_window";
+}
+
+function currentTrainingWindowDays(prefix = "price") {
+  return readPositiveInt(`#${prefix}-training-window-days`, App.config?.default_training_window_days || 60);
+}
+
+function collectModelTrainingConfig(prefix) {
+  const trainingMode = currentModelTrainingMode(prefix);
+  return {
+    training_mode: trainingMode,
+    training_window_days: currentTrainingWindowDays(prefix),
+    start_date: $(`#${prefix}-train-start-date`)?.value || null,
+    end_date: $(`#${prefix}-train-end-date`)?.value || null,
+    enable_start: Boolean($(`#${prefix}-enable-start`)?.checked),
+    enable_end: Boolean($(`#${prefix}-enable-end`)?.checked),
+    valid_days: readPositiveInt(`#${prefix}-valid-days`, 14),
+    num_boost_round: readPositiveInt(`#${prefix}-num-boost-round`, 400),
+  };
 }
 
 function currentWindowOptimizationMaxHistoryDays() {
@@ -1713,8 +1862,26 @@ function currentWindowOptimizationMaxHistoryDays() {
 }
 
 function currentWindowOptimizationValidDays() {
-  const value = Number($("#window-optimization-valid-days")?.value || 14);
-  return Number.isFinite(value) && value >= 1 ? Math.round(value) : 14;
+  const value = Number($("#window-optimization-valid-days")?.value || App.config?.default_window_optimization_valid_days || 10);
+  return Number.isFinite(value) && value >= 1 ? Math.round(value) : 10;
+}
+
+function currentWindowOptimizationRollingHorizons() {
+  const rawValue = String(
+    $("#window-optimization-rolling-horizons")?.value
+      || (App.config?.default_window_optimization_rolling_backtest_horizons || [14]).join(",")
+      || "14",
+  );
+  const values = rawValue
+    .replace(/，/g, ",")
+    .split(",")
+    .map((item) => Number(item.trim()))
+    .filter((value) => Number.isInteger(value) && value >= 1 && value <= 365);
+  const uniqueValues = [...new Set(values)];
+  if (!uniqueValues.length) {
+    throw new Error("滚动回测天数至少填写一个有效正整数，例如 14 或 14,30");
+  }
+  return uniqueValues;
 }
 
 function currentWindowOptimizationNumBoostRound() {
@@ -1798,6 +1965,78 @@ function segmentRowsForCount(count) {
   return buildEvenSegmentRows(Number(count || 5));
 }
 
+function availableSegmentSearchCounts() {
+  const counts = new Set([3, 6]);
+  Object.keys(loadSegmentDrafts()).forEach((key) => {
+    const count = Number(key);
+    if (Number.isInteger(count) && count > 0) counts.add(count);
+  });
+  if (Array.isArray(App.segmentRows) && App.segmentRows.length) counts.add(App.segmentRows.length);
+  return [...counts].sort((a, b) => a - b);
+}
+
+function storedSegmentSearchCounts(options) {
+  const optionSet = new Set(options);
+  try {
+    const parsed = JSON.parse(localStorage.getItem(segmentSearchCountsStorageKey) || "null");
+    if (Array.isArray(parsed)) {
+      const counts = parsed.map(Number).filter((count) => optionSet.has(count));
+      if (counts.length) return counts;
+    }
+  } catch {
+    // ignore invalid localStorage
+  }
+  return [3, 6].filter((count) => optionSet.has(count));
+}
+
+function saveSegmentSearchCounts(counts) {
+  localStorage.setItem(segmentSearchCountsStorageKey, JSON.stringify(counts));
+}
+
+function renderSegmentSearchCounts() {
+  const container = $("#segment-search-counts");
+  if (!container) return;
+  const options = availableSegmentSearchCounts();
+  const selected = new Set(storedSegmentSearchCounts(options));
+  container.innerHTML = options
+    .map((count) => `
+      <label class="segment-search-chip">
+        <input type="checkbox" value="${count}" ${selected.has(count) ? "checked" : ""} />
+        <span>${count} 段</span>
+      </label>
+    `)
+    .join("");
+  container.querySelectorAll("input[type='checkbox']").forEach((input) => {
+    input.addEventListener("change", () => {
+      const counts = Array.from(container.querySelectorAll("input[type='checkbox']:checked")).map((item) => Number(item.value));
+      saveSegmentSearchCounts(counts);
+    });
+  });
+}
+
+function selectedSegmentSearchCounts() {
+  const checked = Array.from($$("#segment-search-counts input[type='checkbox']:checked")).map((item) => Number(item.value));
+  const counts = checked.filter((count) => Number.isInteger(count) && count > 0);
+  if (!counts.length) throw new Error("请至少选择一个参与寻优的时段数");
+  saveSegmentSearchCounts(counts);
+  return counts;
+}
+
+function collectSegmentSearchConfig() {
+  if (segmentMode() === "custom" && App.segmentRows.length) {
+    saveSegmentDraftForCount(App.segmentRows.length, App.segmentRows);
+  }
+  const counts = selectedSegmentSearchCounts();
+  return {
+    segment_search_enabled: true,
+    segment_search_counts: counts,
+    segment_search_configs: counts.map((count) => ({
+      segment_count: count,
+      segment_config: segmentRowsForCount(count),
+    })),
+  };
+}
+
 function segmentMode() {
   return $("#segment-mode")?.value || "default";
 }
@@ -1872,7 +2111,7 @@ function collectHighPriceWeighting() {
   };
 }
 
-function normalizePriceIntervalRows(rows) {
+function legacyNormalizePriceIntervalRows(rows) {
   const source = Array.isArray(rows) && rows.length >= 2 ? rows : defaultPriceIntervals;
   return source.map((row) => ({
     label: String(row.label || "").trim(),
@@ -1881,7 +2120,7 @@ function normalizePriceIntervalRows(rows) {
   }));
 }
 
-function renderPriceIntervalTable() {
+function legacyRenderPriceIntervalTable() {
   const body = $("#price-interval-table tbody");
   if (!body) return;
   body.innerHTML = App.priceIntervals
@@ -1901,7 +2140,7 @@ function renderPriceIntervalTable() {
   injectHelpAffordances(body);
 }
 
-function collectPriceIntervals() {
+function legacyCollectPriceIntervals() {
   const rows = App.priceIntervals.map((row) => ({ ...row }));
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
@@ -1925,6 +2164,122 @@ function collectPriceIntervals() {
   App.priceIntervals = rows;
   renderPriceIntervalTable();
   return rows;
+}
+
+function formatPriceBoundary(value) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return "";
+  return Number.isInteger(numberValue) ? String(numberValue) : String(Math.round(numberValue * 100) / 100);
+}
+
+function priceIntervalLabel(minValue, maxValue) {
+  return `${formatPriceBoundary(minValue)}-${formatPriceBoundary(maxValue)}`;
+}
+
+function normalizePriceIntervalRows(rows) {
+  const source = Array.isArray(rows) && rows.length >= 2 ? rows : defaultPriceIntervals;
+  const normalized = source.map((row) => ({
+    label: String(row.label || "").trim(),
+    min: row.min === null || row.min === undefined || row.min === "" ? null : Number(row.min),
+    max: row.max === null || row.max === undefined || row.max === "" ? null : Number(row.max),
+  }));
+  normalized[0].min = priceIntervalMin;
+  normalized[normalized.length - 1].max = priceIntervalMax;
+  for (let index = 1; index < normalized.length; index += 1) {
+    normalized[index].min = Number.isFinite(Number(normalized[index - 1].max))
+      ? Number(normalized[index - 1].max)
+      : normalized[index].min;
+  }
+  return normalized.map((row) => ({
+    ...row,
+    label: priceIntervalLabel(row.min, row.max),
+  }));
+}
+
+function renderPriceIntervalTable() {
+  const body = $("#price-interval-table tbody");
+  if (!body) return;
+  App.priceIntervals = normalizePriceIntervalRows(App.priceIntervals);
+  body.innerHTML = App.priceIntervals
+    .map((row, index) => {
+      const first = index === 0;
+      const last = index === App.priceIntervals.length - 1;
+      return `
+        <tr class="price-interval-row">
+          <td><span class="interval-range-pill">${htmlEscape(priceIntervalLabel(row.min, row.max))}</span></td>
+          <td><input class="mini-input interval-min-input" data-index="${index}" type="number" step="0.01" value="${row.min ?? ""}" disabled /></td>
+          <td><input class="mini-input interval-max-input" data-index="${index}" type="number" step="0.01" value="${row.max ?? ""}" ${last ? "disabled" : ""} /></td>
+          <td class="interval-note-cell">${first ? "起点固定 0" : last ? "终点固定 1500" : "修改上限后自动衔接"}</td>
+          <td class="interval-delete-cell">
+            <button class="tiny-action-btn interval-delete-btn" type="button" data-index="${index}" ${App.priceIntervals.length <= 2 ? "disabled" : ""}>删除</button>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+  injectHelpAffordances(body);
+}
+
+function collectPriceIntervals() {
+  const rows = App.priceIntervals.map((row) => ({ ...row }));
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const minInput = $(`.interval-min-input[data-index="${index}"]`);
+    const maxInput = $(`.interval-max-input[data-index="${index}"]`);
+    row.min = minInput?.value === "" ? null : Number(minInput.value);
+    row.max = maxInput?.value === "" ? null : Number(maxInput.value);
+  }
+  for (let index = 0; index < rows.length; index += 1) {
+    if (index === 0) rows[index].min = priceIntervalMin;
+    if (index === rows.length - 1) rows[index].max = priceIntervalMax;
+    if (index > 0) rows[index].min = rows[index - 1].max;
+    if (index < rows.length - 1 && !Number.isFinite(Number(rows[index].max))) {
+      throw new Error("价格区间上限必须填写");
+    }
+    if (Number(rows[index].min) < priceIntervalMin || Number(rows[index].max) > priceIntervalMax) {
+      throw new Error("价格区间范围必须在 0 到 1500 之间");
+    }
+    if (Number(rows[index].max) <= Number(rows[index].min ?? -Infinity)) {
+      throw new Error("价格区间上限必须大于下限");
+    }
+    rows[index].label = priceIntervalLabel(rows[index].min, rows[index].max);
+  }
+  App.priceIntervals = rows;
+  renderPriceIntervalTable();
+  return rows;
+}
+
+function addPriceIntervalRow() {
+  const rows = collectPriceIntervals();
+  let splitIndex = 0;
+  let widest = -Infinity;
+  rows.forEach((row, index) => {
+    const width = Number(row.max) - Number(row.min);
+    if (Number.isFinite(width) && width > widest) {
+      widest = width;
+      splitIndex = index;
+    }
+  });
+  if (!Number.isFinite(widest) || widest <= 1) {
+    showToast("当前区间太窄，暂不适合继续拆分", "error");
+    return;
+  }
+  const splitAt = Math.round((Number(rows[splitIndex].min) + Number(rows[splitIndex].max)) / 2);
+  rows.splice(splitIndex + 1, 0, { label: "", min: splitAt, max: rows[splitIndex].max });
+  rows[splitIndex].max = splitAt;
+  App.priceIntervals = normalizePriceIntervalRows(rows);
+  renderPriceIntervalTable();
+}
+
+function deletePriceIntervalRow(index) {
+  const rows = collectPriceIntervals();
+  if (rows.length <= 2) {
+    showToast("价格区间至少保留 2 段", "error");
+    return;
+  }
+  rows.splice(index, 1);
+  App.priceIntervals = normalizePriceIntervalRows(rows);
+  renderPriceIntervalTable();
 }
 
 function collectTrainingAdvancedConfig() {
@@ -1955,18 +2310,23 @@ function initializeAdvancedTrainingControls() {
   App.priceIntervals = normalizePriceIntervalRows(preferences.price_intervals);
   renderPriceIntervalTable();
   renderSegmentConfigTable();
+  renderSegmentSearchCounts();
 }
 
 function syncTrainingModeControls() {
-  const isRolling = currentTrainingMode() === "rolling_window";
-  const windowInput = $("#training-window-days");
+  ["price", "interval"].forEach(syncModelTrainingModeControls);
+}
+
+function syncModelTrainingModeControls(prefix) {
+  const isRolling = currentModelTrainingMode(prefix) === "rolling_window";
+  const windowInput = $(`#${prefix}-training-window-days`);
   if (windowInput) windowInput.disabled = !isRolling;
-  const enableStart = $("#enable-start");
-  const enableEnd = $("#enable-end");
+  const enableStart = $(`#${prefix}-enable-start`);
+  const enableEnd = $(`#${prefix}-enable-end`);
   if (enableStart) enableStart.disabled = isRolling;
   if (enableEnd) enableEnd.disabled = isRolling;
-  setDatePickerDisabled("train-start-picker", isRolling || !enableStart?.checked);
-  setDatePickerDisabled("train-end-picker", isRolling || !enableEnd?.checked);
+  setDatePickerDisabled(`${prefix}-train-start-picker`, isRolling || !enableStart?.checked);
+  setDatePickerDisabled(`${prefix}-train-end-picker`, isRolling || !enableEnd?.checked);
 }
 
 function formatReferenceStrategyLabel(strategyKey, label, referenceDays = currentReferenceDays()) {
@@ -1978,47 +2338,19 @@ function modelSimilarityDiff(row) {
   const value = Number(row?.model_similarity_diff);
   if (Number.isFinite(value)) return value;
   const legacyValue = Number(row?.residual_pred);
-  return Number.isFinite(legacyValue) ? legacyValue : 0;
+  if (Number.isFinite(legacyValue)) return legacyValue;
+  const predicted = Number(row?.predicted_price);
+  const netLoadOnly = Number(row?.net_load_only_similar_price);
+  return Number.isFinite(predicted) && Number.isFinite(netLoadOnly) ? predicted - netLoadOnly : 0;
 }
 
 function syncPredictionStrategySelectors(prediction) {
   if (!prediction) return;
 }
 
-function renderComparisonCards(prediction) {
-  const container = $("#comparison-cards");
-  if (!container) return;
-  const comparisons = comparisonPredictions(prediction);
-  const keys = Object.keys(comparisons);
-  if (!keys.length) {
-    container.innerHTML = "";
-    return;
-  }
-  container.innerHTML = keys
-    .map((key) => {
-      const item = comparisons[key];
-      const values = item.rows.map((row) => Number(row.predicted_price || 0));
-      const avgValue = values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
-      const minValue = Math.min(...values);
-      const maxValue = Math.max(...values);
-      const activeClass = prediction.selected_strategy_key === key ? " active-strategy-card" : "";
-      const strategyLabel = formatReferenceStrategyLabel(key, item.reference_strategy_label, item.reference_days_requested || prediction.reference_days_requested);
-      return `
-        <article class="info-card${activeClass}">
-          <div class="card-title">${htmlEscape(strategyLabel)}</div>
-          <div class="card-value">${avgValue.toFixed(2)}</div>
-          <div class="card-desc">最低 ${minValue.toFixed(2)} | 最高 ${maxValue.toFixed(2)}</div>
-          <div class="card-desc">参考日期：${htmlEscape((item.reference_dates || []).join(" / ") || "-")}</div>
-        </article>
-      `;
-    })
-    .join("");
-}
-
 function renderPredictionBundle(prediction) {
   App.lastPrediction = prediction;
   syncPredictionStrategySelectors(prediction);
-  renderComparisonCards(prediction);
   renderPredictionTable(prediction);
   renderPredictionChart(prediction);
 }
@@ -2056,17 +2388,21 @@ function renderPredictionTable(prediction) {
     "high_price_probability",
     "interval_backtest_accuracy",
     "price_interval_consistency",
-    "recent_n_days_similar_price",
     "recent_n_days_net_load_only_similar_price",
-    "recent_n_days_residual_pred",
+    "recent_n_days_knn_similar_price",
+    "recent_n_days_weighted_knn_regression_price",
     "recent_n_days_predicted_price",
-    "recent_same_type_days_similar_price",
     "recent_same_type_days_net_load_only_similar_price",
-    "recent_same_type_days_residual_pred",
+    "recent_same_type_days_knn_similar_price",
+    "recent_same_type_days_weighted_knn_regression_price",
     "recent_same_type_days_predicted_price",
     "prediction_price_diff",
     "net_load",
   ];
+  const formatPriceValue = (value) => {
+    const numberValue = Number(value);
+    return Number.isFinite(numberValue) ? numberValue.toFixed(2) : "";
+  };
   const rows = primaryRows.map((row) => {
     const periodKey = String(row.period);
     const recentRow = variantRowMaps.recent_n_days?.get(periodKey);
@@ -2081,13 +2417,13 @@ function renderPredictionTable(prediction) {
       high_price_probability: formatPercent(row.high_price_probability),
       interval_backtest_accuracy: formatPercent(row.interval_backtest_accuracy),
       price_interval_consistency: row.price_interval_consistency || "-",
-      recent_n_days_similar_price: recentRow ? Number(recentRow.similar_price || 0).toFixed(2) : "",
-      recent_n_days_net_load_only_similar_price: recentRow ? Number(recentRow.net_load_only_similar_price || 0).toFixed(2) : "",
-      recent_n_days_residual_pred: recentRow ? modelSimilarityDiff(recentRow).toFixed(2) : "",
+      recent_n_days_net_load_only_similar_price: recentRow ? formatPriceValue(recentRow.net_load_only_similar_price) : "",
+      recent_n_days_knn_similar_price: recentRow ? formatPriceValue(recentRow.knn_similar_price) : "",
+      recent_n_days_weighted_knn_regression_price: recentRow ? formatPriceValue(recentRow.weighted_knn_regression_price) : "",
       recent_n_days_predicted_price: recentPrice === null ? "" : recentPrice.toFixed(2),
-      recent_same_type_days_similar_price: sameTypeRow ? Number(sameTypeRow.similar_price || 0).toFixed(2) : "",
-      recent_same_type_days_net_load_only_similar_price: sameTypeRow ? Number(sameTypeRow.net_load_only_similar_price || 0).toFixed(2) : "",
-      recent_same_type_days_residual_pred: sameTypeRow ? modelSimilarityDiff(sameTypeRow).toFixed(2) : "",
+      recent_same_type_days_net_load_only_similar_price: sameTypeRow ? formatPriceValue(sameTypeRow.net_load_only_similar_price) : "",
+      recent_same_type_days_knn_similar_price: sameTypeRow ? formatPriceValue(sameTypeRow.knn_similar_price) : "",
+      recent_same_type_days_weighted_knn_regression_price: sameTypeRow ? formatPriceValue(sameTypeRow.weighted_knn_regression_price) : "",
       recent_same_type_days_predicted_price: sameTypePrice === null ? "" : sameTypePrice.toFixed(2),
       prediction_price_diff: recentPrice === null || sameTypePrice === null ? "" : (sameTypePrice - recentPrice).toFixed(2),
       net_load: row.net_load,
@@ -2129,48 +2465,11 @@ function ensureChart(strategyKey) {
 
 function renderPredictionStats(prediction) {
   const target = $("#prediction-stats");
-  const variants = orderedPredictionComparisons(prediction);
-  if (!variants.length) {
-    target.innerHTML = "";
-    return;
-  }
-
-  target.innerHTML = variants
-    .flatMap(([key, variant]) => {
-      const values = variant.rows.map((row) => Number(row.predicted_price || 0));
-      const intervalCounts = {};
-      variant.rows.forEach((row) => {
-        const label = row.predicted_interval || "-";
-        intervalCounts[label] = (intervalCounts[label] || 0) + 1;
-      });
-      const mainInterval = Object.entries(intervalCounts).sort((left, right) => right[1] - left[1])[0]?.[0] || "-";
-      const highRiskCount = variant.rows.filter((row) => Number(row.high_price_probability || 0) >= 0.5).length;
-      const intervalAccuracyValues = variant.rows.map((row) => Number(row.interval_backtest_accuracy)).filter(Number.isFinite);
-      const intervalAccuracy = intervalAccuracyValues.length
-        ? intervalAccuracyValues.reduce((sum, value) => sum + value, 0) / intervalAccuracyValues.length
-        : null;
-      const minValue = Math.min(...values);
-      const maxValue = Math.max(...values);
-      const avgValue = values.reduce((sum, item) => sum + item, 0) / Math.max(1, values.length);
-      const referenceDays = variant.reference_days_requested || (variant.reference_dates || []).length || currentReferenceDays();
-      const strategyLabel = formatReferenceStrategyLabel(key, variant.reference_strategy_label, referenceDays);
-      const referenceLabel = (variant.reference_dates || []).join(" / ") || "-";
-      return [
-        `${strategyLabel}均价：${avgValue.toFixed(2)}`,
-        `${strategyLabel}范围：${minValue.toFixed(2)} ~ ${maxValue.toFixed(2)}`,
-        `${strategyLabel}主要区间：${mainInterval}`,
-        `${strategyLabel}高价风险点：${highRiskCount}`,
-        `${strategyLabel}区间命中率：${formatPercent(intervalAccuracy)}`,
-        `${strategyLabel}参考日：${referenceLabel}`,
-      ];
-    })
-    .map((text) => `<span class="chart-stat">${text}</span>`)
-    .join("");
+  if (target) target.innerHTML = "";
 }
 
 function renderPredictionChart(prediction) {
   renderPredictionStats(prediction);
-  renderPredictionIntervalStrip(prediction);
   const variants = orderedPredictionComparisons(prediction);
   const variantMap = Object.fromEntries(variants);
   if (!variants.length) {
@@ -2179,70 +2478,24 @@ function renderPredictionChart(prediction) {
       App.predictionChartSignature = "";
     }
     $("#prediction-meta").textContent = "暂无预测数据";
-    const strip = $("#prediction-interval-strip");
-    if (strip) strip.innerHTML = "";
     return;
   }
 
   const primaryVariant = variantMap.recent_n_days || variants[0][1];
   const forecastDate = primaryVariant.forecast_date || primaryVariant.rows?.[0]?.date || "-";
-  const referenceDays = primaryVariant.reference_days_requested || (primaryVariant.reference_dates || []).length || currentReferenceDays();
+  const recentReferenceDays = predictionReferenceDaysForStrategy("recent_n_days", variantMap.recent_n_days);
+  const sameTypeReferenceDays = predictionReferenceDaysForStrategy("recent_same_type_days", variantMap.recent_same_type_days);
   const chartSignature = JSON.stringify(variants.map(([key, variant]) => [key, predictionVariantSignature(variant)]));
 
   if (App.predictionChartSignature !== chartSignature) {
     referenceStrategyOrder.forEach((strategyKey) => {
-      renderStrategyChart(strategyKey, variantMap[strategyKey], referenceDays);
+      renderStrategyChart(strategyKey, variantMap[strategyKey], predictionReferenceDaysForStrategy(strategyKey, variantMap[strategyKey]));
     });
     App.predictionChartSignature = chartSignature;
     requestAnimationFrame(() => resizePredictionCharts());
   }
 
-  $("#prediction-meta").textContent = `预测日期：${forecastDate} | 参考天数：${referenceDays} 天 | 已同时展示最近天与同类型日两种预测`;
-}
-
-function intervalClassName(label) {
-  const text = String(label || "");
-  if (text.includes(">") || text.includes("1000")) return "interval-extreme";
-  if (text.includes("600")) return "interval-high";
-  if (text.includes("400")) return "interval-mid-high";
-  if (text.includes("300")) return "interval-mid";
-  if (text.includes("250")) return "interval-low-mid";
-  return "interval-low";
-}
-
-function intervalChartColor(label, alpha = 0.18) {
-  const palette = {
-    "interval-low": `rgba(96, 165, 250, ${alpha})`,
-    "interval-low-mid": `rgba(34, 211, 238, ${alpha})`,
-    "interval-mid": `rgba(34, 197, 94, ${alpha})`,
-    "interval-mid-high": `rgba(245, 158, 11, ${alpha})`,
-    "interval-high": `rgba(239, 68, 68, ${alpha})`,
-    "interval-extreme": `rgba(127, 29, 29, ${alpha})`,
-  };
-  return palette[intervalClassName(label)] || `rgba(148, 163, 184, ${alpha})`;
-}
-
-function renderPredictionIntervalStrip(prediction) {
-  const strip = $("#prediction-interval-strip");
-  if (!strip) return;
-  const variants = orderedPredictionComparisons(prediction);
-  if (!variants.length) {
-    strip.innerHTML = "";
-    return;
-  }
-  const primary = variants[0][1];
-  strip.innerHTML = `
-    <div class="interval-strip-label">区间色带</div>
-    <div class="interval-strip-bars">
-      ${(primary.rows || [])
-        .map((row) => {
-          const label = row.predicted_interval || "-";
-          const probability = formatPercent(row.predicted_interval_probability);
-          return `<span class="interval-strip-cell ${intervalClassName(label)}" title="时段 ${htmlEscape(row.period)}：${htmlEscape(label)}，概率 ${htmlEscape(probability)}"></span>`;
-        })
-        .join("")}
-    </div>
-  `;
+  $("#prediction-meta").textContent = `预测日期：${forecastDate} | 最近天数：${recentReferenceDays} 天 | 同类型日个数：${sameTypeReferenceDays} 个 | 两个参考口径独立展示`;
 }
 
 function renderStrategyChart(strategyKey, variant, referenceDays) {
@@ -2258,29 +2511,154 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
   const periods = rows.map((row) => row.period);
   const predicted = rows.map((row) => Number(row.predicted_price || 0));
   const rowByPeriod = new Map(rows.map((row) => [String(row.period), row]));
-  const intervalBackground = rows.map((row) => ({
-    value: 1500,
-    itemStyle: { color: intervalChartColor(row.predicted_interval, 0.14) },
-  }));
   const highRiskPoints = rows
     .filter((row) => Number(row.high_price_probability || 0) >= 0.5 || Number(row.extreme_price_probability || 0) >= 0.2)
     .map((row) => [row.period, Number(row.predicted_price || 0), row.predicted_interval || "-", Number(row.high_price_probability || 0)]);
-  const similar = rows.map((row) => Number(row.similar_price || 0));
   const netLoadOnlySimilar = rows.map((row) => {
     const value = Number(row.net_load_only_similar_price);
     return Number.isFinite(value) ? value : null;
   });
-  const diff = rows.map((row) => modelSimilarityDiff(row));
+  const knnSimilar = rows.map((row) => {
+    const value = Number(row.knn_similar_price);
+    return Number.isFinite(value) ? value : null;
+  });
+  const weightedKnn = rows.map((row) => {
+    const value = Number(row.weighted_knn_regression_price);
+    return Number.isFinite(value) ? value : null;
+  });
+  const showDiff = config.showDiff !== false;
+  const diff = showDiff ? rows.map((row) => modelSimilarityDiff(row)) : [];
   const predictedName = formatReferenceStrategyLabel(strategyKey, config.predictedName, referenceDays);
-  const similarName = formatReferenceStrategyLabel(strategyKey, config.similarName, referenceDays);
   const netLoadOnlyName = formatReferenceStrategyLabel(strategyKey, config.netLoadOnlyName, referenceDays);
-  const diffName = formatReferenceStrategyLabel(strategyKey, config.residualName, referenceDays);
+  const knnName = formatReferenceStrategyLabel(strategyKey, "KNN相似法预测价格", referenceDays);
+  const weightedKnnName = formatReferenceStrategyLabel(strategyKey, "加权KNN回归预测价格", referenceDays);
+  const diffName = showDiff ? formatReferenceStrategyLabel(strategyKey, config.residualName, referenceDays) : "";
+  const legendData = showDiff
+    ? [predictedName, netLoadOnlyName, knnName, weightedKnnName, diffName]
+    : [predictedName, netLoadOnlyName, knnName, weightedKnnName];
+  const gridConfig = showDiff
+    ? [
+        { left: 54, right: 38, top: 52, height: 210 },
+        { left: 54, right: 38, top: 292, height: 74 },
+      ]
+    : [{ left: 54, right: 38, top: 52, bottom: 34 }];
+  const xAxisConfig = showDiff
+    ? [
+        {
+          type: "category",
+          boundaryGap: false,
+          data: periods,
+          axisLabel: { color: "#86909c" },
+          axisLine: { lineStyle: { color: "#d9d9d9" } },
+        },
+        {
+          type: "category",
+          gridIndex: 1,
+          boundaryGap: false,
+          data: periods,
+          axisLabel: { color: "#86909c" },
+          axisLine: { lineStyle: { color: "#d9d9d9" } },
+        },
+      ]
+    : [
+        {
+          type: "category",
+          boundaryGap: false,
+          data: periods,
+          axisLabel: { color: "#86909c" },
+          axisLine: { lineStyle: { color: "#d9d9d9" } },
+        },
+      ];
+  const yAxisConfig = showDiff
+    ? [
+        {
+          type: "value",
+          name: "Price",
+          min: 0,
+          max: 1500,
+          axisLabel: { color: "#86909c" },
+          splitLine: { lineStyle: { color: "rgba(5,5,5,0.06)" } },
+        },
+        {
+          type: "value",
+          gridIndex: 1,
+          name: "差值",
+          axisLabel: { color: "#86909c" },
+          splitLine: { show: false },
+        },
+      ]
+    : [
+        {
+          type: "value",
+          name: "Price",
+          min: 0,
+          max: 1500,
+          axisLabel: { color: "#86909c" },
+          splitLine: { lineStyle: { color: "rgba(5,5,5,0.06)" } },
+        },
+      ];
+  const series = [
+    {
+      name: predictedName,
+      type: "line",
+      smooth: false,
+      symbol: "circle",
+      symbolSize: 5,
+      lineStyle: { width: 3 },
+      areaStyle: { color: "rgba(22,119,255,0.08)" },
+      z: 4,
+      data: predicted,
+    },
+    {
+      name: "高价概率点",
+      type: "scatter",
+      symbol: "pin",
+      symbolSize: 18,
+      z: 6,
+      itemStyle: { color: "#ef4444", borderColor: "#fff", borderWidth: 1 },
+      data: highRiskPoints,
+    },
+    {
+      name: netLoadOnlyName,
+      type: "line",
+      smooth: false,
+      symbol: "none",
+      lineStyle: { width: 2, type: "dashed" },
+      data: netLoadOnlySimilar,
+    },
+    {
+      name: knnName,
+      type: "line",
+      smooth: false,
+      symbol: "none",
+      lineStyle: { width: 2, type: "dotted" },
+      data: knnSimilar,
+    },
+    {
+      name: weightedKnnName,
+      type: "line",
+      smooth: false,
+      symbol: "none",
+      lineStyle: { width: 2, type: "dashed" },
+      data: weightedKnn,
+    },
+  ];
+  if (showDiff) {
+    series.push({
+      name: diffName,
+      type: "bar",
+      xAxisIndex: 1,
+      yAxisIndex: 1,
+      barMaxWidth: 10,
+      data: diff,
+    });
+  }
 
   chart.setOption(
     {
       backgroundColor: "transparent",
       animationDuration: 500,
-      color: ["#1677ff", "#52c41a", "#722ed1", "#fa8c16"],
+      color: ["#1677ff", "#52c41a", "#722ed1", "#13c2c2", "#fa8c16"],
       tooltip: {
         trigger: "axis",
         triggerOn: "mousemove|click",
@@ -2298,7 +2676,7 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
           const periodTime = formatPeriodClockTime(periodLabel);
           const periodTitle = periodTime ? `时段 ${periodLabel}（${periodTime}）` : `时段 ${periodLabel}`;
           const lines = items
-            .filter((item) => item?.value !== null && item?.value !== undefined && item?.value !== "" && item.seriesName !== "区间背景")
+            .filter((item) => item?.value !== null && item?.value !== undefined && item?.value !== "")
             .map(
               (item) =>
                 `${item.marker || ""}<span style="margin-right:12px;">${item.seriesName}</span><strong>${formatChartTooltipValue(item.value)}</strong>`,
@@ -2308,7 +2686,7 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
             ? `
               <div style="height:1px;background:rgba(255,255,255,0.16);margin:8px 0;"></div>
               <div>最可能区间：<strong>${htmlEscape(row.predicted_interval || "-")}</strong></div>
-              <div>区间概率：<strong>${formatPercent(row.predicted_interval_probability)}</strong></div>
+              <div>价格区间概率：<strong>${formatPercent(row.predicted_interval_probability)}</strong></div>
               <div>高价概率：<strong>${formatPercent(row.high_price_probability)}</strong></div>
               <div>&gt;1000 概率：<strong>${formatPercent(row.extreme_price_probability)}</strong></div>
               <div>历史命中率：<strong>${formatPercent(row.interval_backtest_accuracy)}</strong></div>
@@ -2321,106 +2699,12 @@ function renderStrategyChart(strategyKey, variant, referenceDays) {
       legend: {
         top: 8,
         textStyle: { color: "#4e5969" },
-        data: [predictedName, similarName, netLoadOnlyName, diffName],
+        data: legendData,
       },
-      grid: [
-        { left: 54, right: 38, top: 52, height: 210 },
-        { left: 54, right: 38, top: 292, height: 74 },
-      ],
-      xAxis: [
-        {
-          type: "category",
-          boundaryGap: false,
-          data: periods,
-          axisLabel: { color: "#86909c" },
-          axisLine: { lineStyle: { color: "#d9d9d9" } },
-        },
-        {
-          type: "category",
-          gridIndex: 1,
-          boundaryGap: false,
-          data: periods,
-          axisLabel: { color: "#86909c" },
-          axisLine: { lineStyle: { color: "#d9d9d9" } },
-        },
-      ],
-      yAxis: [
-        {
-          type: "value",
-          name: "Price",
-          min: 0,
-          max: 1500,
-          axisLabel: { color: "#86909c" },
-          splitLine: { lineStyle: { color: "rgba(5,5,5,0.06)" } },
-        },
-        {
-          type: "value",
-          gridIndex: 1,
-          name: "差值",
-          axisLabel: { color: "#86909c" },
-          splitLine: { show: false },
-        },
-      ],
-      dataZoom: [
-        { type: "inside", xAxisIndex: [0, 1], start: 0, end: 100, zoomOnMouseWheel: false, moveOnMouseWheel: false },
-        { type: "slider", xAxisIndex: [0, 1], bottom: 0, height: 18, borderColor: "transparent" },
-      ],
-      series: [
-        {
-          name: "区间背景",
-          type: "bar",
-          barWidth: "98%",
-          barGap: "-100%",
-          silent: true,
-          z: 0,
-          itemStyle: { opacity: 1 },
-          data: intervalBackground,
-        },
-        {
-          name: predictedName,
-          type: "line",
-          smooth: false,
-          symbol: "circle",
-          symbolSize: 5,
-          lineStyle: { width: 3 },
-          areaStyle: { color: "rgba(22,119,255,0.08)" },
-          z: 4,
-          data: predicted,
-        },
-        {
-          name: "高价风险点",
-          type: "scatter",
-          symbol: "pin",
-          symbolSize: 18,
-          z: 6,
-          itemStyle: { color: "#ef4444", borderColor: "#fff", borderWidth: 1 },
-          data: highRiskPoints,
-        },
-        {
-          name: similarName,
-          type: "line",
-          smooth: false,
-          symbol: "none",
-          lineStyle: { width: 2, type: "dashed" },
-          data: similar,
-        },
-        {
-          name: netLoadOnlyName,
-          type: "line",
-          smooth: false,
-          symbol: "none",
-          lineStyle: { width: 2, type: "dotted" },
-          data: netLoadOnlySimilar,
-        },
-        {
-          name: diffName,
-          type: "bar",
-          xAxisIndex: 1,
-          yAxisIndex: 1,
-          barMaxWidth: 10,
-          data: diff,
-        },
-      ],
+      grid: gridConfig,
+      xAxis: xAxisConfig,
+      yAxis: yAxisConfig,
+      series,
     },
     true,
   );
@@ -2576,48 +2860,57 @@ function resetSessionProgress() {
 
 async function loadConfig() {
   App.config = await request("/api/config");
-  if ($("#training-mode") && App.config?.default_training_mode) {
-    $("#training-mode").value = App.config.default_training_mode;
-  }
-  if ($("#training-window-days") && App.config?.default_training_window_days) {
-    $("#training-window-days").value = App.config.default_training_window_days;
-  }
+  applyModelTrainingDefaults();
   if ($("#window-optimization-max-history-days") && App.config?.default_window_optimization_max_history_days) {
     $("#window-optimization-max-history-days").value = App.config.default_window_optimization_max_history_days;
   }
-  if ($("#reference-days") && App.config?.default_reference_days && !$("#reference-days").value) {
-    $("#reference-days").value = App.config.default_reference_days;
+  if ($("#window-optimization-valid-days") && App.config?.default_window_optimization_valid_days) {
+    $("#window-optimization-valid-days").value = App.config.default_window_optimization_valid_days;
   }
-  const weights = App.config?.default_similarity_weights || {};
-  [
-    ["#similarity-weight-net-load", "thermal_space"],
-    ["#similarity-weight-renewable-power", "renewable_power"],
-    ["#similarity-weight-thermal-on-capacity", "thermal_on_capacity"],
-    ["#similarity-weight-day-type", "day_type"],
-    ["#similarity-weight-ratio", "thermal_space_load_ratio"],
-  ].forEach(([selector, key]) => {
-    if ($(selector) && weights[key] !== undefined) {
-      $(selector).value = weights[key];
-    }
-  });
+  if ($("#window-optimization-rolling-horizons") && App.config?.default_window_optimization_rolling_backtest_horizons) {
+    $("#window-optimization-rolling-horizons").value = App.config.default_window_optimization_rolling_backtest_horizons.join(",");
+  }
+  const predictionReference = App.config?.prediction_preferences?.prediction_reference || {};
+  const knnDefaults = predictionReference.knn_similarity || App.config?.default_knn_similarity || {};
+  if ($("#recent-reference-days")) {
+    $("#recent-reference-days").value = predictionReference.recent_reference_days || App.config?.default_recent_reference_days || App.config?.default_reference_days || 1;
+  }
+  if ($("#same-type-reference-days")) {
+    $("#same-type-reference-days").value = predictionReference.same_type_reference_days || App.config?.default_same_type_reference_days || App.config?.default_reference_days || 1;
+  }
+  if ($("#knn-similar-k")) {
+    $("#knn-similar-k").value = knnDefaults.knn_k || 5;
+  }
+  if ($("#knn-similar-max-distance")) {
+    $("#knn-similar-max-distance").value = knnDefaults.knn_max_distance || 3.0;
+  }
+  if ($("#weighted-knn-k")) {
+    $("#weighted-knn-k").value = knnDefaults.weighted_knn_k || 5;
+  }
+  if ($("#weighted-knn-max-distance")) {
+    $("#weighted-knn-max-distance").value = knnDefaults.weighted_knn_max_distance || 3.0;
+  }
   syncTrainingModeControls();
   renderConfigPaths();
 }
 
-function collectSimilarityWeights() {
-  return {
-    thermal_space: Number($("#similarity-weight-net-load")?.value || 0),
-    renewable_power: Number($("#similarity-weight-renewable-power")?.value || 0),
-    thermal_on_capacity: Number($("#similarity-weight-thermal-on-capacity")?.value || 0),
-    day_type: Number($("#similarity-weight-day-type")?.value || 0),
-    thermal_space_load_ratio: Number($("#similarity-weight-ratio")?.value || 0),
-  };
+function modelRecommendation(prefix) {
+  const state = App.config?.window_optimization || {};
+  const recommendedKey = prefix === "interval" ? "interval_model_recommended" : "price_model_recommended";
+  const configKey = prefix === "interval" ? "interval_model_config" : "price_model_config";
+  return state[recommendedKey] || state[configKey] || {};
 }
 
-async function savePredictionPreferences() {
-  await request("/api/prediction/preferences", {
-    method: "POST",
-    body: JSON.stringify({ similarity_weights: collectSimilarityWeights() }),
+function applyModelTrainingDefaults() {
+  ["price", "interval"].forEach((prefix) => {
+    const recommended = modelRecommendation(prefix);
+    const mode = recommended.training_mode || App.config?.default_training_mode || "rolling_window";
+    if ($(`#${prefix}-training-mode`)) $(`#${prefix}-training-mode`).value = mode;
+    if ($(`#${prefix}-training-window-days`)) {
+      $(`#${prefix}-training-window-days`).value = recommended.training_window_days || App.config?.default_training_window_days || 60;
+    }
+    if ($(`#${prefix}-valid-days`)) $(`#${prefix}-valid-days`).value = recommended.valid_days || 14;
+    if ($(`#${prefix}-num-boost-round`)) $(`#${prefix}-num-boost-round`).value = recommended.num_boost_round || 400;
   });
 }
 
@@ -2698,14 +2991,8 @@ async function startTrain() {
     const data = await request("/api/train", {
       method: "POST",
       body: JSON.stringify({
-        training_mode: currentTrainingMode(),
-        training_window_days: currentTrainingWindowDays(),
-        start_date: $("#train-start-date").value || null,
-        end_date: $("#train-end-date").value || null,
-        enable_start: $("#enable-start").checked,
-        enable_end: $("#enable-end").checked,
-        valid_days: Number($("#valid-days").value || 14),
-        num_boost_round: Number($("#num-boost-round").value || 400),
+        price_model_config: collectModelTrainingConfig("price"),
+        interval_model_config: collectModelTrainingConfig("interval"),
         ...collectTrainingAdvancedConfig(),
       }),
     });
@@ -2763,11 +3050,11 @@ async function startWindowOptimization() {
     App.pendingStatus = {
       job_type: "optimize",
       progress: 3,
-      status: "正在提交训练使用天数寻优任务...",
-      logs: ["[本地] 正在提交训练使用天数寻优任务..."],
+      status: "正在提交自动寻优任务...",
+      logs: ["[本地] 正在提交自动寻优任务..."],
       running: true,
     };
-    applyProgressCard("optimize", { progress: 3, label: "\u63d0\u4ea4\u4e2d", status: "正在提交训练使用天数寻优任务...", type: "running" });
+    applyProgressCard("optimize", { progress: 3, label: "\u63d0\u4ea4\u4e2d", status: "正在提交自动寻优任务...", type: "running" });
     renderStatusPanel({ current_job: App.pendingStatus, recent_jobs: [] });
     const data = await request("/api/window-optimization/run", {
       method: "POST",
@@ -2776,8 +3063,22 @@ async function startWindowOptimization() {
         max_history_days: currentWindowOptimizationMaxHistoryDays(),
         valid_days: currentWindowOptimizationValidDays(),
         num_boost_round: currentWindowOptimizationNumBoostRound(),
+        price_model_config: {
+          ...collectModelTrainingConfig("price"),
+          training_mode: "rolling_window",
+          valid_days: currentWindowOptimizationValidDays(),
+          num_boost_round: currentWindowOptimizationNumBoostRound(),
+        },
+        interval_model_config: {
+          ...collectModelTrainingConfig("interval"),
+          training_mode: "rolling_window",
+          valid_days: currentWindowOptimizationValidDays(),
+          num_boost_round: currentWindowOptimizationNumBoostRound(),
+        },
         fine_radius: currentWindowOptimizationFineRadius(),
+        rolling_backtest_horizons: currentWindowOptimizationRollingHorizons(),
         ...collectTrainingAdvancedConfig(),
+        ...collectSegmentSearchConfig(),
       }),
     });
     if (data.started && data.job?.job_id) {
@@ -2786,14 +3087,14 @@ async function startWindowOptimization() {
         job_id: data.job.job_id,
         job_type: "optimize",
         progress: 5,
-        status: `训练使用天数寻优已启动：${data.job.job_id}`,
-        logs: [`[本地] 训练使用天数寻优已启动：${data.job.job_id}`],
+        status: `自动寻优已启动：${data.job.job_id}`,
+        logs: [`[本地] 自动寻优已启动：${data.job.job_id}`],
         running: true,
       };
       App.pendingStatus = null;
       syncStopButtons();
-      applyProgressCard("optimize", { progress: 5, label: "\u5bfb\u4f18\u4e2d", status: `训练使用天数寻优已启动：${data.job.job_id}`, type: "running" });
-      showToast("训练使用天数寻优已启动");
+      applyProgressCard("optimize", { progress: 5, label: "\u5bfb\u4f18\u4e2d", status: `自动寻优已启动：${data.job.job_id}`, type: "running" });
+      showToast("自动寻优已启动");
     } else {
       App.pendingStatus = null;
       applyProgressCard("optimize", deriveJobState(App.jobStates.optimize, "optimize"));
@@ -2817,13 +3118,14 @@ async function startPredict() {
     App.predictSessionStarted = true;
     setPendingState("predict", "正在保存并提交预测任务...");
     await saveTemplate();
-    const similarityWeights = collectSimilarityWeights();
-    await savePredictionPreferences();
     const data = await request("/api/predict", {
       method: "POST",
       body: JSON.stringify({
         reference_days: currentReferenceDays(),
-        similarity_weights: similarityWeights,
+        recent_reference_days: currentRecentReferenceDays(),
+        same_type_reference_days: currentSameTypeReferenceDays(),
+        knn_similarity: currentKnnSimilarityConfig(),
+        model_version_key: $("#predict-model-version")?.value || "",
       }),
     });
     App.activeJobIds.predict = data.job_id;
@@ -2877,14 +3179,14 @@ async function startPredict() {
 async function activateVersion() {
   const versionKey = $("#version-select").value;
   if (!versionKey) {
-    showToast("请先选择历史模型", "error");
+    showToast("请先选择历史模型版本", "error");
     return;
   }
   const data = await request("/api/model/activate", {
     method: "POST",
     body: JSON.stringify({ version_key: versionKey }),
   });
-  showToast(data.message || "已切换默认模型");
+  showToast(data.message || "已切换默认模型版本");
   await refreshSummary();
 }
 
@@ -3360,12 +3662,32 @@ function bindEvents() {
       syncSelectAllVersionsState();
     }
   });
-  $("#training-mode")?.addEventListener("change", () => syncTrainingModeControls());
-  $("#segment-mode")?.addEventListener("change", () => renderSegmentConfigTable());
+  ["price", "interval"].forEach((prefix) => {
+    $(`#${prefix}-training-mode`)?.addEventListener("change", () => syncModelTrainingModeControls(prefix));
+    $(`#${prefix}-enable-start`)?.addEventListener("change", (event) => {
+      if (currentModelTrainingMode(prefix) === "rolling_window") {
+        syncModelTrainingModeControls(prefix);
+        return;
+      }
+      setDatePickerDisabled(`${prefix}-train-start-picker`, !event.target.checked);
+    });
+    $(`#${prefix}-enable-end`)?.addEventListener("change", (event) => {
+      if (currentModelTrainingMode(prefix) === "rolling_window") {
+        syncModelTrainingModeControls(prefix);
+        return;
+      }
+      setDatePickerDisabled(`${prefix}-train-end-picker`, !event.target.checked);
+    });
+  });
+  $("#segment-mode")?.addEventListener("change", () => {
+    renderSegmentConfigTable();
+    renderSegmentSearchCounts();
+  });
   $("#segment-count")?.addEventListener("change", (event) => {
     saveSegmentDraftForCount(App.segmentRows.length, App.segmentRows);
     App.segmentRows = segmentRowsForCount(Number(event.target.value || 5));
     renderSegmentConfigTable();
+    renderSegmentSearchCounts();
   });
   $("#segment-config-table")?.addEventListener("change", (event) => {
     const index = Number(event.target.dataset.index);
@@ -3381,10 +3703,23 @@ function bindEvents() {
     }
     saveSegmentDraftForCount(App.segmentRows.length, App.segmentRows);
     renderSegmentConfigTable();
+    renderSegmentSearchCounts();
   });
   $("#price-interval-table")?.addEventListener("change", () => {
     try {
       collectPriceIntervals();
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  });
+  $("#price-interval-table")?.addEventListener("click", (event) => {
+    const button = event.target.closest(".interval-delete-btn");
+    if (!button) return;
+    deletePriceIntervalRow(Number(button.dataset.index));
+  });
+  $("#add-price-interval-btn")?.addEventListener("click", () => {
+    try {
+      addPriceIntervalRow();
     } catch (error) {
       showToast(error.message, "error");
     }
@@ -3395,31 +3730,6 @@ function bindEvents() {
     showToast("已恢复默认价格区间，保存并重训后生效");
   });
   $("#save-price-intervals-btn")?.addEventListener("click", () => saveTrainingPreferences().catch((error) => showToast(error.message, "error")));
-  $("#enable-start").addEventListener("change", (event) => {
-    if (currentTrainingMode() === "rolling_window") {
-      syncTrainingModeControls();
-      return;
-    }
-    setDatePickerDisabled("train-start-picker", !event.target.checked);
-  });
-  $("#enable-end").addEventListener("change", (event) => {
-    if (currentTrainingMode() === "rolling_window") {
-      syncTrainingModeControls();
-      return;
-    }
-    setDatePickerDisabled("train-end-picker", !event.target.checked);
-  });
-  [
-    "#similarity-weight-net-load",
-    "#similarity-weight-renewable-power",
-    "#similarity-weight-thermal-on-capacity",
-    "#similarity-weight-day-type",
-    "#similarity-weight-ratio",
-  ].forEach((selector) => {
-    $(selector)?.addEventListener("change", () => {
-      savePredictionPreferences().catch((error) => showToast(error.message, "error"));
-    });
-  });
   $("#hide-status-btn").addEventListener("click", () => toggleStatusPanel(true));
   $("#status-fab").addEventListener("click", () => toggleStatusPanel(false));
 
@@ -3436,8 +3746,10 @@ function bindEvents() {
 
 async function initialLoad() {
   resetSessionProgress();
-  initDatePicker("train-start-picker", "train-start-date", "2025-01-01");
-  initDatePicker("train-end-picker", "train-end-date", "2026-03-31");
+  initDatePicker("price-train-start-picker", "price-train-start-date", "2025-01-01");
+  initDatePicker("price-train-end-picker", "price-train-end-date", "2026-03-31");
+  initDatePicker("interval-train-start-picker", "interval-train-start-date", "2025-01-01");
+  initDatePicker("interval-train-end-picker", "interval-train-end-date", "2026-03-31");
   await loadConfig();
   initializeAdvancedTrainingControls();
   renderConfigPaths();

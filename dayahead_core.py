@@ -46,35 +46,23 @@ PRICE_CAP = 1500.0
 HISTORY_CACHE_VERSION = 2
 
 TARGET_COLUMN = "日前出清价格(元/MWh)"
-SIMILAR_PRICE_COLUMN = "similar_price"
-SIMILAR_GAP_COLUMN = "similar_gap"
 NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN = "net_load_only_similar_price"
 NET_LOAD_ONLY_SIMILAR_GAP_COLUMN = "net_load_only_similar_gap"
+KNN_SIMILAR_PRICE_COLUMN = "knn_similar_price"
+WEIGHTED_KNN_PRICE_COLUMN = "weighted_knn_regression_price"
+KNN_SIMILAR_COUNT_COLUMN = "knn_similar_count"
+KNN_SIMILAR_DISTANCE_COLUMN = "knn_similar_min_distance"
 TOTAL_LOAD_COLUMN = "total_load"
 RENEWABLE_POWER_COLUMN = "renewable_power"
 DAY_TYPE_COLUMN = "day_type"
 THERMAL_SPACE_WEIGHT_KEY = "thermal_space"
 THERMAL_SPACE_LOAD_RATIO_COLUMN = "thermal_space_load_ratio"
 DEFAULT_SIMILARITY_REFERENCE_DAYS = 100
-MULTICONDITION_SIMILARITY_WEIGHTS = OrderedDict(
-    [
-        (THERMAL_SPACE_WEIGHT_KEY, 0.45),
-        (RENEWABLE_POWER_COLUMN, 0.15),
-        ("thermal_on_capacity", 0.20),
-        (DAY_TYPE_COLUMN, 0.10),
-        (THERMAL_SPACE_LOAD_RATIO_COLUMN, 0.10),
-    ]
-)
-SIMILARITY_WEIGHT_COLUMN_MAP = {
-    THERMAL_SPACE_WEIGHT_KEY: "net_load",
-    RENEWABLE_POWER_COLUMN: RENEWABLE_POWER_COLUMN,
-    "thermal_on_capacity": "thermal_on_capacity",
-    DAY_TYPE_COLUMN: DAY_TYPE_COLUMN,
-    THERMAL_SPACE_LOAD_RATIO_COLUMN: THERMAL_SPACE_LOAD_RATIO_COLUMN,
-}
-SIMILARITY_WEIGHT_ALIASES = {
-    "net_load": THERMAL_SPACE_WEIGHT_KEY,
-    "thermal_space": THERMAL_SPACE_WEIGHT_KEY,
+DEFAULT_KNN_SIMILARITY_CONFIG = {
+    "knn_k": 5,
+    "knn_max_distance": 3.0,
+    "weighted_knn_k": 5,
+    "weighted_knn_max_distance": 3.0,
 }
 FEATURE_COLUMNS = [
     TOTAL_LOAD_COLUMN,
@@ -146,9 +134,14 @@ class TrainConfig:
     num_boost_round: int = 400
     start_date: str | None = None
     end_date: str | None = None
+    interval_valid_days: int | None = None
+    interval_training_window_days: int | None = None
+    interval_num_boost_round: int | None = None
+    interval_start_date: str | None = None
+    interval_end_date: str | None = None
     similarity_reference_days: int = DEFAULT_SIMILARITY_REFERENCE_DAYS
-    similarity_weights: dict[str, float] | None = None
     enable_rolling_backtest: bool = True
+    rolling_backtest_horizons: tuple[int, ...] = (14, 30)
     segment_config: list[dict[str, object]] | None = None
     high_price_weight_enabled: bool = False
     high_price_quantile: float = 0.8
@@ -213,6 +206,48 @@ def normalize_reference_days(reference_days: int | None) -> int:
     if value <= 0:
         raise ValueError("reference_days 必须大于等于 1")
     return value
+
+
+
+def normalize_reference_days_by_strategy(
+    reference_days: int | None = None,
+    recent_reference_days: int | None = None,
+    same_type_reference_days: int | None = None,
+) -> dict[str, int]:
+    fallback = normalize_reference_days(reference_days)
+    return {
+        "recent_n_days": normalize_reference_days(recent_reference_days or fallback),
+        "recent_same_type_days": normalize_reference_days(same_type_reference_days or fallback),
+    }
+
+
+def normalize_knn_similarity_config(config: dict[str, object] | None = None) -> dict[str, float | int]:
+    config = config or {}
+
+    def positive_int(key: str) -> int:
+        default = int(DEFAULT_KNN_SIMILARITY_CONFIG[key])
+        try:
+            value = int(round(float(config.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(value, 20))
+
+    def positive_float(key: str) -> float:
+        default = float(DEFAULT_KNN_SIMILARITY_CONFIG[key])
+        try:
+            value = float(config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        if not np.isfinite(value) or value <= 0:
+            return default
+        return max(0.1, min(value, 20.0))
+
+    return {
+        "knn_k": positive_int("knn_k"),
+        "knn_max_distance": positive_float("knn_max_distance"),
+        "weighted_knn_k": positive_int("weighted_knn_k"),
+        "weighted_knn_max_distance": positive_float("weighted_knn_max_distance"),
+    }
 
 
 def normalize_reference_strategy(reference_strategy: str | None) -> str:
@@ -334,29 +369,6 @@ def select_segment_prediction_model_variant(metadata: dict, segment_name: str, f
         if segment_key in variants:
             return segment_key
     return select_prediction_model_variant(metadata, forecast_df)
-
-
-def normalize_similarity_weights(
-    similarity_weights: dict[str, object] | None = None,
-    fill_missing_with_defaults: bool = True,
-) -> OrderedDict[str, float]:
-    if similarity_weights is None:
-        return OrderedDict((key, float(value)) for key, value in MULTICONDITION_SIMILARITY_WEIGHTS.items())
-    weights = OrderedDict(
-        (key, float(value) if fill_missing_with_defaults else 0.0)
-        for key, value in MULTICONDITION_SIMILARITY_WEIGHTS.items()
-    )
-    for raw_key, value in similarity_weights.items():
-        key = SIMILARITY_WEIGHT_ALIASES.get(str(raw_key), str(raw_key))
-        if key not in weights:
-            raise ValueError(f"不支持的相似法权重字段: {raw_key}")
-        numeric_value = float(value)
-        if not np.isfinite(numeric_value) or numeric_value < 0:
-            raise ValueError(f"相似法权重 {key} 必须是大于等于 0 的数字")
-        weights[key] = numeric_value
-    if sum(weights.values()) <= 0:
-        raise ValueError("相似法权重总和必须大于 0")
-    return weights
 
 
 def normalize_text(text: object) -> str:
@@ -956,6 +968,121 @@ def nearest_similarity_price(target_loads: np.ndarray, ref_loads: np.ndarray, re
     return weighted_price, min_gap
 
 
+def multi_factor_knn_similarity_price(
+    target_df: pd.DataFrame,
+    reference_df: pd.DataFrame,
+    k: int = 5,
+    max_distance: float = 3.0,
+    weighted_k: int | None = None,
+    weighted_max_distance: float | None = None,
+) -> pd.DataFrame:
+    numeric_features: list[tuple[str, float]] = [
+        ("net_load", 2.0),
+        (TOTAL_LOAD_COLUMN, 1.0),
+        (RENEWABLE_POWER_COLUMN, 1.0),
+        ("thermal_on_capacity", 0.8),
+        (THERMAL_SPACE_LOAD_RATIO_COLUMN, 1.2),
+    ]
+    ref_prices = pd.to_numeric(reference_df.get(TARGET_COLUMN), errors="coerce") if TARGET_COLUMN in reference_df.columns else pd.Series(dtype=float)
+    base_valid = ref_prices.notna().to_numpy()
+    rows: list[dict[str, float | int | None]] = []
+    plain_top_k = max(1, int(k or 1))
+    weighted_top_k = max(1, int(weighted_k or plain_top_k))
+    plain_max_distance = max(0.1, float(max_distance or DEFAULT_KNN_SIMILARITY_CONFIG["knn_max_distance"]))
+    weighted_limit = weighted_max_distance if weighted_max_distance is not None else plain_max_distance
+    weighted_max_distance_value = max(0.1, float(weighted_limit or DEFAULT_KNN_SIMILARITY_CONFIG["weighted_knn_max_distance"]))
+
+    def select_candidate_prices(
+        valid_indices: np.ndarray,
+        valid_distances: np.ndarray,
+        order: np.ndarray,
+        candidate_count: int,
+        distance_limit: float,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        selected_order = order[: min(candidate_count, len(order))]
+        candidate_indices = valid_indices[selected_order]
+        candidate_distances = valid_distances[selected_order]
+        nearest_distance = float(candidate_distances[0])
+        adaptive_threshold = min(float(distance_limit), max(0.35, nearest_distance * 3.0))
+        keep_mask = candidate_distances <= adaptive_threshold
+        if not keep_mask.any():
+            keep_mask[0] = True
+        kept_indices = candidate_indices[keep_mask]
+        kept_distances = candidate_distances[keep_mask]
+        kept_prices = ref_prices.iloc[kept_indices].to_numpy(dtype=float)
+        return kept_prices, kept_distances, nearest_distance
+
+    for _, target_row in target_df.iterrows():
+        valid_mask = base_valid.copy()
+        if len(valid_mask) == 0:
+            rows.append({"plain_price": np.nan, "weighted_price": np.nan, "count": 0, "min_distance": np.nan})
+            continue
+        distance = np.zeros(len(reference_df), dtype=float)
+        used_feature_count = 0
+        for feature, weight in numeric_features:
+            if feature not in target_df.columns or feature not in reference_df.columns:
+                continue
+            target_value = pd.to_numeric(pd.Series([target_row.get(feature)]), errors="coerce").iloc[0]
+            if not pd.notna(target_value):
+                continue
+            reference_values = pd.to_numeric(reference_df[feature], errors="coerce")
+            feature_valid = reference_values.notna().to_numpy() & pd.notna(target_value)
+            valid_mask &= feature_valid
+            if feature == THERMAL_SPACE_LOAD_RATIO_COLUMN:
+                scale = max(float(reference_values.abs().median(skipna=True) or 0.0), 0.05)
+            else:
+                scale = max(float(reference_values.std(skipna=True) or 0.0), float(reference_values.abs().median(skipna=True) or 0.0) * 0.05, 1.0)
+            normalized_gap = (reference_values.to_numpy(dtype=float) - float(target_value)) / scale
+            distance += weight * np.square(normalized_gap)
+            used_feature_count += 1
+        if "period" in target_df.columns and "period" in reference_df.columns:
+            target_period = pd.to_numeric(pd.Series([target_row.get("period")]), errors="coerce").iloc[0]
+            if pd.notna(target_period):
+                reference_periods = pd.to_numeric(reference_df["period"], errors="coerce")
+                period_valid = reference_periods.notna().to_numpy()
+                valid_mask &= period_valid
+                period_gap = np.abs(reference_periods.to_numpy(dtype=float) - float(target_period))
+                period_gap = np.minimum(period_gap, 96 - period_gap) / 96.0
+                distance += 0.5 * np.square(period_gap)
+                used_feature_count += 1
+        if DAY_TYPE_COLUMN in target_df.columns and DAY_TYPE_COLUMN in reference_df.columns:
+            target_type = str(target_row.get(DAY_TYPE_COLUMN) or "").strip().lower()
+            reference_types = reference_df[DAY_TYPE_COLUMN].astype(str).str.strip().str.lower().to_numpy()
+            if target_type:
+                distance += 0.6 * (reference_types != target_type).astype(float)
+                used_feature_count += 1
+        if used_feature_count == 0 or not valid_mask.any():
+            rows.append({"plain_price": np.nan, "weighted_price": np.nan, "count": 0, "min_distance": np.nan})
+            continue
+        valid_indices = np.where(valid_mask)[0]
+        valid_distances = np.sqrt(distance[valid_indices])
+        order = np.argsort(valid_distances)
+        plain_prices, plain_distances, nearest_distance = select_candidate_prices(
+            valid_indices,
+            valid_distances,
+            order,
+            plain_top_k,
+            plain_max_distance,
+        )
+        weighted_prices, weighted_distances, _ = select_candidate_prices(
+            valid_indices,
+            valid_distances,
+            order,
+            weighted_top_k,
+            weighted_max_distance_value,
+        )
+        weights = 1.0 / (weighted_distances + 1e-6)
+        rows.append(
+            {
+                "plain_price": float(np.mean(plain_prices)),
+                "weighted_price": float(np.sum(weights * weighted_prices) / np.sum(weights)),
+                "count": int(len(plain_prices)),
+                "min_distance": nearest_distance,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def normalize_similarity_reference_days(reference_days: int | None) -> int:
     value = int(reference_days or DEFAULT_SIMILARITY_REFERENCE_DAYS)
     if value <= 0:
@@ -997,69 +1124,11 @@ def ensure_similarity_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def nearest_multicondition_similarity_price(
-    target_df: pd.DataFrame,
-    reference_df: pd.DataFrame,
-    k: int = 3,
-    similarity_weights: dict[str, object] | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    target_frame = ensure_similarity_columns(target_df)
-    reference_frame = ensure_similarity_columns(reference_df)
-    weights = normalize_similarity_weights(similarity_weights)
-    similar_prices: list[float] = []
-    similar_gaps: list[float] = []
-    for _, target_row in target_frame.iterrows():
-        candidates = reference_frame[reference_frame["period"].astype(int) == int(target_row["period"])].copy()
-        candidates = candidates.dropna(subset=[TARGET_COLUMN])
-        if candidates.empty:
-            similar_prices.append(np.nan)
-            similar_gaps.append(np.nan)
-            continue
-        score = pd.Series(0.0, index=candidates.index)
-        used_weight = pd.Series(0.0, index=candidates.index)
-        for weight_key, weight in weights.items():
-            column = SIMILARITY_WEIGHT_COLUMN_MAP[weight_key]
-            if column == DAY_TYPE_COLUMN:
-                gap = day_type_penalty(target_row.get(DAY_TYPE_COLUMN), candidates[DAY_TYPE_COLUMN])
-            else:
-                gap = normalized_numeric_gap(target_row.get(column), candidates[column])
-            valid = gap.notna()
-            score.loc[valid] += gap.loc[valid] * weight
-            used_weight.loc[valid] += weight
-        score = score.where(used_weight <= 0, score / used_weight.clip(lower=1e-9))
-        score = score.replace([np.inf, -np.inf], np.nan).fillna(float("inf"))
-        top_k = min(k, len(candidates))
-        selected_index = score.nsmallest(top_k).index
-        selected_score = score.loc[selected_index].to_numpy(dtype=float)
-        selected_prices = candidates.loc[selected_index, TARGET_COLUMN].to_numpy(dtype=float)
-        selected_weights = 1.0 / (selected_score + 1e-6)
-        similar_prices.append(float(np.sum(selected_weights * selected_prices) / np.sum(selected_weights)))
-        similar_gaps.append(float(np.min(selected_score)))
-    return np.asarray(similar_prices), np.asarray(similar_gaps)
-
-
-def attach_multicondition_similarity_features(
-    target_df: pd.DataFrame,
-    reference_df: pd.DataFrame,
-    k: int = 3,
-    similarity_weights: dict[str, object] | None = None,
-) -> pd.DataFrame:
-    result = ensure_similarity_columns(target_df)
-    reference_frame = ensure_similarity_columns(reference_df)
-    similar_price, similar_gap = nearest_multicondition_similarity_price(result, reference_frame, k=k, similarity_weights=similarity_weights)
-    result[SIMILAR_PRICE_COLUMN] = similar_price
-    result[SIMILAR_GAP_COLUMN] = similar_gap
-    return result
-
-
 def attach_similarity_features(
     history_df: pd.DataFrame,
     reference_days: int | None = None,
-    similarity_weights: dict[str, object] | None = None,
 ) -> pd.DataFrame:
     result = ensure_similarity_columns(history_df)
-    result[SIMILAR_PRICE_COLUMN] = np.nan
-    result[SIMILAR_GAP_COLUMN] = np.nan
     result[NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN] = np.nan
     result[NET_LOAD_ONLY_SIMILAR_GAP_COLUMN] = np.nan
     unique_dates = sorted(pd.to_datetime(result["date"]).drop_duplicates().tolist())
@@ -1070,14 +1139,11 @@ def attach_similarity_features(
         ref_day = result[result["date"].isin(ref_dates)]
         current_mask = result["date"] == current_date
         current_day = result.loc[current_mask]
-        multi_price, multi_gap = nearest_multicondition_similarity_price(current_day, ref_day, similarity_weights=similarity_weights)
         similar_price, similar_gap = nearest_similarity_price(
             current_day["net_load"].to_numpy(dtype=float),
             ref_day["net_load"].to_numpy(dtype=float),
             ref_day[TARGET_COLUMN].to_numpy(dtype=float),
         )
-        result.loc[current_mask, SIMILAR_PRICE_COLUMN] = multi_price
-        result.loc[current_mask, SIMILAR_GAP_COLUMN] = multi_gap
         result.loc[current_mask, NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN] = similar_price
         result.loc[current_mask, NET_LOAD_ONLY_SIMILAR_GAP_COLUMN] = similar_gap
     return result
@@ -1174,6 +1240,7 @@ def build_training_frame(
         emit_progress(progress_callback, "正在准备训练特征", 19)
         save_dataframe_cache(feature_cache_dir, "training_features", feature_cache_key, history_df, skipped_sheets)
         emit_progress(progress_callback, "训练特征构建完成", 21)
+    full_feature_history_df = history_df.copy()
     effective_start_date, effective_end_date = resolve_training_date_range(history_df, config)
     if config.training_window_days:
         emit_progress(progress_callback, f"按最近 {config.training_window_days} 天训练使用天数过滤数据", 22)
@@ -1183,7 +1250,30 @@ def build_training_frame(
     history_df = history_df.dropna(subset=required_columns).reset_index(drop=True)
     if history_df.empty:
         raise ValueError("数据加载后经清洗为空，请检查历史数据文件是否包含有效数据。")
+    history_df.attrs["full_feature_history_df"] = full_feature_history_df
     return history_df, skipped_sheets, quality_report_path
+
+
+def model_training_frame_from_base(
+    base_history_df: pd.DataFrame,
+    *,
+    training_window_days: int | None,
+    valid_days: int,
+    start_date: str | None,
+    end_date: str | None,
+) -> pd.DataFrame:
+    scoped_config = TrainConfig(
+        valid_days=valid_days,
+        training_window_days=training_window_days,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    effective_start_date, effective_end_date = resolve_training_date_range(base_history_df, scoped_config)
+    scoped_df = filter_date_range(base_history_df, effective_start_date, effective_end_date)
+    scoped_df = scoped_df.dropna(subset=[TARGET_COLUMN, "net_load"]).reset_index(drop=True)
+    if scoped_df.empty:
+        raise ValueError("模型训练数据为空，请检查训练窗口或起止日期。")
+    return scoped_df
 
 def make_dmatrix(frame: pd.DataFrame, feature_columns: list[str], label_column: str | None = None):
     import xgboost as xgb
@@ -1661,7 +1751,7 @@ def rank_model_candidates(
     }
 
 
-def summarize_model_vs_baseline(error_df: pd.DataFrame, baseline_column: str = "similar_predicted") -> dict:
+def summarize_model_vs_baseline(error_df: pd.DataFrame, baseline_column: str = "net_load_only_similar_predicted") -> dict:
     if error_df.empty or baseline_column not in error_df.columns:
         return {
             "model": summarize_prediction_errors(error_df),
@@ -1718,7 +1808,6 @@ def rolling_backtest_selected_model(
     num_boost_round: int,
     horizons: tuple[int, ...] = (14, 30),
     similarity_reference_days: int = DEFAULT_SIMILARITY_REFERENCE_DAYS,
-    similarity_weights: dict[str, object] | None = None,
     segment_definitions: OrderedDict[str, tuple[int, int]] | None = None,
     high_price_weight_enabled: bool = False,
     high_price_threshold: float | None = None,
@@ -1732,7 +1821,6 @@ def rolling_backtest_selected_model(
     baseline_history_df = attach_similarity_features(
         history_df,
         reference_days=similarity_reference_days,
-        similarity_weights=similarity_weights,
     )
 
     for horizon in horizons:
@@ -1777,9 +1865,6 @@ def rolling_backtest_selected_model(
                             "period": test_df["period"].to_numpy(),
                             "actual": test_df[TARGET_COLUMN].to_numpy(dtype=float),
                             "predicted": pred,
-                            "similar_predicted": test_df[SIMILAR_PRICE_COLUMN].to_numpy(dtype=float)
-                            if SIMILAR_PRICE_COLUMN in test_df.columns
-                            else np.full(len(test_df), np.nan),
                             "net_load_only_similar_predicted": test_df[NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN].to_numpy(dtype=float)
                             if NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN in test_df.columns
                             else np.full(len(test_df), np.nan),
@@ -1794,10 +1879,6 @@ def rolling_backtest_selected_model(
             segment_name: summarize_prediction_errors(segment_df)
             for segment_name, segment_df in error_df.groupby("segment")
         }
-        segment_baseline_metrics = {
-            segment_name: summarize_prediction_errors(segment_df, "similar_predicted")
-            for segment_name, segment_df in error_df.groupby("segment")
-        }
         segment_net_load_only_baseline_metrics = {
             segment_name: summarize_prediction_errors(segment_df, "net_load_only_similar_predicted")
             for segment_name, segment_df in error_df.groupby("segment")
@@ -1806,33 +1887,25 @@ def rolling_backtest_selected_model(
         low_threshold = float(error_df["actual"].quantile(0.1))
         high_spike_df = error_df[error_df["actual"] >= high_threshold]
         low_spike_df = error_df[error_df["actual"] <= low_threshold]
-        model_vs_baseline = summarize_model_vs_baseline(error_df)
         model_vs_net_load_only_baseline = summarize_model_vs_baseline(error_df, "net_load_only_similar_predicted")
         results[str(horizon)] = {
             "rows": int(len(error_df)),
             "test_date_start": min(test_dates) if test_dates else None,
             "test_date_end": max(test_dates) if test_dates else None,
             "overall": summarize_prediction_errors(error_df),
-            "baseline": summarize_prediction_errors(error_df, "similar_predicted"),
-            "baseline_label": "多条件相似法",
             "net_load_only_baseline": summarize_prediction_errors(error_df, "net_load_only_similar_predicted"),
-            "net_load_only_baseline_label": "仅火电空间相似法",
-            "model_vs_similarity": model_vs_baseline,
+            "net_load_only_baseline_label": "净负荷相似法预测价格",
             "model_vs_net_load_only_similarity": model_vs_net_load_only_baseline,
             "segments": segment_metrics,
-            "segment_baseline": segment_baseline_metrics,
             "segment_net_load_only_baseline": segment_net_load_only_baseline_metrics,
             "daily_error_rank": top_daily_error_days(error_df),
             "spike_errors": {
                 "high_threshold": round(high_threshold, 4),
                 "high": summarize_prediction_errors(high_spike_df),
-                "high_baseline": summarize_prediction_errors(high_spike_df, "similar_predicted"),
                 "high_net_load_only_baseline": summarize_prediction_errors(high_spike_df, "net_load_only_similar_predicted"),
-                "high_model_vs_similarity": summarize_model_vs_baseline(high_spike_df),
                 "high_model_vs_net_load_only_similarity": summarize_model_vs_baseline(high_spike_df, "net_load_only_similar_predicted"),
                 "low_threshold": round(low_threshold, 4),
                 "low": summarize_prediction_errors(low_spike_df),
-                "low_baseline": summarize_prediction_errors(low_spike_df, "similar_predicted"),
                 "low_net_load_only_baseline": summarize_prediction_errors(low_spike_df, "net_load_only_similar_predicted"),
             },
         }
@@ -1894,11 +1967,26 @@ def training_preferences_path(model_root: str | Path = DEFAULT_MODEL_ROOT) -> Pa
 
 def default_training_preferences() -> dict:
     return {
-        "similarity_weights": dict(normalize_similarity_weights()),
         "segment_mode": "default",
         "segment_config": DEFAULT_SEGMENT_CONFIG,
         "high_price_weighting": {"enabled": False, "quantile": 0.8, "multiplier": 2.0},
         "price_intervals": normalize_price_intervals(DEFAULT_PRICE_INTERVALS),
+        "prediction_reference": {
+            "recent_reference_days": 1,
+            "same_type_reference_days": 1,
+            "knn_similarity": dict(DEFAULT_KNN_SIMILARITY_CONFIG),
+        },
+    }
+
+
+def normalize_prediction_reference_preferences(preferences: dict[str, object] | None = None) -> dict[str, object]:
+    preferences = preferences or {}
+    return {
+        "recent_reference_days": normalize_reference_days(preferences.get("recent_reference_days") or 1),
+        "same_type_reference_days": normalize_reference_days(preferences.get("same_type_reference_days") or 1),
+        "knn_similarity": normalize_knn_similarity_config(
+            preferences.get("knn_similarity") if isinstance(preferences.get("knn_similarity"), dict) else preferences
+        ),
     }
 
 
@@ -1911,8 +1999,6 @@ def load_training_preferences(model_root: str | Path = DEFAULT_MODEL_ROOT) -> di
     except (OSError, json.JSONDecodeError):
         return default_training_preferences()
     preferences = default_training_preferences()
-    if isinstance(data, dict) and isinstance(data.get("similarity_weights"), dict):
-        preferences["similarity_weights"] = dict(normalize_similarity_weights(data["similarity_weights"]))
     if isinstance(data, dict) and data.get("segment_mode") == "custom" and isinstance(data.get("segment_config"), list):
         preferences["segment_mode"] = "custom"
         preferences["segment_config"] = segment_metadata(normalize_segment_config(data["segment_config"]))
@@ -1924,14 +2010,14 @@ def load_training_preferences(model_root: str | Path = DEFAULT_MODEL_ROOT) -> di
             "multiplier": max(1.0, float(high_config.get("multiplier", 2.0))),
         }
     if isinstance(data, dict) and isinstance(data.get("price_intervals"), list):
-        preferences["price_intervals"] = normalize_price_intervals(data["price_intervals"])
+        preferences["price_intervals"] = normalize_price_intervals(data["price_intervals"], allow_legacy_open_bounds=True)
+    if isinstance(data, dict) and isinstance(data.get("prediction_reference"), dict):
+        preferences["prediction_reference"] = normalize_prediction_reference_preferences(data["prediction_reference"])
     return preferences
 
 
 def save_training_preferences(model_root: str | Path, preferences: dict) -> dict:
     current = load_training_preferences(model_root)
-    if isinstance(preferences.get("similarity_weights"), dict):
-        current["similarity_weights"] = dict(normalize_similarity_weights(preferences["similarity_weights"]))
     if preferences.get("segment_mode") in {"default", "custom"}:
         current["segment_mode"] = preferences.get("segment_mode")
     if isinstance(preferences.get("segment_config"), list):
@@ -1945,6 +2031,8 @@ def save_training_preferences(model_root: str | Path, preferences: dict) -> dict
         }
     if isinstance(preferences.get("price_intervals"), list):
         current["price_intervals"] = normalize_price_intervals(preferences["price_intervals"])
+    if isinstance(preferences.get("prediction_reference"), dict):
+        current["prediction_reference"] = normalize_prediction_reference_preferences(preferences["prediction_reference"])
     path = training_preferences_path(model_root)
     write_json(path, current)
     return current
@@ -2026,6 +2114,28 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     segment_definitions = normalize_segment_config(config.segment_config)
     segment_config_metadata = segment_metadata(segment_definitions)
     history_df["segment"] = assign_segments(history_df["period"], segment_definitions)
+    full_feature_history_df = history_df.attrs.get("full_feature_history_df")
+    if not isinstance(full_feature_history_df, pd.DataFrame):
+        full_feature_history_df = history_df.copy()
+    interval_valid_days = int(config.interval_valid_days if config.interval_valid_days is not None else config.valid_days)
+    interval_training_window_days = (
+        int(config.interval_training_window_days)
+        if config.interval_training_window_days is not None
+        else config.training_window_days
+    )
+    interval_num_boost_round = int(
+        config.interval_num_boost_round if config.interval_num_boost_round is not None else config.num_boost_round
+    )
+    interval_start_date = config.interval_start_date if config.interval_start_date is not None else config.start_date
+    interval_end_date = config.interval_end_date if config.interval_end_date is not None else config.end_date
+    interval_history_df = model_training_frame_from_base(
+        full_feature_history_df,
+        training_window_days=interval_training_window_days,
+        valid_days=interval_valid_days,
+        start_date=interval_start_date,
+        end_date=interval_end_date,
+    )
+    interval_history_df["segment"] = assign_segments(interval_history_df["period"], segment_definitions)
     high_price_threshold = None
     if config.high_price_weight_enabled:
         quantile = min(0.99, max(0.5, float(config.high_price_quantile or 0.8)))
@@ -2038,7 +2148,6 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     if not model_backends:
         raise RuntimeError("没有可用的模型训练后端")
     model_variants: OrderedDict[str, dict[str, object]] = OrderedDict()
-    similarity_weights = normalize_similarity_weights(config.similarity_weights)
     variant_metrics: dict[str, dict[str, dict[str, float | int | None]]] = {}
     validation_records: list[dict] = []
     train_dates: list[str] = []
@@ -2108,25 +2217,26 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     price_intervals = normalize_price_intervals(config.price_intervals or load_training_preferences(config.model_root).get("price_intervals"))
     emit_progress(progress_callback, "正在训练价格区间分类模型", 76)
     price_interval_model = train_interval_models(
-        history_df,
+        interval_history_df,
         target_column=TARGET_COLUMN,
         feature_columns=list(selected_variant_meta["feature_columns"]),
         segment_config=segment_config_metadata,
         output_dir=staging_dir,
         intervals=price_intervals,
-        valid_days=config.valid_days,
-        num_boost_round=config.num_boost_round,
+        valid_days=interval_valid_days,
+        num_boost_round=interval_num_boost_round,
     )
     if config.enable_rolling_backtest:
-        emit_progress(progress_callback, "正在执行最近 14/30 天滚动回测", 78)
+        horizon_text = "/".join(str(item) for item in config.rolling_backtest_horizons) or "14/30"
+        emit_progress(progress_callback, f"正在执行最近 {horizon_text} 天滚动回测", 78)
         rolling_backtest_metrics = rolling_backtest_selected_model(
             history_df,
             list(selected_variant_meta["feature_columns"]),
             str(selected_variant_meta["model_backend"]),
             config.training_window_days,
             config.num_boost_round,
+            horizons=tuple(config.rolling_backtest_horizons or (14, 30)),
             similarity_reference_days=normalize_similarity_reference_days(config.similarity_reference_days),
-            similarity_weights=dict(similarity_weights),
             segment_definitions=segment_definitions,
             high_price_weight_enabled=config.high_price_weight_enabled,
             high_price_threshold=high_price_threshold,
@@ -2150,6 +2260,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "variant_quality_metrics": variant_quality_metrics,
         "price_interval_model": price_interval_model,
         "rolling_backtest_metrics": rolling_backtest_metrics,
+        "rolling_backtest_horizons": list(config.rolling_backtest_horizons or (14, 30)),
         "segments": segment_config_metadata,
         "segment_config": segment_config_metadata,
         "segment_mode": "custom" if config.segment_config else "default",
@@ -2163,8 +2274,23 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "training_window_days": config.training_window_days,
         "training_mode": "rolling_window" if config.training_window_days else "manual_date_range",
         "num_boost_round": config.num_boost_round,
+        "price_model_training_config": {
+            "training_window_days": config.training_window_days,
+            "training_mode": "rolling_window" if config.training_window_days else "manual_date_range",
+            "start_date": config.start_date,
+            "end_date": config.end_date,
+            "valid_days": config.valid_days,
+            "num_boost_round": config.num_boost_round,
+        },
+        "interval_model_training_config": {
+            "training_window_days": interval_training_window_days,
+            "training_mode": "rolling_window" if interval_training_window_days else "manual_date_range",
+            "start_date": interval_start_date,
+            "end_date": interval_end_date,
+            "valid_days": interval_valid_days,
+            "num_boost_round": interval_num_boost_round,
+        },
         "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
-        "similarity_weights": dict(similarity_weights),
         "xgboost_params": DEFAULT_XGB_PARAMS,
         "train_start_date": train_dates[0] if train_dates else None,
         "train_end_date": train_dates[-1] if train_dates else None,
@@ -2183,8 +2309,23 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
             "training_mode": "rolling_window" if config.training_window_days else "manual_date_range",
             "valid_days": config.valid_days,
             "num_boost_round": config.num_boost_round,
+            "price_model_config": {
+                "training_window_days": config.training_window_days,
+                "training_mode": "rolling_window" if config.training_window_days else "manual_date_range",
+                "start_date": config.start_date,
+                "end_date": config.end_date,
+                "valid_days": config.valid_days,
+                "num_boost_round": config.num_boost_round,
+            },
+            "interval_model_config": {
+                "training_window_days": interval_training_window_days,
+                "training_mode": "rolling_window" if interval_training_window_days else "manual_date_range",
+                "start_date": interval_start_date,
+                "end_date": interval_end_date,
+                "valid_days": interval_valid_days,
+                "num_boost_round": interval_num_boost_round,
+            },
             "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
-            "similarity_weights": dict(similarity_weights),
             "segment_config": segment_config_metadata,
             "high_price_weighting": {
                 "enabled": bool(config.high_price_weight_enabled),
@@ -2224,8 +2365,9 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "end_date_filter": config.end_date,
         "training_window_days": config.training_window_days,
         "training_mode": metadata["training_mode"],
+        "price_model_training_config": metadata["price_model_training_config"],
+        "interval_model_training_config": metadata["interval_model_training_config"],
         "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
-        "similarity_weights": dict(similarity_weights),
         "metrics": metrics_summary,
         "variant_metrics": variant_metrics,
         "selected_model_key": selected_model_key,
@@ -2675,9 +2817,9 @@ def build_reference_frame(
 def attach_forecast_similarity_features(
     forecast_df: pd.DataFrame,
     reference_df: pd.DataFrame,
-    similarity_weights: dict[str, object] | None = None,
+    knn_similarity_config: dict[str, object] | None = None,
 ) -> pd.DataFrame:
-    result = attach_multicondition_similarity_features(forecast_df, reference_df, similarity_weights=similarity_weights)
+    result = ensure_similarity_columns(forecast_df)
     similar_price, similar_gap = nearest_similarity_price(
         result["net_load"].to_numpy(dtype=float),
         reference_df["net_load"].to_numpy(dtype=float),
@@ -2685,6 +2827,19 @@ def attach_forecast_similarity_features(
     )
     result[NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN] = similar_price
     result[NET_LOAD_ONLY_SIMILAR_GAP_COLUMN] = similar_gap
+    knn_config = normalize_knn_similarity_config(knn_similarity_config)
+    knn_result = multi_factor_knn_similarity_price(
+        result,
+        ensure_similarity_columns(reference_df),
+        k=int(knn_config["knn_k"]),
+        max_distance=float(knn_config["knn_max_distance"]),
+        weighted_k=int(knn_config["weighted_knn_k"]),
+        weighted_max_distance=float(knn_config["weighted_knn_max_distance"]),
+    )
+    result[KNN_SIMILAR_PRICE_COLUMN] = knn_result["plain_price"].to_numpy(dtype=float)
+    result[WEIGHTED_KNN_PRICE_COLUMN] = knn_result["weighted_price"].to_numpy(dtype=float)
+    result[KNN_SIMILAR_COUNT_COLUMN] = knn_result["count"].to_numpy(dtype=int)
+    result[KNN_SIMILAR_DISTANCE_COLUMN] = knn_result["min_distance"].to_numpy(dtype=float)
     return result
 
 
@@ -2771,10 +2926,10 @@ def run_prediction_with_strategy(
     models: dict[str, object],
     reference_days: int,
     reference_strategy: str,
+    knn_similarity_config: dict[str, object] | None = None,
     progress_callback: ProgressCallback | None = None,
     segment_progress_start: int = 55,
     segment_progress_span: int = 30,
-    similarity_weights: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, list[str], str, str]:
     strategy_key = normalize_reference_strategy(reference_strategy)
     strategy_label = REFERENCE_STRATEGIES[strategy_key]
@@ -2786,10 +2941,7 @@ def run_prediction_with_strategy(
         reference_strategy=strategy_key,
         holiday_dates=holiday_dates,
     )
-    metadata_weights = metadata.get("similarity_weights")
-    effective_similarity_weights = similarity_weights if similarity_weights is not None else metadata_weights
-    model_similarity_weights = normalize_similarity_weights(effective_similarity_weights, fill_missing_with_defaults=False) if effective_similarity_weights else None
-    strategy_forecast_df = attach_forecast_similarity_features(forecast_df, reference_df, similarity_weights=model_similarity_weights)
+    strategy_forecast_df = attach_forecast_similarity_features(forecast_df, reference_df, knn_similarity_config)
 
     prediction_frames: list[pd.DataFrame] = []
     total_segments = len(metadata["segments"])
@@ -2814,7 +2966,7 @@ def run_prediction_with_strategy(
         clipped_predicted_price = clip_price_series(raw_predicted_price)
         segment_df["predicted_price"] = clipped_predicted_price
         segment_df["model_variant"] = variant_key
-        segment_df["model_similarity_diff"] = segment_df["predicted_price"] - segment_df[SIMILAR_PRICE_COLUMN]
+        segment_df["model_similarity_diff"] = segment_df["predicted_price"] - segment_df[NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN]
         segment_df["residual_pred"] = segment_df["model_similarity_diff"]
         prediction_frames.append(segment_df)
 
@@ -2836,7 +2988,7 @@ def predict_prices(
     holiday_file: str | Path | None = None,
     reference_days: int = 1,
     reference_strategy: str = "recent_n_days",
-    similarity_weights: dict[str, object] | None = None,
+    knn_similarity_config: dict[str, object] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> PredictResult:
     ensure_xgboost_available()
@@ -2859,7 +3011,7 @@ def predict_prices(
         models=models,
         reference_days=reference_days,
         reference_strategy=reference_strategy,
-        similarity_weights=similarity_weights,
+        knn_similarity_config=knn_similarity_config,
         progress_callback=progress_callback,
     )
     emit_progress(progress_callback, "正在导出预测结果", 92)
@@ -2887,19 +3039,27 @@ def predict_prices_compare(
     output_file: str | Path = DEFAULT_OUTPUT_FILE,
     holiday_file: str | Path | None = None,
     reference_days: int = 1,
+    recent_reference_days: int | None = None,
+    same_type_reference_days: int | None = None,
     selected_strategy: str = "recent_n_days",
-    similarity_weights: dict[str, object] | None = None,
+    knn_similarity_config: dict[str, object] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> PredictCompareResult:
     ensure_xgboost_available()
-    reference_days = normalize_reference_days(reference_days)
+    knn_similarity_config = normalize_knn_similarity_config(knn_similarity_config)
+    reference_days_by_strategy = normalize_reference_days_by_strategy(
+        reference_days=reference_days,
+        recent_reference_days=recent_reference_days,
+        same_type_reference_days=same_type_reference_days,
+    )
+    max_reference_days = max(reference_days_by_strategy.values())
     selected_strategy_key = normalize_reference_strategy(selected_strategy)
     history_df, forecast_df, template_reference_df, holiday_dates, metadata, models, quality_report_path = prepare_prediction_inputs(
         history_dir=history_dir,
         forecast_file=forecast_file,
         model_root=model_root,
         holiday_file=holiday_file,
-        reference_days=reference_days,
+        reference_days=max_reference_days,
         progress_callback=progress_callback,
     )
 
@@ -2907,6 +3067,7 @@ def predict_prices_compare(
     strategy_results: dict[str, PredictResult] = {}
     total_strategies = len(strategy_keys)
     for strategy_index, strategy_key in enumerate(strategy_keys, start=1):
+        strategy_reference_days = reference_days_by_strategy[strategy_key]
         emit_progress(progress_callback, f"正在对比策略 {strategy_index}/{total_strategies}: {REFERENCE_STRATEGIES[strategy_key]}", 48 + int((strategy_index - 1) / total_strategies * 6))
         result_df, reference_dates, normalized_strategy_key, strategy_label = run_prediction_with_strategy(
             history_df=history_df,
@@ -2915,9 +3076,9 @@ def predict_prices_compare(
             holiday_dates=holiday_dates,
             metadata=metadata,
             models=models,
-            reference_days=reference_days,
+            reference_days=strategy_reference_days,
             reference_strategy=strategy_key,
-            similarity_weights=similarity_weights,
+            knn_similarity_config=knn_similarity_config,
             progress_callback=progress_callback,
             segment_progress_start=55 + int((strategy_index - 1) * 15),
             segment_progress_span=12,
@@ -2929,7 +3090,7 @@ def predict_prices_compare(
             template_updated=False,
             reference_strategy_key=normalized_strategy_key,
             reference_strategy_label=strategy_label,
-            reference_days_requested=reference_days,
+            reference_days_requested=strategy_reference_days,
             reference_dates=reference_dates,
             result_df=result_df,
             quality_report_path=quality_report_path,
@@ -2977,8 +3138,11 @@ def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:
         THERMAL_SPACE_LOAD_RATIO_COLUMN,
         "thermal_on_capacity",
         DAY_TYPE_COLUMN,
-        SIMILAR_PRICE_COLUMN,
         NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN,
+        KNN_SIMILAR_PRICE_COLUMN,
+        WEIGHTED_KNN_PRICE_COLUMN,
+        KNN_SIMILAR_COUNT_COLUMN,
+        KNN_SIMILAR_DISTANCE_COLUMN,
         "model_variant",
         "model_similarity_diff",
         "predicted_price",
@@ -3211,17 +3375,12 @@ def version_rolling_metrics(metadata: dict) -> dict[str, object | None]:
         metrics[f"{prefix}_direction_accuracy"] = nested_metric(row, "overall", "direction_accuracy")
         metrics[f"{prefix}_max_abs_error"] = nested_metric(row, "overall", "max_abs_error")
         metrics[f"{prefix}_p90_abs_error"] = nested_metric(row, "overall", "p90_abs_error")
-        metrics[f"{prefix}_multi_similarity_mae"] = nested_metric(row, "baseline", "mae")
-        metrics[f"{prefix}_multi_similarity_rmse"] = nested_metric(row, "baseline", "rmse")
         metrics[f"{prefix}_thermal_space_similarity_mae"] = nested_metric(row, "net_load_only_baseline", "mae")
         metrics[f"{prefix}_thermal_space_similarity_rmse"] = nested_metric(row, "net_load_only_baseline", "rmse")
-        metrics[f"{prefix}_multi_similarity_improvement"] = nested_metric(row, "model_vs_similarity", "mae_improvement")
-        metrics[f"{prefix}_multi_similarity_improvement_pct"] = nested_metric(row, "model_vs_similarity", "mae_improvement_pct")
         metrics[f"{prefix}_thermal_space_similarity_improvement"] = nested_metric(row, "model_vs_net_load_only_similarity", "mae_improvement")
         metrics[f"{prefix}_thermal_space_similarity_improvement_pct"] = nested_metric(row, "model_vs_net_load_only_similarity", "mae_improvement_pct")
         metrics[f"{prefix}_high_price_mae"] = nested_metric(row, "spike_errors", "high", "mae")
         metrics[f"{prefix}_high_price_rmse"] = nested_metric(row, "spike_errors", "high", "rmse")
-        metrics[f"{prefix}_high_price_multi_similarity_mae"] = nested_metric(row, "spike_errors", "high_baseline", "mae")
         metrics[f"{prefix}_high_price_thermal_space_similarity_mae"] = nested_metric(row, "spike_errors", "high_net_load_only_baseline", "mae")
         metrics[f"{prefix}_evening_peak_mae"] = nested_metric(row, "segments", "evening_peak", "mae")
         metrics[f"{prefix}_evening_peak_rmse"] = nested_metric(row, "segments", "evening_peak", "rmse")

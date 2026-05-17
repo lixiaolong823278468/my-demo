@@ -576,39 +576,6 @@ select {
   margin: 14px 0 10px;
 }
 
-.interval-strip {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  margin: 8px 0 14px;
-}
-
-.interval-strip-label {
-  font-size: 12px;
-  font-weight: 800;
-  color: var(--text-2);
-}
-
-.interval-strip-bars {
-  display: grid;
-  grid-template-columns: repeat(96, minmax(3px, 1fr));
-  gap: 2px;
-}
-
-.interval-strip-cell {
-  height: 12px;
-  border-radius: 3px;
-  background: #dbeafe;
-}
-
-.interval-low { background: #60a5fa; }
-.interval-low-mid { background: #22d3ee; }
-.interval-mid { background: #22c55e; }
-.interval-mid-high { background: #f59e0b; }
-.interval-high { background: #ef4444; }
-.interval-extreme { background: #7f1d1d; }
-
 .form-grid {
   display: grid;
   gap: 16px;
@@ -2752,6 +2719,215 @@ body::after {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.predict-control-card {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.42fr) minmax(680px, 1.58fr);
+  align-items: stretch;
+  gap: 18px;
+}
+
+.predict-model-panel,
+.predict-run-panel {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(15, 107, 255, 0.12);
+  border-radius: 24px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(245, 250, 255, 0.9)),
+    radial-gradient(circle at 0 0, rgba(15, 107, 255, 0.12), transparent 36%);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.07);
+}
+
+.predict-model-panel {
+  display: grid;
+  align-content: center;
+  gap: 10px;
+}
+
+#tab-predict .predict-reference-title {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 950;
+  letter-spacing: -0.01em;
+}
+
+#tab-predict .predict-reference-inputs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+#tab-predict .similarity-config-card {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  gap: 0;
+  margin: 14px 0 0;
+  overflow: hidden;
+  border: 1px solid rgba(15, 107, 255, 0.14);
+  border-radius: 24px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(246, 250, 255, 0.92)),
+    radial-gradient(circle at 0 0, rgba(15, 107, 255, 0.11), transparent 30%),
+    radial-gradient(circle at 100% 0, rgba(19, 194, 194, 0.1), transparent 32%);
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.07);
+}
+
+#tab-predict .similarity-config-panel {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+}
+
+#tab-predict .similarity-config-panel + .similarity-config-panel {
+  border-left: 1px solid rgba(15, 107, 255, 0.14);
+}
+
+#tab-predict .similarity-config-panel-netload {
+  background: linear-gradient(135deg, rgba(15, 107, 255, 0.06), transparent 62%);
+}
+
+#tab-predict .similarity-config-head {
+  display: grid;
+  gap: 4px;
+}
+
+#tab-predict .similarity-config-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 950;
+  letter-spacing: -0.01em;
+}
+
+#tab-predict .similarity-config-subtitle {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+#tab-predict .similarity-config-inputs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+#tab-predict .predict-reference-field {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: start;
+  gap: 7px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+#tab-predict .predict-model-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 7px 12px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+#tab-predict .predict-reference-field span,
+#tab-predict .predict-model-field span {
+  margin: 0;
+  color: #10213d;
+  font-size: 13px;
+  font-weight: 950;
+}
+
+#tab-predict .predict-reference-field input,
+#tab-predict .predict-model-field select {
+  height: 40px;
+  font-weight: 900;
+}
+
+#tab-predict .predict-reference-field input {
+  text-align: center;
+}
+
+#tab-predict .predict-reference-note {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+#tab-predict .predict-reference-field small,
+#tab-predict .predict-model-field small {
+  grid-column: 1 / -1;
+  color: #6b7789;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.predict-run-panel {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(390px, 420px);
+  align-items: center;
+  gap: 24px;
+}
+
+.predict-progress-card {
+  min-height: 92px;
+  padding: 14px 16px;
+  box-shadow: none;
+}
+
+.predict-actions {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.predict-action-row {
+  display: grid;
+  gap: 10px;
+}
+
+.predict-action-row-primary {
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+}
+
+.predict-action-row-secondary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.predict-actions .primary-btn,
+.predict-actions .ghost-btn,
+.predict-actions .stop-btn {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-left: 14px;
+  padding-right: 14px;
+}
+
+.predict-actions .predict-action-main {
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.predict-stop-action:not(.hidden) {
+  display: inline-flex;
+  justify-content: center;
+}
+
 #tab-train .form-grid,
 #tab-predict .form-grid,
 #tab-versions .form-grid {
@@ -2763,6 +2939,345 @@ body::after {
 
 #tab-train.train-page {
   gap: 18px;
+}
+
+.train-config-grid,
+.train-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-items: stretch;
+}
+
+.train-config-grid .train-workflow-card,
+.train-action-grid .train-workflow-card {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: visible;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
+}
+
+.train-config-grid .four-col,
+.train-action-grid .four-col {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#tab-train .train-workflow-card > .form-grid,
+#tab-train .train-workflow-card > .manual-model-grid,
+#tab-train .train-workflow-card > .embedded-progress-row,
+#tab-train .train-workflow-card > .interval-config-note,
+#tab-train .train-workflow-card > .segment-search-field,
+#tab-train .train-workflow-card > .table-shell,
+#tab-train .train-workflow-card > .actions-row {
+  min-width: 680px;
+}
+
+#tab-train .train-workflow-card > .section-header {
+  min-width: 0;
+}
+
+#tab-train .table-frame-sm {
+  overflow: auto;
+}
+
+.train-config-grid .actions-row,
+.train-action-grid .actions-row {
+  flex-wrap: wrap;
+}
+
+.interval-config-note {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border: 1px solid rgba(15, 107, 255, 0.12);
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(15, 107, 255, 0.06), rgba(46, 229, 157, 0.08));
+  color: #526174;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.6;
+}
+
+#segment-config-table {
+  width: max-content;
+  table-layout: fixed;
+}
+
+#price-interval-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+#segment-config-table {
+  min-width: 620px;
+}
+
+#price-interval-table {
+  min-width: 720px;
+}
+
+#segment-config-table th,
+#segment-config-table td,
+#price-interval-table th,
+#price-interval-table td {
+  padding: 8px 8px;
+  vertical-align: middle;
+}
+
+#segment-config-table th:nth-child(1),
+#segment-config-table td:nth-child(1) {
+  width: 160px;
+}
+
+#segment-config-table th:nth-child(2),
+#segment-config-table td:nth-child(2),
+#segment-config-table th:nth-child(3),
+#segment-config-table td:nth-child(3) {
+  width: 120px;
+}
+
+#segment-config-table th:nth-child(4),
+#segment-config-table td:nth-child(4) {
+  width: 220px;
+}
+
+#segment-config-table .mini-input {
+  height: 36px;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 12px;
+}
+
+#price-interval-table .mini-input {
+  min-width: 0;
+  width: 96px;
+  height: 36px;
+  padding: 7px 10px;
+  border-radius: 12px;
+  font-weight: 750;
+  text-align: center;
+}
+
+#price-interval-table .mini-input:disabled {
+  color: #64748b;
+  border-color: rgba(100, 116, 139, 0.16);
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.95), rgba(241, 245, 249, 0.88));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  cursor: not-allowed;
+}
+
+#price-interval-table th:nth-child(1),
+#price-interval-table td:nth-child(1) {
+  width: 14%;
+}
+
+#price-interval-table th:nth-child(2),
+#price-interval-table td:nth-child(2),
+#price-interval-table th:nth-child(3),
+#price-interval-table td:nth-child(3) {
+  width: 13%;
+}
+
+#price-interval-table th:nth-child(4),
+#price-interval-table td:nth-child(4) {
+  width: 9%;
+}
+
+#price-interval-table th:nth-child(5),
+#price-interval-table td:nth-child(5) {
+  width: 8%;
+  text-align: center;
+}
+
+.segment-search-field {
+  margin: 12px 0 18px;
+}
+
+.segment-search-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.segment-search-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(15, 107, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #1f2a44;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.segment-search-chip input {
+  width: 14px;
+  height: 14px;
+  accent-color: #1677ff;
+}
+
+.train-workflow-card-interval > .actions-row {
+  justify-content: center;
+  gap: 14px;
+  margin-top: 22px;
+  margin-bottom: 4px;
+  padding-top: 16px;
+  border-top: 1px dashed rgba(239, 68, 68, 0.16);
+}
+
+.interval-range-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 112px;
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid rgba(15, 107, 255, 0.15);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(15, 107, 255, 0.09), rgba(46, 229, 157, 0.11));
+  color: #1e3a5f;
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: 0.02em;
+}
+
+.interval-note-cell {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.interval-delete-cell {
+  text-align: center;
+}
+
+.tiny-action-btn {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(220, 38, 38, 0.14);
+  border-radius: 999px;
+  background: rgba(254, 242, 242, 0.72);
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.tiny-action-btn:hover:not(:disabled) {
+  border-color: rgba(220, 38, 38, 0.24);
+  background: rgba(254, 226, 226, 0.92);
+  transform: translateY(-1px);
+}
+
+.tiny-action-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.manual-model-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.manual-model-panel {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.76);
+}
+
+.price-panel {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(245, 250, 255, 0.88));
+}
+
+.interval-panel {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 255, 250, 0.88));
+}
+
+.mini-section-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.mini-section-title {
+  color: #10213d;
+  font-size: 13px;
+  font-weight: 950;
+  letter-spacing: -0.01em;
+}
+
+#tab-train .compact-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.date-config-grid {
+  margin-top: 10px;
+}
+
+.compact-toggle-row {
+  margin-top: 10px;
+  gap: 10px;
+}
+
+.manual-actions-row {
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(15, 23, 42, 0.12);
+}
+
+@media (max-width: 1180px) {
+  .train-config-grid,
+  .train-action-grid,
+  .manual-model-grid,
+  .predict-control-card {
+    grid-template-columns: 1fr;
+  }
+
+  #tab-predict .similarity-config-card {
+    overflow-x: auto;
+    grid-template-columns: repeat(3, minmax(260px, 1fr));
+  }
+
+  .predict-run-panel {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 1181px) and (max-width: 1360px) {
+  .predict-control-card {
+    grid-template-columns: minmax(260px, 0.38fr) minmax(0, 1fr);
+  }
+
+  .predict-run-panel {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .predict-actions {
+    max-width: 460px;
+  }
 }
 
 .cleanup-card {
@@ -2868,6 +3383,13 @@ body::after {
     radial-gradient(circle at 92% 8%, rgba(46, 229, 157, 0.18), transparent 28%),
     linear-gradient(135deg, #f8fbff, #eef8ff);
   border-color: rgba(15, 107, 255, 0.16);
+}
+
+.train-workflow-card-model {
+  background:
+    radial-gradient(circle at 92% 10%, rgba(15, 107, 255, 0.13), transparent 30%),
+    linear-gradient(135deg, #f8fbff, #ffffff);
+  border-color: rgba(15, 107, 255, 0.18);
 }
 
 .train-workflow-card-manual {
@@ -3014,6 +3536,10 @@ body::after {
   margin-top: 18px;
 }
 
+#tab-predict .predict-control-card {
+  margin-top: 0;
+}
+
 #tab-train .actions-row,
 #tab-predict .actions-row,
 #tab-versions .actions-row {
@@ -3058,7 +3584,9 @@ body::after {
 
 @media (max-width: 1180px) {
   #tab-predict .form-grid,
-  .version-grid {
+  .version-grid,
+  .train-config-grid,
+  .train-action-grid {
     grid-template-columns: 1fr;
   }
 

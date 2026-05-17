@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 import unittest
 from pathlib import Path
@@ -59,23 +60,18 @@ class HistoryCacheTests(unittest.TestCase):
                 "period": [1, 2, 3, 4],
                 "actual": [100.0, 120.0, 90.0, 130.0],
                 "predicted": [105.0, 115.0, 95.0, 125.0],
-                "similar_predicted": [110.0, 100.0, 80.0, 120.0],
+                "net_load_only_similar_predicted": [110.0, 100.0, 80.0, 120.0],
             }
         )
 
         summary = summarize_prediction_errors(frame)
         comparison = summarize_model_vs_baseline(frame)
-        thermal_space_comparison = summarize_model_vs_baseline(
-            frame.rename(columns={"similar_predicted": "net_load_only_similar_predicted"}),
-            "net_load_only_similar_predicted",
-        )
 
         self.assertEqual(summary["rows"], 4)
         self.assertEqual(summary["mae"], 5.0)
         self.assertEqual(summary["max_abs_error"], 5.0)
         self.assertEqual(summary["direction_accuracy"], 100.0)
         self.assertGreater(comparison["mae_improvement"], 0)
-        self.assertGreater(thermal_space_comparison["mae_improvement"], 0)
 
     def test_custom_segment_config_maps_periods_continuously(self) -> None:
         from dayahead_core import assign_segments, normalize_segment_config
@@ -226,13 +222,10 @@ class HistoryCacheTests(unittest.TestCase):
             "rolling_backtest_metrics": {
                 "30": {
                     "overall": {"mae": 53.4, "rmse": 104.3, "direction_accuracy": 63.7, "max_abs_error": 1000.0},
-                    "baseline": {"mae": 65.2, "rmse": 115.0},
                     "net_load_only_baseline": {"mae": 82.2, "rmse": 130.0},
-                    "model_vs_similarity": {"mae_improvement": 11.8, "mae_improvement_pct": 18.1},
                     "model_vs_net_load_only_similarity": {"mae_improvement": 28.8, "mae_improvement_pct": 35.0},
                     "spike_errors": {
                         "high": {"mae": 180.0, "rmse": 270.0},
-                        "high_baseline": {"mae": 175.0},
                         "high_net_load_only_baseline": {"mae": 183.0},
                     },
                     "segments": {"evening_peak": {"mae": 66.0, "rmse": 104.0}},
@@ -249,7 +242,6 @@ class HistoryCacheTests(unittest.TestCase):
         self.assertEqual(row["segment_count"], 2)
         self.assertTrue(row["high_price_weight_enabled"])
         self.assertEqual(row["rolling_30_mae"], 53.4)
-        self.assertEqual(row["rolling_30_multi_similarity_mae"], 65.2)
         self.assertEqual(row["rolling_30_thermal_space_similarity_mae"], 82.2)
         self.assertEqual(row["rolling_30_high_price_mae"], 180.0)
         self.assertEqual(row["rolling_30_evening_peak_mae"], 66.0)
@@ -543,191 +535,122 @@ class HistoryCacheTests(unittest.TestCase):
         self.assertEqual(day_type_of(pd.Timestamp("2026-02-16"), calendar), "holiday")
         self.assertEqual(day_type_of(pd.Timestamp("2026-02-14"), calendar), "weekend")
 
-    def test_multicondition_similarity_uses_same_period_and_weighted_fields(self) -> None:
-        from dayahead_core import SIMILAR_PRICE_COLUMN, TARGET_COLUMN, attach_multicondition_similarity_features
-
-        target_df = pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-05-04"]),
-                "period": [1],
-                "net_load": [100.0],
-                "renewable_power": [50.0],
-                "thermal_on_capacity": [1000.0],
-                "day_type": ["workday"],
-            }
-        )
-        reference_df = pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-05-01", "2026-05-02", "2026-05-03"]),
-                "period": [1, 1, 2],
-                "net_load": [101.0, 130.0, 100.0],
-                "renewable_power": [500.0, 50.0, 50.0],
-                "thermal_on_capacity": [1000.0, 1000.0, 1000.0],
-                "day_type": ["workday", "workday", "workday"],
-                TARGET_COLUMN: [10.0, 200.0, 999.0],
-            }
-        )
-
-        result = attach_multicondition_similarity_features(target_df, reference_df, k=1)
-
-        self.assertEqual(float(result.loc[0, SIMILAR_PRICE_COLUMN]), 200.0)
-
-    def test_multicondition_similarity_accepts_custom_weights(self) -> None:
-        from dayahead_core import SIMILAR_PRICE_COLUMN, TARGET_COLUMN, attach_multicondition_similarity_features
-
-        target_df = pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-05-04"]),
-                "period": [1],
-                "net_load": [100.0],
-                "renewable_power": [50.0],
-                "thermal_on_capacity": [1000.0],
-                "day_type": ["workday"],
-            }
-        )
-        reference_df = pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-05-01", "2026-05-02"]),
-                "period": [1, 1],
-                "net_load": [101.0, 130.0],
-                "renewable_power": [500.0, 50.0],
-                "thermal_on_capacity": [1000.0, 1000.0],
-                "day_type": ["workday", "workday"],
-                TARGET_COLUMN: [10.0, 200.0],
-            }
-        )
-
-        result = attach_multicondition_similarity_features(
-            target_df,
-            reference_df,
-            k=1,
-            similarity_weights={
-                "net_load": 1.0,
-                "renewable_power": 0.0,
-                "thermal_on_capacity": 0.0,
-                "day_type": 0.0,
-            },
-        )
-
-        self.assertEqual(float(result.loc[0, SIMILAR_PRICE_COLUMN]), 10.0)
-
-    def test_multicondition_similarity_accepts_thermal_space_ratio_weight(self) -> None:
-        from dayahead_core import SIMILAR_PRICE_COLUMN, TARGET_COLUMN, THERMAL_SPACE_LOAD_RATIO_COLUMN, attach_multicondition_similarity_features
-
-        target_df = pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-05-04"]),
-                "period": [1],
-                "net_load": [100.0],
-                THERMAL_SPACE_LOAD_RATIO_COLUMN: [0.5],
-                "renewable_power": [50.0],
-                "thermal_on_capacity": [1000.0],
-                "day_type": ["workday"],
-            }
-        )
-        reference_df = pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-05-01", "2026-05-02"]),
-                "period": [1, 1],
-                "net_load": [100.0, 100.0],
-                THERMAL_SPACE_LOAD_RATIO_COLUMN: [0.9, 0.5],
-                "renewable_power": [50.0, 50.0],
-                "thermal_on_capacity": [1000.0, 1000.0],
-                "day_type": ["workday", "workday"],
-                TARGET_COLUMN: [10.0, 200.0],
-            }
-        )
-
-        result = attach_multicondition_similarity_features(
-            target_df,
-            reference_df,
-            k=1,
-            similarity_weights={
-                "thermal_space": 0.0,
-                "renewable_power": 0.0,
-                "thermal_on_capacity": 0.0,
-                "day_type": 0.0,
-                THERMAL_SPACE_LOAD_RATIO_COLUMN: 1.0,
-            },
-        )
-
-        self.assertEqual(float(result.loc[0, SIMILAR_PRICE_COLUMN]), 200.0)
-
-    def test_multicondition_similarity_handles_multiple_target_rows(self) -> None:
-        from dayahead_core import SIMILAR_PRICE_COLUMN, TARGET_COLUMN, attach_multicondition_similarity_features
-
-        target_df = pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-05-04", "2026-05-04"]),
-                "period": [1, 2],
-                "net_load": [100.0, 200.0],
-                "renewable_power": [50.0, 80.0],
-                "thermal_on_capacity": [1000.0, 1000.0],
-                "day_type": ["workday", "workday"],
-            }
-        )
-        reference_df = pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-05-01", "2026-05-01"]),
-                "period": [1, 2],
-                "net_load": [101.0, 201.0],
-                "renewable_power": [50.0, 80.0],
-                "thermal_on_capacity": [1000.0, 1000.0],
-                "day_type": ["workday", "workday"],
-                TARGET_COLUMN: [10.0, 20.0],
-            }
-        )
-
-        result = attach_multicondition_similarity_features(target_df, reference_df, k=1)
-
-        self.assertEqual(result[SIMILAR_PRICE_COLUMN].tolist(), [10.0, 20.0])
-
-    def test_training_preferences_round_trip_similarity_weights(self) -> None:
+    def test_training_preferences_ignore_removed_similarity_weights(self) -> None:
         from dayahead_core import load_training_preferences, save_training_preferences
 
         root = Path(__file__).resolve().parent / ".test_tmp" / f"preferences_{time.time_ns()}"
-        weights = {
-            "thermal_space": 0.4,
-            "renewable_power": 0.2,
-            "thermal_on_capacity": 0.2,
-            "day_type": 0.1,
-            "thermal_space_load_ratio": 0.1,
-        }
 
-        saved = save_training_preferences(root, {"similarity_weights": weights})
+        saved = save_training_preferences(root, {"similarity_weights": {"net_load": 1.0}})
         loaded = load_training_preferences(root)
 
-        self.assertEqual(saved["similarity_weights"], weights)
-        self.assertEqual(loaded["similarity_weights"], weights)
+        self.assertNotIn("similarity_weights", saved)
+        self.assertNotIn("similarity_weights", loaded)
 
-    def test_api_prediction_payload_parses_similarity_weights(self) -> None:
-        from api_server import parse_similarity_weights_payload
+    def test_cli_no_longer_accepts_prediction_similarity_weights(self) -> None:
+        from dayahead_timeseg_model import parse_args
 
-        weights = parse_similarity_weights_payload(
-            {
-                "similarity_weights": {
-                    "thermal_space": "0.5",
-                    "renewable_power": 0.15,
-                    "thermal_on_capacity": 0.15,
-                    "day_type": 0.1,
-                    "thermal_space_load_ratio": 0.1,
-                }
-            }
+        argv = ["dayahead_timeseg_model.py", "predict", "--similarity-weights", '{"net_load":1.0}']
+
+        with patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit):
+                parse_args()
+
+    def test_frontend_labels_distinguish_model_version_from_segment_algorithm_selection(self) -> None:
+        root = Path(__file__).resolve().parent
+        index_html = (root / "frontend_app" / "index.html").read_text(encoding="utf-8")
+        app_js = (root / "frontend_app" / "assets" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("当前默认模型版本分时段指标", index_html)
+        self.assertIn("当前版本内分时段算法选择", index_html)
+        self.assertIn("设为默认模型版本", index_html)
+        self.assertIn("每行可选择该时段预测用的算法变体", app_js)
+        self.assertIn("请先选择历史模型版本", app_js)
+        self.assertIn("已切换默认模型版本", app_js)
+
+    def test_training_page_prioritizes_model_and_interval_configuration(self) -> None:
+        root = Path(__file__).resolve().parent
+        index_html = (root / "frontend_app" / "index.html").read_text(encoding="utf-8")
+        app_css = (root / "frontend_app" / "assets" / "app.css").read_text(encoding="utf-8")
+
+        model_index = index_html.index("模型时段、参数配置")
+        interval_index = index_html.index("价格区间概率模型训练配置")
+        optimize_index = index_html.index("自动寻优</div>")
+        manual_index = index_html.index("手动训练模型")
+
+        self.assertLess(model_index, optimize_index)
+        self.assertLess(interval_index, optimize_index)
+        self.assertLess(optimize_index, manual_index)
+        self.assertIn('class="train-config-grid"', index_html)
+        self.assertIn('class="train-action-grid"', index_html)
+        self.assertIn("顶部两块配置会同时作用于自动寻优和手动训练", index_html)
+        self.assertIn(".train-config-grid", app_css)
+        self.assertIn(".train-action-grid", app_css)
+
+    def test_training_page_has_independent_manual_configs_for_both_models(self) -> None:
+        root = Path(__file__).resolve().parent
+        index_html = (root / "frontend_app" / "index.html").read_text(encoding="utf-8")
+        app_js = (root / "frontend_app" / "assets" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("具体价格模型训练配置", index_html)
+        self.assertIn("价格区间概率模型训练配置", index_html)
+        for element_id in [
+            "price-training-window-days",
+            "price-valid-days",
+            "price-num-boost-round",
+            "interval-training-window-days",
+            "interval-valid-days",
+            "interval-num-boost-round",
+        ]:
+            self.assertIn(f'id="{element_id}"', index_html)
+        self.assertIn("price_model_config", app_js)
+        self.assertIn("interval_model_config", app_js)
+
+    def test_auto_optimization_keeps_price_and_interval_scores_separate(self) -> None:
+        from api_server import business_window_score, interval_probability_score
+
+        direct_metrics = {"mae": 50.0, "rmse": 80.0}
+        good_interval = {"interval_accuracy": 0.8, "top2_accuracy": 0.95, "log_loss": 0.35, "high_price_recall": 0.75}
+        poor_interval = {"interval_accuracy": 0.35, "top2_accuracy": 0.6, "log_loss": 1.2, "high_price_recall": 0.2}
+
+        price_score, price_detail = business_window_score(direct_metrics, {})
+        good_interval_score = interval_probability_score(good_interval)
+        poor_interval_score = interval_probability_score(poor_interval)
+
+        self.assertEqual(price_score, business_window_score(direct_metrics, {})[0])
+        self.assertNotIn("price_interval_probability", [part["name"] for part in price_detail["parts"]])
+        self.assertLess(good_interval_score, poor_interval_score)
+
+    def test_prediction_reference_days_are_independent_by_strategy(self) -> None:
+        from dayahead_core import normalize_reference_days_by_strategy
+
+        result = normalize_reference_days_by_strategy(
+            reference_days=5,
+            recent_reference_days=3,
+            same_type_reference_days=9,
         )
 
-        self.assertEqual(
-            weights,
-            {
-                "thermal_space": 0.5,
-                "renewable_power": 0.15,
-                "thermal_on_capacity": 0.15,
-                "day_type": 0.1,
-                "thermal_space_load_ratio": 0.1,
-            },
-        )
+        self.assertEqual(result["recent_n_days"], 3)
+        self.assertEqual(result["recent_same_type_days"], 9)
+
+    def test_prediction_page_uses_independent_reference_day_inputs(self) -> None:
+        root = Path(__file__).resolve().parent
+        index_html = (root / "frontend_app" / "index.html").read_text(encoding="utf-8")
+        app_js = (root / "frontend_app" / "assets" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="recent-reference-days"', index_html)
+        self.assertIn('id="same-type-reference-days"', index_html)
+        self.assertIn("最近天数", index_html)
+        self.assertIn("同类型日个数", index_html)
+        self.assertIn("currentRecentReferenceDays", app_js)
+        self.assertIn("currentSameTypeReferenceDays", app_js)
+        self.assertIn("recent_reference_days", app_js)
+        self.assertIn("same_type_reference_days", app_js)
+        self.assertNotIn('id="reference-days"', index_html)
+        self.assertNotIn("相似法参考天数", index_html)
+        self.assertNotIn("相似法参考天数", app_js)
 
     def test_forecast_similarity_keeps_net_load_only_reference_price(self) -> None:
-        from dayahead_core import NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN, SIMILAR_PRICE_COLUMN, TARGET_COLUMN, attach_forecast_similarity_features
+        from dayahead_core import NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN, TARGET_COLUMN, attach_forecast_similarity_features
 
         target_df = pd.DataFrame(
             {
@@ -753,8 +676,8 @@ class HistoryCacheTests(unittest.TestCase):
 
         result = attach_forecast_similarity_features(target_df, reference_df)
 
-        self.assertGreater(float(result.loc[0, SIMILAR_PRICE_COLUMN]), 100.0)
         self.assertLess(float(result.loc[0, NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN]), 50.0)
+        self.assertNotIn("similar_price", result.columns)
 
     def test_date_window_selects_only_overlapping_month_files(self) -> None:
         from dayahead_core import list_excel_files_for_date_window

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -26,6 +26,7 @@ from data_quality import latest_quality_report, list_quality_reports, load_quali
 from dayahead_core import (
     DEFAULT_FORECAST_FILE,
     DEFAULT_HISTORY_DIR,
+    DEFAULT_KNN_SIMILARITY_CONFIG,
     DEFAULT_MODEL_ROOT,
     DEFAULT_OUTPUT_FILE,
     DEFAULT_SEGMENT_CONFIG,
@@ -40,8 +41,9 @@ from dayahead_core import (
     load_current_metadata,
     load_training_log,
     load_training_preferences,
+    normalize_knn_similarity_config,
+    normalize_prediction_reference_preferences,
     normalize_segment_config,
-    normalize_similarity_weights,
     predict_prices_compare,
     rank_model_candidates,
     rollback_to_previous,
@@ -73,27 +75,13 @@ WINDOW_OPTIMIZATION_OUTPUT_ROOT = OUTPUT_ROOT / "window_optimization"
 AUTO_WINDOW_CANDIDATES = [30, 45, 60, 75, 90, 120, 150, 180, 240, 365]
 AUTO_WINDOW_FINE_RADIUS = 15
 AUTO_WINDOW_MAX_HISTORY_DAYS = 100
-AUTO_WINDOW_VALID_DAYS = 14
+AUTO_WINDOW_VALID_DAYS = 10
 AUTO_WINDOW_NUM_BOOST_ROUND = 400
 AUTO_WINDOW_RERANK_TOP_N = 3
+AUTO_WINDOW_ROLLING_BACKTEST_HORIZONS = (14,)
 AUTO_WINDOW_CHECK_INTERVAL_SECONDS = 60
+DEFAULT_TRAINING_WINDOW_DAYS = 60
 LAST_AUTO_WINDOW_CHECK_AT: datetime | None = None
-
-
-def parse_similarity_weights_payload(payload: dict[str, Any]) -> dict[str, float] | None:
-    raw_weights = payload.get("similarity_weights")
-    if raw_weights is None:
-        return None
-    if not isinstance(raw_weights, dict):
-        raise ValueError("similarity_weights 必须是对象")
-    return dict(normalize_similarity_weights(raw_weights))
-
-
-def resolve_similarity_weights(payload: dict[str, Any], model_root: Path = MODEL_ROOT) -> dict[str, float]:
-    parsed_weights = parse_similarity_weights_payload(payload)
-    if parsed_weights is not None:
-        return parsed_weights
-    return dict(load_training_preferences(model_root)["similarity_weights"])
 
 
 def parse_segment_config_payload(payload: dict[str, Any]) -> list[dict[str, object]] | None:
@@ -112,6 +100,128 @@ def parse_segment_config_payload(payload: dict[str, Any]) -> list[dict[str, obje
         }
         for name, (start, end) in normalized.items()
     ]
+
+
+def minutes_to_time_text(minutes: int) -> str:
+    if minutes >= 1440:
+        return "24:00"
+    hour = max(0, min(23, minutes // 60))
+    minute = max(0, min(59, minutes % 60))
+    return f"{hour:02d}:{minute:02d}"
+
+
+def build_even_segment_config(count: int) -> list[dict[str, object]]:
+    segment_count = max(1, min(24, int(count or 1)))
+    base_periods = 96 // segment_count
+    remainder = 96 % segment_count
+    rows: list[dict[str, object]] = []
+    start_period = 1
+    for index in range(segment_count):
+        period_count = base_periods + (1 if index < remainder else 0)
+        end_period = start_period + period_count - 1
+        rows.append(
+            {
+                "name": f"segment_{index + 1}",
+                "start_time": minutes_to_time_text((start_period - 1) * 15),
+                "end_time": minutes_to_time_text(end_period * 15),
+            }
+        )
+        start_period = end_period + 1
+    return rows
+
+
+def segment_config_count(segment_config: list[dict[str, object]] | None) -> int:
+    return len(segment_config or DEFAULT_SEGMENT_CONFIG)
+
+
+def normalize_segment_search_configs(
+    payload: dict[str, Any],
+    current_segment_config: list[dict[str, object]] | None,
+) -> list[dict[str, Any]]:
+    current_count = segment_config_count(current_segment_config)
+    if not payload.get("segment_search_enabled"):
+        return [
+            {
+                "segment_count": current_count,
+                "segment_config": current_segment_config,
+                "source": "current",
+            }
+        ]
+
+    selected_counts = {
+        int(item)
+        for item in payload.get("segment_search_counts") or []
+        if str(item).strip().isdigit() and int(item) >= 1
+    }
+    raw_configs = payload.get("segment_search_configs") if isinstance(payload.get("segment_search_configs"), list) else []
+    configs_by_count: dict[int, list[dict[str, object]]] = {}
+    for item in raw_configs:
+        if not isinstance(item, dict):
+            continue
+        try:
+            count = int(item.get("segment_count") or 0)
+        except (TypeError, ValueError):
+            continue
+        if count < 1:
+            continue
+        raw_segment_config = item.get("segment_config")
+        if isinstance(raw_segment_config, list) and raw_segment_config:
+            parsed = parse_segment_config_payload({"segment_mode": "custom", "segment_config": raw_segment_config})
+            configs_by_count[count] = parsed or build_even_segment_config(count)
+        else:
+            configs_by_count[count] = build_even_segment_config(count)
+
+    if not selected_counts:
+        selected_counts = {3, 6}
+    result: list[dict[str, Any]] = []
+    for count in sorted(selected_counts):
+        segment_config = configs_by_count.get(count) or build_even_segment_config(count)
+        result.append(
+            {
+                "segment_count": count,
+                "segment_config": segment_config,
+                "source": "selected",
+            }
+        )
+    return result
+
+
+def parse_rolling_backtest_horizons(payload: dict[str, Any]) -> tuple[int, ...]:
+    raw_value = payload.get("rolling_backtest_horizons")
+    if raw_value is None:
+        raw_value = payload.get("rolling_backtest_days")
+    if raw_value is None:
+        return AUTO_WINDOW_ROLLING_BACKTEST_HORIZONS
+    if isinstance(raw_value, str):
+        raw_items: list[Any] = [item.strip() for item in raw_value.replace("，", ",").split(",")]
+    elif isinstance(raw_value, (list, tuple, set)):
+        raw_items = list(raw_value)
+    else:
+        raw_items = [raw_value]
+    horizons: list[int] = []
+    seen: set[int] = set()
+    for item in raw_items:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value < 1 or value > 365 or value in seen:
+            continue
+        seen.add(value)
+        horizons.append(value)
+    return tuple(horizons) if horizons else AUTO_WINDOW_ROLLING_BACKTEST_HORIZONS
+
+
+def window_optimization_config_defaults(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    state = state or {}
+    try:
+        valid_days = int(state.get("valid_days") or AUTO_WINDOW_VALID_DAYS)
+    except (TypeError, ValueError):
+        valid_days = AUTO_WINDOW_VALID_DAYS
+    return {
+        "valid_days": max(1, valid_days),
+        "rolling_backtest_horizons": list(parse_rolling_backtest_horizons(state)),
+    }
 
 
 def parse_high_price_weighting_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -136,7 +246,7 @@ def parse_price_intervals_payload(payload: dict[str, Any]) -> list[dict[str, obj
     intervals = payload.get("price_intervals")
     if intervals is None:
         intervals = load_training_preferences(MODEL_ROOT).get("price_intervals")
-    return normalize_price_intervals(intervals if isinstance(intervals, list) else None)
+    return normalize_price_intervals(intervals if isinstance(intervals, list) else None, allow_legacy_open_bounds=True)
 
 
 def now_text() -> str:
@@ -520,32 +630,67 @@ def rolling_metric_score(metric: dict[str, Any] | None) -> float | None:
     return float(mae) + 0.2 * float(rmse)
 
 
-def business_window_score(static_metrics: dict[str, Any], rolling_metrics: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+def interval_probability_score(metric: dict[str, Any] | None) -> float | None:
+    if not isinstance(metric, dict):
+        return None
+    interval_accuracy = metric.get("interval_accuracy")
+    top2_accuracy = metric.get("top2_accuracy")
+    log_loss = metric.get("log_loss")
+    high_price_recall = metric.get("high_price_recall")
+    if interval_accuracy is None and top2_accuracy is None and log_loss is None and high_price_recall is None:
+        return None
+    penalty = 0.0
+    weight = 0.0
+    if interval_accuracy is not None:
+        penalty += 100.0 * (1.0 - float(interval_accuracy))
+        weight += 1.0
+    if top2_accuracy is not None:
+        penalty += 40.0 * (1.0 - float(top2_accuracy))
+        weight += 0.4
+    if log_loss is not None:
+        penalty += 12.0 * float(log_loss)
+        weight += 0.3
+    if high_price_recall is not None:
+        penalty += 60.0 * (1.0 - float(high_price_recall))
+        weight += 0.6
+    if weight <= 0:
+        return None
+    return penalty / weight
+
+
+def business_window_score(
+    static_metrics: dict[str, Any],
+    rolling_metrics: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
     parts: list[tuple[str, float, float]] = []
     static_score = window_score(static_metrics)
     if math.isfinite(static_score):
         parts.append(("static_validation", 0.2, static_score))
 
-    rolling_14 = rolling_metrics.get("14") or {}
-    rolling_30 = rolling_metrics.get("30") or {}
-    rolling_14_score = rolling_metric_score(rolling_14.get("overall"))
-    rolling_30_score = rolling_metric_score(rolling_30.get("overall"))
-    if rolling_14_score is not None:
-        parts.append(("rolling_14_days", 0.3, rolling_14_score))
-    if rolling_30_score is not None:
-        parts.append(("rolling_30_days", 0.2, rolling_30_score))
+    rolling_items = sorted(
+        [
+            (int(key), value)
+            for key, value in (rolling_metrics or {}).items()
+            if str(key).isdigit() and isinstance(value, dict)
+        ],
+        key=lambda item: item[0],
+    )
+    for index, (horizon, row) in enumerate(rolling_items):
+        rolling_score = rolling_metric_score(row.get("overall"))
+        if rolling_score is not None:
+            parts.append((f"rolling_{horizon}_days", 0.3 if index == 0 else 0.2, rolling_score))
 
     high_scores = [
-        rolling_metric_score((rolling_14.get("spike_errors") or {}).get("high")),
-        rolling_metric_score((rolling_30.get("spike_errors") or {}).get("high")),
+        rolling_metric_score((row.get("spike_errors") or {}).get("high"))
+        for _, row in rolling_items
     ]
     high_scores = [value for value in high_scores if value is not None]
     if high_scores:
         parts.append(("high_price_spike", 0.2, sum(high_scores) / len(high_scores)))
 
     evening_scores = [
-        rolling_metric_score((rolling_14.get("segments") or {}).get("evening_peak")),
-        rolling_metric_score((rolling_30.get("segments") or {}).get("evening_peak")),
+        rolling_metric_score((row.get("segments") or {}).get("evening_peak"))
+        for _, row in rolling_items
     ]
     evening_scores = [value for value in evening_scores if value is not None]
     if evening_scores:
@@ -577,12 +722,15 @@ def summarize_window_result(result: Any, model_root: Path, window_days: int, pha
     )
     static_score = window_score(direct_metrics)
     rolling_metrics = metadata.get("rolling_backtest_metrics") or {}
+    interval_metrics = ((metadata.get("price_interval_model") or {}).get("metrics") or {}).get("overall") or {}
     score, score_detail = business_window_score(direct_metrics, rolling_metrics)
+    interval_score = interval_probability_score(interval_metrics)
     return {
         "phase": phase,
         "window_days": int(window_days),
         "score": round(score, 4) if math.isfinite(score) else None,
         "static_score": round(static_score, 4) if math.isfinite(static_score) else None,
+        "interval_score": round(interval_score, 4) if interval_score is not None else None,
         "score_detail": score_detail,
         "run_id": result.run_id,
         "model_root": str(model_root),
@@ -596,8 +744,62 @@ def summarize_window_result(result: Any, model_root: Path, window_days: int, pha
         "selected_model_key": selected_key,
         "selected_model_backend": metadata.get("selected_model_backend"),
         "metrics": direct_metrics,
+        "price_interval_metrics": interval_metrics,
         "rolling_backtest_metrics": rolling_metrics,
     }
+
+
+def window_result_sort_key(item: dict[str, Any]) -> tuple[float, float]:
+    return (
+        float(item.get("score") if item.get("score") is not None else float("inf")),
+        float((item.get("metrics") or {}).get("mae") or float("inf")),
+    )
+
+
+def annotate_train_result_metadata(result: Any, metadata: dict[str, Any]) -> None:
+    for metadata_path in {
+        Path(result.current_model_dir) / "metadata.json",
+        Path(result.history_model_dir) / "metadata.json",
+        Path(result.metadata_path),
+    }:
+        current = read_json_file(metadata_path)
+        if current:
+            current.update(metadata)
+            write_json_file(metadata_path, current)
+
+
+def selected_prediction_model_root(payload: dict[str, Any], job_id: str) -> tuple[Path, Path | None, str | None]:
+    version_key = str(payload.get("model_version_key") or "").strip()
+    if not version_key:
+        model_root = Path(payload.get("model_root") or MODEL_ROOT)
+        return model_root, None, None
+    if any(part in {"", ".", ".."} for part in Path(version_key).parts) or "/" in version_key or "\\" in version_key:
+        raise ValueError("模型版本参数不合法")
+    selected_dir = MODEL_ROOT / "history" / version_key
+    if not selected_dir.exists():
+        raise FileNotFoundError(f"未找到模型版本：{version_key}")
+    temp_root = OUTPUT_ROOT / "prediction_model_selection" / job_id
+    if temp_root.exists():
+        shutil.rmtree(temp_root, onerror=retry_writable_remove)
+    temp_current = temp_root / "current"
+    shutil.copytree(selected_dir, temp_current)
+    return temp_root, temp_root, version_key
+
+
+def parse_knn_similarity_payload(payload: dict[str, Any]) -> dict[str, float | int]:
+    nested = payload.get("knn_similarity")
+    source = nested if isinstance(nested, dict) else payload
+    return normalize_knn_similarity_config(source)
+
+
+def parse_prediction_reference_payload(payload: dict[str, Any]) -> dict[str, object]:
+    return normalize_prediction_reference_preferences(
+        {
+            "recent_reference_days": payload.get("recent_reference_days") or payload.get("reference_days") or 1,
+            "same_type_reference_days": payload.get("same_type_reference_days") or payload.get("reference_days") or 1,
+            "knn_similarity": payload.get("knn_similarity") if isinstance(payload.get("knn_similarity"), dict) else payload,
+        }
+    )
 
 
 def serialize_prediction_variant(result: Any) -> dict[str, Any]:
@@ -639,8 +841,20 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
         STATE.append_log(job_id, "收到手动重训请求", 1)
         STATE.raise_if_cancelled(job_id)
         model_root = Path(payload.get("model_root") or MODEL_ROOT)
-        training_mode = str(payload.get("training_mode") or "rolling_window")
-        training_window_days = int(payload.get("training_window_days") or 60) if training_mode == "rolling_window" else None
+        price_model_config = parse_model_training_config(
+            payload,
+            "price_model_config",
+            default_window_days=resolve_default_training_window_days(),
+            default_valid_days=14,
+            default_num_boost_round=400,
+        )
+        interval_model_config = parse_model_training_config(
+            payload,
+            "interval_model_config",
+            default_window_days=resolve_default_training_window_days(),
+            default_valid_days=14,
+            default_num_boost_round=400,
+        )
         segment_config = parse_segment_config_payload(payload)
         high_price_weighting = parse_high_price_weighting_payload(payload)
         price_intervals = parse_price_intervals_payload(payload)
@@ -660,11 +874,16 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
             TrainConfig(
                 history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
                 model_root=model_root,
-                valid_days=int(payload.get("valid_days") or 14),
-                training_window_days=training_window_days,
-                num_boost_round=int(payload.get("num_boost_round") or 400),
-                start_date=(payload.get("start_date") or None) if training_mode != "rolling_window" and payload.get("enable_start", True) else None,
-                end_date=(payload.get("end_date") or None) if training_mode != "rolling_window" and payload.get("enable_end", True) else None,
+                valid_days=price_model_config["valid_days"],
+                training_window_days=price_model_config["training_window_days"],
+                num_boost_round=price_model_config["num_boost_round"],
+                start_date=price_model_config["start_date"],
+                end_date=price_model_config["end_date"],
+                interval_valid_days=interval_model_config["valid_days"],
+                interval_training_window_days=interval_model_config["training_window_days"],
+                interval_num_boost_round=interval_model_config["num_boost_round"],
+                interval_start_date=interval_model_config["start_date"],
+                interval_end_date=interval_model_config["end_date"],
                 similarity_reference_days=int(payload.get("similarity_reference_days") or 100),
                 segment_config=segment_config,
                 high_price_weight_enabled=high_price_weighting["enabled"],
@@ -684,31 +903,43 @@ def build_predict_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, A
     def worker(job_id: str) -> dict[str, Any]:
         STATE.append_log(job_id, "收到预测请求", 1)
         STATE.raise_if_cancelled(job_id)
-        model_root = Path(payload.get("model_root") or MODEL_ROOT)
-        similarity_weights = resolve_similarity_weights(payload, model_root)
-        save_training_preferences(model_root, {"similarity_weights": similarity_weights})
-        result = predict_prices_compare(
-            history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
-            forecast_file=Path(payload.get("forecast_file") or FORECAST_FILE),
-            model_root=model_root,
-            output_file=Path(payload.get("output_file") or OUTPUT_FILE),
-            reference_days=int(payload.get("reference_days") or 1),
-            selected_strategy=str(payload.get("selected_strategy") or "recent_n_days"),
-            similarity_weights=similarity_weights,
-            progress_callback=build_progress_callback(job_id),
-        )
-        summary = summarize_predict_result(result)
-        metadata = load_current_metadata(model_root) or {}
-        archive_result = archive_prediction_bundle(
-            summary["prediction"],
-            metadata,
-            PREDICTION_ARCHIVE_ROOT,
-            Path(payload.get("forecast_file") or FORECAST_FILE),
-            Path(payload.get("output_file") or OUTPUT_FILE),
-        )
-        summary["prediction_archive"] = archive_result
-        summary["prediction"]["archive_result"] = archive_result
-        return summary
+        model_root, temp_root, version_key = selected_prediction_model_root(payload, job_id)
+        try:
+            if version_key:
+                STATE.append_log(job_id, f"使用指定模型版本预测：{version_key}", 3)
+            prediction_reference = parse_prediction_reference_payload(payload)
+            preferences = save_training_preferences(MODEL_ROOT, {"prediction_reference": prediction_reference})
+            STATE.append_log(job_id, "已保存本次预测参考配置为下次默认值", 2)
+            result = predict_prices_compare(
+                history_dir=Path(payload.get("history_dir") or HISTORY_DIR),
+                forecast_file=Path(payload.get("forecast_file") or FORECAST_FILE),
+                model_root=model_root,
+                output_file=Path(payload.get("output_file") or OUTPUT_FILE),
+                reference_days=int(payload.get("reference_days") or 1),
+                recent_reference_days=int(prediction_reference["recent_reference_days"]),
+                same_type_reference_days=int(prediction_reference["same_type_reference_days"]),
+                selected_strategy=str(payload.get("selected_strategy") or "recent_n_days"),
+                knn_similarity_config=prediction_reference["knn_similarity"],
+                progress_callback=build_progress_callback(job_id),
+            )
+            summary = summarize_predict_result(result)
+            metadata = load_current_metadata(model_root) or {}
+            archive_result = archive_prediction_bundle(
+                summary["prediction"],
+                metadata,
+                PREDICTION_ARCHIVE_ROOT,
+                Path(payload.get("forecast_file") or FORECAST_FILE),
+                Path(payload.get("output_file") or OUTPUT_FILE),
+            )
+            summary["model_version_key"] = version_key or metadata.get("run_id")
+            summary["prediction_archive"] = archive_result
+            summary["prediction"]["model_version_key"] = summary["model_version_key"]
+            summary["prediction"]["archive_result"] = archive_result
+            summary["prediction"]["prediction_reference"] = preferences.get("prediction_reference")
+            return summary
+        finally:
+            if temp_root and temp_root.exists():
+                shutil.rmtree(temp_root, onerror=retry_writable_remove)
 
     return worker
 
@@ -842,22 +1073,22 @@ def cleanup_output_junk() -> dict[str, Any]:
 
     removed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    keep_quality_reports = 10
     output_file = OUTPUT_FILE.resolve()
     quality_report_dir = (OUTPUT_ROOT / "data_quality_reports").resolve()
+    prediction_archive_dir = PREDICTION_ARCHIVE_ROOT.resolve()
 
     if OUTPUT_ROOT.exists():
         for item in list(OUTPUT_ROOT.iterdir()):
             resolved = item.resolve()
             if resolved == output_file:
                 continue
+            if resolved == prediction_archive_dir:
+                continue
             if resolved == quality_report_dir:
-                prune_quality_reports(item, keep_quality_reports, removed, skipped)
                 continue
             if item.name == "window_optimization":
                 remove_cleanup_target(item, "自动寻优中间结果", removed, skipped)
                 continue
-            remove_cleanup_target(item, "output 目录杂项", removed, skipped)
 
     for folder_name in [".test_tmp", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__"]:
         remove_cleanup_target(BASE_DIR / folder_name, folder_name, removed, skipped)
@@ -878,7 +1109,8 @@ def cleanup_output_junk() -> dict[str, Any]:
         "total_bytes": total_bytes,
         "kept": [
             str(output_file),
-            f"{quality_report_dir}（保留最新 {keep_quality_reports} 个）",
+            str(quality_report_dir),
+            str(prediction_archive_dir),
             str(MODEL_ROOT.resolve()),
         ],
     }
@@ -892,6 +1124,7 @@ def mark_window_optimization_attempt(
 ) -> None:
     state = window_optimization_state()
     max_history_days = resolve_window_optimization_max_history_days(payload)
+    config_defaults = window_optimization_config_defaults(payload or {})
     state.update(
         {
             "enabled": True,
@@ -901,6 +1134,8 @@ def mark_window_optimization_attempt(
             "last_attempt_force": bool(force),
             "last_attempted_history_cache_key": signature.get("cache_key"),
             "max_search_history_days": max_history_days,
+            "valid_days": config_defaults["valid_days"],
+            "rolling_backtest_horizons": config_defaults["rolling_backtest_horizons"],
         }
     )
     save_window_optimization_state(state)
@@ -915,6 +1150,54 @@ def resolve_window_optimization_max_history_days(payload: dict[str, Any] | None 
     except (TypeError, ValueError):
         value = AUTO_WINDOW_MAX_HISTORY_DAYS
     return max(1, value)
+
+
+def resolve_default_training_window_days(state: dict[str, Any] | None = None) -> int:
+    optimization_state = state if state is not None else window_optimization_state()
+    raw_value = optimization_state.get("best_window_days", DEFAULT_TRAINING_WINDOW_DAYS)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        value = DEFAULT_TRAINING_WINDOW_DAYS
+    return value if value >= 1 else DEFAULT_TRAINING_WINDOW_DAYS
+
+
+def positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return parsed if parsed >= 1 else default
+
+
+def parse_model_training_config(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default_window_days: int,
+    default_valid_days: int,
+    default_num_boost_round: int,
+) -> dict[str, Any]:
+    raw_config = payload.get(key)
+    config = raw_config if isinstance(raw_config, dict) else {}
+    training_mode = str(config.get("training_mode") or payload.get("training_mode") or "rolling_window")
+    training_window_days = (
+        positive_int(config.get("training_window_days", payload.get("training_window_days")), default_window_days)
+        if training_mode == "rolling_window"
+        else None
+    )
+    return {
+        "training_mode": training_mode,
+        "training_window_days": training_window_days,
+        "start_date": (config.get("start_date") or payload.get("start_date") or None)
+        if training_mode != "rolling_window" and config.get("enable_start", payload.get("enable_start", True))
+        else None,
+        "end_date": (config.get("end_date") or payload.get("end_date") or None)
+        if training_mode != "rolling_window" and config.get("enable_end", payload.get("enable_end", True))
+        else None,
+        "valid_days": positive_int(config.get("valid_days", payload.get("valid_days")), default_valid_days),
+        "num_boost_round": positive_int(config.get("num_boost_round", payload.get("num_boost_round")), default_num_boost_round),
+    }
 
 
 def mark_window_optimization_attempt_status(status: str, message: str | None = None) -> None:
@@ -949,14 +1232,32 @@ def build_window_optimization_worker_payload(
     worker_payload: dict[str, Any] = {
         "reason": reason,
         "max_history_days": resolve_window_optimization_max_history_days(payload),
-        "valid_days": int(payload.get("valid_days") or AUTO_WINDOW_VALID_DAYS),
-        "num_boost_round": int(payload.get("num_boost_round") or AUTO_WINDOW_NUM_BOOST_ROUND),
+        "price_model_config": parse_model_training_config(
+            payload,
+            "price_model_config",
+            default_window_days=DEFAULT_TRAINING_WINDOW_DAYS,
+            default_valid_days=AUTO_WINDOW_VALID_DAYS,
+            default_num_boost_round=AUTO_WINDOW_NUM_BOOST_ROUND,
+        ),
+        "interval_model_config": parse_model_training_config(
+            payload,
+            "interval_model_config",
+            default_window_days=DEFAULT_TRAINING_WINDOW_DAYS,
+            default_valid_days=AUTO_WINDOW_VALID_DAYS,
+            default_num_boost_round=AUTO_WINDOW_NUM_BOOST_ROUND,
+        ),
         "fine_radius": int(payload.get("fine_radius") or AUTO_WINDOW_FINE_RADIUS),
         "segment_mode": segment_source.get("segment_mode", "default"),
         "segment_config": segment_source.get("segment_config"),
         "high_price_weighting": parse_high_price_weighting_payload(high_price_source),
-        "price_intervals": normalize_price_intervals(price_interval_source.get("price_intervals")),
+        "price_intervals": normalize_price_intervals(price_interval_source.get("price_intervals"), allow_legacy_open_bounds=True),
+        "rolling_backtest_horizons": list(parse_rolling_backtest_horizons(payload)),
+        "segment_search_enabled": bool(payload.get("segment_search_enabled")),
+        "segment_search_counts": payload.get("segment_search_counts") or [],
+        "segment_search_configs": payload.get("segment_search_configs") or [],
     }
+    worker_payload["valid_days"] = worker_payload["price_model_config"]["valid_days"]
+    worker_payload["num_boost_round"] = worker_payload["price_model_config"]["num_boost_round"]
     if force is not None:
         worker_payload["force"] = force
     if payload.get("candidate_windows"):
@@ -1042,31 +1343,51 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
     payload = payload or {}
 
     def worker(job_id: str) -> dict[str, Any]:
-        valid_days = int(payload.get("valid_days") or AUTO_WINDOW_VALID_DAYS)
-        num_boost_round = int(payload.get("num_boost_round") or AUTO_WINDOW_NUM_BOOST_ROUND)
+        price_model_config = parse_model_training_config(
+            payload,
+            "price_model_config",
+            default_window_days=DEFAULT_TRAINING_WINDOW_DAYS,
+            default_valid_days=AUTO_WINDOW_VALID_DAYS,
+            default_num_boost_round=AUTO_WINDOW_NUM_BOOST_ROUND,
+        )
+        interval_model_config = parse_model_training_config(
+            payload,
+            "interval_model_config",
+            default_window_days=DEFAULT_TRAINING_WINDOW_DAYS,
+            default_valid_days=AUTO_WINDOW_VALID_DAYS,
+            default_num_boost_round=AUTO_WINDOW_NUM_BOOST_ROUND,
+        )
+        valid_days = int(price_model_config["valid_days"])
+        num_boost_round = int(price_model_config["num_boost_round"])
+        interval_valid_days = int(interval_model_config["valid_days"])
+        interval_num_boost_round = int(interval_model_config["num_boost_round"])
         fine_radius = int(payload.get("fine_radius") or AUTO_WINDOW_FINE_RADIUS)
+        rolling_backtest_horizons = parse_rolling_backtest_horizons(payload)
         max_history_days = resolve_window_optimization_max_history_days(payload)
-        segment_config = parse_segment_config_payload(payload)
+        base_segment_config = parse_segment_config_payload(payload)
+        segment_search_configs = normalize_segment_search_configs(payload, base_segment_config)
         high_price_weighting = parse_high_price_weighting_payload(payload)
-        STATE.append_log(job_id, describe_training_options(segment_config, high_price_weighting), 2)
+        price_intervals = normalize_price_intervals(payload.get("price_intervals"), allow_legacy_open_bounds=True)
+
+        STATE.append_log(job_id, f"开始自动寻优：参与时段数 {', '.join(str(item['segment_count']) for item in segment_search_configs)}", 1)
+        STATE.raise_if_cancelled(job_id)
         save_training_preferences(
             MODEL_ROOT,
             {
-                "segment_mode": "custom" if segment_config else "default",
-                "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
+                "segment_mode": "custom" if base_segment_config else "default",
+                "segment_config": base_segment_config or DEFAULT_SEGMENT_CONFIG,
                 "high_price_weighting": high_price_weighting,
-                "price_intervals": payload.get("price_intervals"),
+                "price_intervals": price_intervals,
             },
         )
-        STATE.append_log(job_id, "开始自动训练使用天数寻优", 1)
-        STATE.raise_if_cancelled(job_id)
 
         history_signature = current_history_signature()
         history_df, _, _, _, _ = load_cached_history_collection(HISTORY_DIR, None, True, MODEL_ROOT, leading_days=0)
         unique_dates = sorted(pd.to_datetime(history_df["date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique().tolist())
-        if len(unique_dates) <= valid_days + 1:
-            raise ValueError("历史数据天数不足，无法执行训练使用天数寻优。")
-        available_train_days = len(unique_dates) - valid_days
+        max_validation_days = max(valid_days, interval_valid_days)
+        if len(unique_dates) <= max_validation_days + 1:
+            raise ValueError("历史数据天数不足，无法执行自动寻优。")
+        available_train_days = len(unique_dates) - max_validation_days
         max_train_days = min(available_train_days, max_history_days)
         requested_candidates = payload.get("candidate_windows")
         if requested_candidates:
@@ -1075,95 +1396,157 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
             candidate_windows = sorted({item for item in AUTO_WINDOW_CANDIDATES if item <= max_train_days} | {max_train_days})
             if max_train_days < 30:
                 candidate_windows = sorted({1, max_train_days})
+
         run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         search_root = WINDOW_OPTIMIZATION_OUTPUT_ROOT / run_stamp
         search_root.mkdir(parents=True, exist_ok=True)
+        all_results: list[dict[str, Any]] = []
+        segment_results: list[dict[str, Any]] = []
+        total_segments = max(1, len(segment_search_configs))
 
-        results: list[dict[str, Any]] = []
+        def segment_progress(segment_index: int, local_index: int, local_total: int) -> int:
+            local_fraction = min(1.0, max(0.0, (local_index - 1) / max(local_total, 1)))
+            return 5 + int(((segment_index - 1 + local_fraction) / total_segments) * 78)
 
-        def run_window(window_days: int, phase: str, index: int, total: int, enable_rolling_backtest: bool = False) -> dict[str, Any]:
-            STATE.raise_if_cancelled(job_id)
-            progress = 5 + int((index - 1) / max(total, 1) * 70)
-            STATE.append_log(job_id, f"{phase}窗口回测 {index}/{total}：最近 {window_days} 天", progress)
-            window_model_root = search_root / f"{phase}_{window_days}"
-            result = train_and_register(
+        def run_segment_search(segment_item: dict[str, Any], segment_index: int) -> dict[str, Any]:
+            current_segment_count = int(segment_item["segment_count"])
+            current_segment_config = segment_item.get("segment_config")
+            segment_root = search_root / f"{current_segment_count}_segments"
+            segment_root.mkdir(parents=True, exist_ok=True)
+            STATE.append_log(job_id, describe_training_options(current_segment_config, high_price_weighting), segment_progress(segment_index, 1, 1))
+            results: list[dict[str, Any]] = []
+
+            def run_window(window_days: int, phase: str, index: int, total: int, enable_rolling_backtest: bool = False) -> dict[str, Any]:
+                STATE.raise_if_cancelled(job_id)
+                STATE.append_log(
+                    job_id,
+                    f"{current_segment_count} 段 {phase} 回测 {index}/{total}：最近 {window_days} 天",
+                    segment_progress(segment_index, index, total),
+                )
+                window_model_root = segment_root / f"{phase}_{window_days}"
+                result = train_and_register(
+                    TrainConfig(
+                        history_dir=HISTORY_DIR,
+                        model_root=window_model_root,
+                        valid_days=valid_days,
+                        training_window_days=window_days,
+                        num_boost_round=num_boost_round,
+                        interval_valid_days=interval_valid_days,
+                        interval_training_window_days=window_days,
+                        interval_num_boost_round=interval_num_boost_round,
+                        enable_rolling_backtest=enable_rolling_backtest,
+                        rolling_backtest_horizons=rolling_backtest_horizons,
+                        segment_config=current_segment_config,
+                        high_price_weight_enabled=high_price_weighting["enabled"],
+                        high_price_quantile=high_price_weighting["quantile"],
+                        high_price_weight_multiplier=high_price_weighting["multiplier"],
+                        price_intervals=price_intervals,
+                    ),
+                    progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
+                )
+                summary = summarize_window_result(result, window_model_root, window_days, phase)
+                summary["segment_count"] = current_segment_count
+                summary["segment_config"] = current_segment_config or DEFAULT_SEGMENT_CONFIG
+                results.append(summary)
+                all_results.append(summary)
+                return summary
+
+            total_estimated = len(candidate_windows) + fine_radius * 2 + 1
+            coarse_summaries = [run_window(window, "coarse", idx, total_estimated) for idx, window in enumerate(candidate_windows, start=1)]
+            finite_coarse = [item for item in coarse_summaries if item.get("score") is not None]
+            if not finite_coarse:
+                raise ValueError(f"{current_segment_count} 段所有候选训练天数均未得到有效指标。")
+            best_coarse = min(finite_coarse, key=window_result_sort_key)
+            best_coarse_window = int(best_coarse["window_days"])
+            fine_start = max(1 if max_train_days < 30 else 30, best_coarse_window - fine_radius)
+            fine_end = min(max_train_days, best_coarse_window + fine_radius)
+            searched_windows = {int(row["window_days"]) for row in results}
+            fine_candidates = [item for item in range(fine_start, fine_end + 1) if item not in searched_windows]
+            for offset, window in enumerate(fine_candidates, start=1):
+                run_window(window, "fine", len(candidate_windows) + offset, len(candidate_windows) + len(fine_candidates))
+
+            finite_results = [item for item in results if item.get("score") is not None]
+            if not finite_results:
+                raise ValueError(f"{current_segment_count} 段所有候选训练天数均未得到有效指标。")
+            static_top = sorted(finite_results, key=window_result_sort_key)[:AUTO_WINDOW_RERANK_TOP_N]
+            rerank_results: list[dict[str, Any]] = []
+            for offset, candidate in enumerate(static_top, start=1):
+                window = int(candidate["window_days"])
+                STATE.append_log(job_id, f"{current_segment_count} 段严格滚动回测复核 {offset}/{len(static_top)}：最近 {window} 天", 82)
+                rerank_results.append(run_window(window, "rerank", offset, max(len(static_top), 1), enable_rolling_backtest=True))
+
+            best_pool = [item for item in rerank_results if item.get("score") is not None] or finite_results
+            best = min(best_pool, key=window_result_sort_key)
+            best_window_days = int(best["window_days"])
+            interval_pool = [item for item in results if item.get("interval_score") is not None]
+            best_interval = min(
+                interval_pool,
+                key=lambda item: (float(item["interval_score"]), int(item.get("window_days") or 0)),
+            ) if interval_pool else best
+            best_interval_window_days = int(best_interval["window_days"])
+            STATE.append_log(job_id, f"{current_segment_count} 段最优训练天数 {best_window_days} 天，正在保存候选模型版本", 86)
+            previous_metadata = load_current_metadata(MODEL_ROOT) or {}
+            previous_run_id = previous_metadata.get("run_id")
+            final_result = train_and_register(
                 TrainConfig(
                     history_dir=HISTORY_DIR,
-                    model_root=window_model_root,
+                    model_root=MODEL_ROOT,
                     valid_days=valid_days,
-                    training_window_days=window_days,
+                    training_window_days=best_window_days,
                     num_boost_round=num_boost_round,
-                    enable_rolling_backtest=enable_rolling_backtest,
-                    segment_config=segment_config,
+                    interval_valid_days=interval_valid_days,
+                    interval_training_window_days=best_interval_window_days,
+                    interval_num_boost_round=interval_num_boost_round,
+                    rolling_backtest_horizons=rolling_backtest_horizons,
+                    segment_config=current_segment_config,
                     high_price_weight_enabled=high_price_weighting["enabled"],
                     high_price_quantile=high_price_weighting["quantile"],
                     high_price_weight_multiplier=high_price_weighting["multiplier"],
-                    price_intervals=payload.get("price_intervals"),
+                    price_intervals=price_intervals,
                 ),
                 progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
             )
-            summary = summarize_window_result(result, window_model_root, window_days, phase)
-            results.append(summary)
-            return summary
-
-        total_estimated = len(candidate_windows) + fine_radius * 2 + 1
-        coarse_summaries = [run_window(window, "coarse", idx, total_estimated) for idx, window in enumerate(candidate_windows, start=1)]
-        finite_coarse = [item for item in coarse_summaries if item.get("score") is not None]
-        if not finite_coarse:
-            raise ValueError("所有候选训练使用天数均未得到有效指标。")
-        best_coarse = min(finite_coarse, key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))))
-        best_coarse_window = int(best_coarse["window_days"])
-        fine_start = max(1 if max_train_days < 30 else 30, best_coarse_window - fine_radius)
-        fine_end = min(max_train_days, best_coarse_window + fine_radius)
-        searched_windows = {int(row["window_days"]) for row in results}
-        fine_candidates = [item for item in range(fine_start, fine_end + 1) if item not in searched_windows]
-        for offset, window in enumerate(fine_candidates, start=1):
-            run_window(window, "fine", len(candidate_windows) + offset, len(candidate_windows) + len(fine_candidates))
-
-        finite_results = [item for item in results if item.get("score") is not None]
-        if not finite_results:
-            raise ValueError("所有候选训练使用天数均未得到有效指标。")
-        static_top = sorted(
-            finite_results,
-            key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))),
-        )[:AUTO_WINDOW_RERANK_TOP_N]
-        rerank_results: list[dict[str, Any]] = []
-        for offset, candidate in enumerate(static_top, start=1):
-            window = int(candidate["window_days"])
-            STATE.append_log(job_id, f"严格滚动回测复核 {offset}/{len(static_top)}：最近 {window} 天", 76 + offset)
-            rerank_results.append(
-                run_window(
-                    window,
-                    "rerank",
-                    offset,
-                    max(len(static_top), 1),
-                    enable_rolling_backtest=True,
-                )
+            validate_training_result_or_restore(MODEL_ROOT, final_result, current_segment_config, high_price_weighting, previous_run_id)
+            annotate_train_result_metadata(
+                final_result,
+                {
+                    "window_optimization": {
+                        "run_stamp": run_stamp,
+                        "segment_search_enabled": bool(payload.get("segment_search_enabled")),
+                        "segment_count": current_segment_count,
+                        "best_window_days": best_window_days,
+                        "best_interval_window_days": best_interval_window_days,
+                        "rolling_backtest_horizons": list(rolling_backtest_horizons),
+                        "score": best.get("score"),
+                        "interval_score": best_interval.get("interval_score"),
+                    }
+                },
             )
-        best_pool = [item for item in rerank_results if item.get("score") is not None] or finite_results
-        best = min(best_pool, key=lambda item: (float(item["score"]), float((item.get("metrics") or {}).get("mae") or float("inf"))))
-        best_window_days = int(best["window_days"])
-        STATE.append_log(job_id, f"最优训练使用天数为最近 {best_window_days} 天，正在训练正式模型", 86)
-        previous_metadata = load_current_metadata(MODEL_ROOT) or {}
-        previous_run_id = previous_metadata.get("run_id")
-        final_result = train_and_register(
-            TrainConfig(
-                history_dir=HISTORY_DIR,
-                model_root=MODEL_ROOT,
-                valid_days=valid_days,
-                training_window_days=best_window_days,
-                num_boost_round=num_boost_round,
-                segment_config=segment_config,
-                high_price_weight_enabled=high_price_weighting["enabled"],
-                high_price_quantile=high_price_weighting["quantile"],
-                high_price_weight_multiplier=high_price_weighting["multiplier"],
-                price_intervals=payload.get("price_intervals"),
-            ),
-            progress_callback=lambda _message, _percent: STATE.raise_if_cancelled(job_id),
-        )
-        validate_training_result_or_restore(MODEL_ROOT, final_result, segment_config, high_price_weighting, previous_run_id)
-        activate_model_version(MODEL_ROOT, final_result.run_id, persist_default=True)
-        final_summary = summarize_train_result(final_result)
+            final_summary = summarize_train_result(final_result)
+            return {
+                "segment_count": current_segment_count,
+                "segment_mode": "custom" if current_segment_config else "default",
+                "segment_config": current_segment_config or DEFAULT_SEGMENT_CONFIG,
+                "best": best,
+                "best_interval": best_interval,
+                "best_window_days": best_window_days,
+                "best_interval_window_days": best_interval_window_days,
+                "fine_candidates": fine_candidates,
+                "results": sorted(results, key=lambda item: (float(item.get("score") or float("inf")), int(item.get("window_days") or 0))),
+                "final_model": final_summary,
+                "final_model_version": final_result.run_id,
+            }
+
+        for index, segment_item in enumerate(segment_search_configs, start=1):
+            segment_results.append(run_segment_search(segment_item, index))
+
+        best_segment = min(segment_results, key=lambda item: window_result_sort_key(item["best"]))
+        best = best_segment["best"]
+        best_interval = best_segment["best_interval"]
+        best_window_days = int(best_segment["best_window_days"])
+        best_interval_window_days = int(best_segment["best_interval_window_days"])
+        activate_model_version(MODEL_ROOT, str(best_segment["final_model_version"]), persist_default=True)
+        final_summary = best_segment["final_model"]
         state = {
             "enabled": True,
             "last_run_at": now_text(),
@@ -1179,31 +1562,56 @@ def build_window_optimization_worker(payload: dict[str, Any] | None = None) -> C
             "max_search_history_days": max_history_days,
             "valid_days": valid_days,
             "num_boost_round": num_boost_round,
+            "price_model_config": {**price_model_config, "training_window_days": best_window_days},
+            "interval_model_config": {**interval_model_config, "training_window_days": best_interval_window_days},
+            "interval_valid_days": interval_valid_days,
+            "interval_num_boost_round": interval_num_boost_round,
             "candidate_window_start": candidate_windows[0] if candidate_windows else None,
             "candidate_window_end": candidate_windows[-1] if candidate_windows else None,
             "candidate_window_count": len(candidate_windows),
             "coarse_candidates": candidate_windows,
             "fine_radius": fine_radius,
-            "fine_candidates": fine_candidates,
+            "rolling_backtest_horizons": list(rolling_backtest_horizons),
+            "fine_candidates": best_segment.get("fine_candidates") or [],
             "rerank_top_n": AUTO_WINDOW_RERANK_TOP_N,
-            "selection_method": "rolling_backtest_rerank",
-            "segment_mode": "custom" if segment_config else "default",
-            "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
+            "selection_method": "segment_search_rolling_backtest_rerank",
+            "segment_mode": best_segment.get("segment_mode") or "custom",
+            "segment_config": best_segment["segment_config"],
+            "segment_search_enabled": bool(payload.get("segment_search_enabled")),
+            "segment_search_counts": [item["segment_count"] for item in segment_search_configs],
+            "segment_search_results": segment_results,
+            "best_segment_count": best_segment["segment_count"],
+            "best_segment_model_version": best_segment["final_model_version"],
             "high_price_weighting": high_price_weighting,
             "best_window_days": best_window_days,
+            "best_interval_window_days": best_interval_window_days,
             "best_score": best.get("score"),
             "best_static_score": best.get("static_score"),
             "best_score_detail": best.get("score_detail"),
-            "best_rolling_backtest_metrics": best.get("rolling_backtest_metrics"),
-            "best_metrics": {
-                "no_lag_96": best.get("metrics"),
+            "best_interval_score": best_interval.get("interval_score"),
+            "best_interval_metrics": best_interval.get("price_interval_metrics"),
+            "price_model_recommended": {
+                "training_mode": "rolling_window",
+                "training_window_days": best_window_days,
+                "valid_days": valid_days,
+                "num_boost_round": num_boost_round,
+                "score": best.get("score"),
             },
+            "interval_model_recommended": {
+                "training_mode": "rolling_window",
+                "training_window_days": best_interval_window_days,
+                "valid_days": interval_valid_days,
+                "num_boost_round": interval_num_boost_round,
+                "score": best_interval.get("interval_score"),
+            },
+            "best_rolling_backtest_metrics": best.get("rolling_backtest_metrics"),
+            "best_metrics": {"no_lag_96": best.get("metrics")},
             "search_root": str(search_root),
-            "results": sorted(results, key=lambda item: (float(item.get("score") or float("inf")), int(item.get("window_days") or 0))),
+            "results": sorted(all_results, key=lambda item: (float(item.get("score") or float("inf")), int(item.get("window_days") or 0))),
             "final_model": final_summary,
         }
         save_window_optimization_state(state)
-        STATE.append_log(job_id, f"训练使用天数寻优完成，已启用最近 {best_window_days} 天模型", 100)
+        STATE.append_log(job_id, f"自动寻优完成：启用 {best_segment['segment_count']} 段、最近 {best_window_days} 天模型", 100)
         return {"window_optimization": state, "train_result": final_summary}
 
     return worker
@@ -1358,7 +1766,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             if path == "/api/cleanup/output":
                 return self.send_json(cleanup_output_junk())
             if path in {"/api/training/preferences", "/api/prediction/preferences"}:
-                preference_payload: dict[str, Any] = {"similarity_weights": resolve_similarity_weights(payload, MODEL_ROOT)}
+                preference_payload: dict[str, Any] = {}
                 if path == "/api/training/preferences":
                     segment_config = parse_segment_config_payload(payload)
                     preference_payload.update(
@@ -1369,6 +1777,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                             "price_intervals": parse_price_intervals_payload(payload),
                         }
                     )
+                if path == "/api/prediction/preferences":
+                    preference_payload["prediction_reference"] = parse_prediction_reference_payload(payload)
                 preferences = save_training_preferences(MODEL_ROOT, preference_payload)
                 return self.send_json({"preferences": preferences})
             if path == "/api/predict":
@@ -1381,10 +1791,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not version_key:
                     return self.send_error_json(HTTPStatus.BAD_REQUEST, "缺少 version_key")
                 activate_model_version(MODEL_ROOT, version_key)
-                return self.send_json({"message": f"已切换默认模型：{version_key}"})
+                return self.send_json({"message": f"已切换默认模型版本：{version_key}"})
             if path == "/api/model/segment-selection":
                 metadata = update_segment_price_model_selection(MODEL_ROOT, payload.get("selected_segment_price_models") or {})
-                return self.send_json({"message": "分时段预测模型已保存", "metadata": metadata})
+                return self.send_json({"message": "当前版本内分时段算法选择已保存", "metadata": metadata})
             if path == "/api/model/rollback":
                 current_dir = rollback_to_previous(MODEL_ROOT)
                 return self.send_json({"message": "已回退到上一版模型", "current_model_dir": str(current_dir)})
@@ -1409,6 +1819,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         return
 
     def get_config(self) -> dict[str, Any]:
+        optimization_state = window_optimization_state()
+        optimization_defaults = window_optimization_config_defaults(optimization_state)
+        preferences = load_training_preferences(MODEL_ROOT)
+        prediction_reference = normalize_prediction_reference_preferences(preferences.get("prediction_reference"))
         return {
             "app_name": "日前电价预测平台",
             "history_dir": str(HISTORY_DIR),
@@ -1418,14 +1832,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             "frontend_dir": str(FRONTEND_APP_DIR),
             "price_floor": PRICE_FLOOR,
             "price_cap": PRICE_CAP,
-            "default_reference_days": 1,
+            "default_reference_days": max(
+                int(prediction_reference["recent_reference_days"]),
+                int(prediction_reference["same_type_reference_days"]),
+            ),
+            "default_recent_reference_days": prediction_reference["recent_reference_days"],
+            "default_same_type_reference_days": prediction_reference["same_type_reference_days"],
+            "default_knn_similarity": prediction_reference["knn_similarity"],
             "default_training_mode": "rolling_window",
-            "default_training_window_days": 60,
+            "default_training_window_days": resolve_default_training_window_days(optimization_state),
+            "window_optimization": optimization_state,
             "default_window_optimization_max_history_days": resolve_window_optimization_max_history_days(),
+            "default_window_optimization_valid_days": optimization_defaults["valid_days"],
+            "default_window_optimization_rolling_backtest_horizons": optimization_defaults["rolling_backtest_horizons"],
             "max_reference_days": 100,
-            "default_similarity_weights": dict(load_training_preferences(MODEL_ROOT)["similarity_weights"]),
-            "prediction_preferences": load_training_preferences(MODEL_ROOT),
-            "training_preferences": load_training_preferences(MODEL_ROOT),
+            "prediction_preferences": preferences,
+            "training_preferences": preferences,
             "default_segment_config": DEFAULT_SEGMENT_CONFIG,
             "reference_strategy_options": [
                 {"key": "recent_n_days", "label": "最近 N 天"},

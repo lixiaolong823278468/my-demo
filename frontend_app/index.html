@@ -107,60 +107,13 @@
             <button class="cleanup-btn" id="cleanup-output-btn" type="button">一键清理垃圾</button>
           </div>
 
-          <div class="train-workflow-card train-workflow-card-auto">
-            <div class="train-card-accent">AUTO</div>
-            <div class="section-header">
-              <div>
-                <div class="section-title">训练使用天数寻优</div>
-                <div class="hint-text">点击按钮后测试不同“训练使用天数”，再围绕最优天数局部细搜；寻优完成后自动训练并启用最优模型。</div>
-              </div>
-            </div>
-
-            <div class="form-grid four-col">
-              <label class="field">
-                <span>寻优最大历史天数</span>
-                <input type="number" id="window-optimization-max-history-days" min="30" max="3650" value="100" />
-              </label>
-              <label class="field">
-                <span>寻优验证集天数</span>
-                <input type="number" id="window-optimization-valid-days" min="1" max="90" value="14" />
-              </label>
-              <label class="field">
-                <span>每个模型最大训练轮数</span>
-                <input type="number" id="window-optimization-num-boost-round" min="50" max="3000" step="50" value="400" />
-              </label>
-              <label class="field">
-                <span>局部细搜半径</span>
-                <input type="number" id="window-optimization-fine-radius" min="0" max="60" value="15" />
-              </label>
-            </div>
-
-            <div class="actions-row">
-              <button class="primary-btn" id="optimize-window-btn">自动寻优并训练最优模型</button>
-              <button class="ghost-btn" id="refresh-train-metrics-btn">刷新当前指标</button>
-            </div>
-
-            <div class="embedded-progress-row">
-              <div class="progress-card progress-card-optimize" id="optimize-progress-card">
-                <div class="progress-header">
-                  <span class="progress-title">寻优进度</span>
-                  <span class="progress-state-text" id="optimize-progress-text">未开始</span>
-                </div>
-                <div class="progress-status-line" id="optimize-progress-status">等待手动点击寻优</div>
-                <div class="progress-track">
-                  <div class="progress-fill" id="optimize-progress-fill"></div>
-                </div>
-              </div>
-              <button class="stop-btn hidden" id="stop-optimize-btn" type="button">停止寻优</button>
-            </div>
-          </div>
-
-          <div class="train-workflow-card">
+          <div class="train-config-grid">
+          <div class="train-workflow-card train-workflow-card-model">
             <div class="train-card-accent">MODEL</div>
             <div class="section-header compact">
               <div>
-                <div class="section-title">模型结构配置</div>
-                <div class="hint-text">这里的配置会同时用于训练使用天数寻优和手动训练；预测时会读取模型自己的配置，保证训练和预测一致。</div>
+                <div class="section-title">模型时段、参数配置</div>
+                <div class="hint-text">先确定分几个时段、是否启用高价样本加权。顶部两块配置会同时作用于自动寻优和手动训练。</div>
               </div>
             </div>
 
@@ -221,24 +174,12 @@
             <div class="train-card-accent">RANGE</div>
             <div class="section-header compact">
               <div>
-                <div class="section-title">价格区间模型训练</div>
-                <div class="hint-text">区间模型独立于具体价格模型训练；修改区间后会保存为默认配置，需要重新训练后才会影响预测。</div>
+                <div class="section-title">价格区间概率模型训练配置</div>
+                <div class="hint-text">这里只配置价格区间边界；区间概率模型的训练参数和评分目标与具体价格模型分开。</div>
               </div>
             </div>
-            <div class="form-grid four-col">
-              <label class="field">
-                <span>区间模型训练窗口</span>
-                <input type="number" id="interval-training-window-days" min="7" max="730" value="60" disabled />
-              </label>
-              <label class="field">
-                <span>区间模型验证集天数</span>
-                <input type="number" id="interval-valid-days" min="1" max="90" value="14" disabled />
-              </label>
-              <label class="field">
-                <span>高价区间召回权重</span>
-                <input type="number" id="interval-high-recall-weight" min="0" max="5" step="0.1" value="0.5" disabled />
-              </label>
-              <div class="field hint-text">区间模型当前复用手动训练窗口、验证集和训练轮数，保证两套模型样本口径一致。</div>
+            <div class="interval-config-note">
+              <span>这里不设置训练天数。下方两套训练配置分别控制具体价格模型和区间概率模型。</span>
             </div>
             <div class="table-shell table-frame table-frame-sm">
               <table class="data-table" id="price-interval-table">
@@ -248,82 +189,197 @@
                     <th>下限</th>
                     <th>上限</th>
                     <th>说明</th>
+                    <th>删除</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
               </table>
             </div>
             <div class="actions-row">
+              <button class="ghost-btn" id="add-price-interval-btn" type="button">新增区间段</button>
               <button class="ghost-btn" id="reset-price-intervals-btn" type="button">恢复默认区间</button>
               <button class="ghost-btn" id="save-price-intervals-btn" type="button">保存区间配置</button>
             </div>
           </div>
+          </div>
 
-          <div class="train-section-divider" aria-hidden="true"><span>或者</span></div>
+          <div class="train-action-grid">
+          <div class="train-workflow-card train-workflow-card-auto">
+            <div class="train-card-accent">AUTO</div>
+            <div class="section-header">
+              <div>
+                <div class="section-title">自动寻优</div>
+                <div class="hint-text">两个模型独立寻优、独立评分；完成后生成一个模型版本，版本内包含具体价格模型和区间概率模型两套结果。</div>
+              </div>
+            </div>
+
+            <div class="form-grid four-col">
+              <label class="field">
+                <span>寻优最大历史天数</span>
+                <input type="number" id="window-optimization-max-history-days" min="30" max="3650" value="100" />
+              </label>
+              <label class="field">
+                <span>寻优验证集天数</span>
+                <input type="number" id="window-optimization-valid-days" min="1" max="90" value="10" />
+              </label>
+              <label class="field">
+                <span>滚动回测天数</span>
+                <input type="text" id="window-optimization-rolling-horizons" value="14" placeholder="例如：14 或 14,30" />
+                <small>只用于自动寻优复核；多个天数用逗号分隔，天数越多耗时越长。</small>
+              </label>
+              <label class="field">
+                <span>每个模型最大训练轮数</span>
+                <input type="number" id="window-optimization-num-boost-round" min="50" max="3000" step="50" value="400" />
+              </label>
+              <label class="field">
+                <span>局部细搜半径</span>
+                <input type="number" id="window-optimization-fine-radius" min="0" max="60" value="15" />
+              </label>
+            </div>
+
+            <div class="field segment-search-field">
+              <span>参与时段数</span>
+              <div class="segment-search-counts" id="segment-search-counts"></div>
+              <small>默认勾选 3 段和 6 段；每个勾选段数会独立寻优并保存一个候选模型版本，耗时会相应增加。</small>
+            </div>
+
+            <div class="actions-row">
+              <button class="primary-btn" id="optimize-window-btn">自动寻优并训练最优模型</button>
+              <button class="ghost-btn" id="refresh-train-metrics-btn">刷新当前指标</button>
+            </div>
+
+            <div class="embedded-progress-row">
+              <div class="progress-card progress-card-optimize" id="optimize-progress-card">
+                <div class="progress-header">
+                  <span class="progress-title">寻优进度</span>
+                  <span class="progress-state-text" id="optimize-progress-text">未开始</span>
+                </div>
+                <div class="progress-status-line" id="optimize-progress-status">等待手动点击寻优</div>
+                <div class="progress-track">
+                  <div class="progress-fill" id="optimize-progress-fill"></div>
+                </div>
+              </div>
+              <button class="stop-btn hidden" id="stop-optimize-btn" type="button">停止寻优</button>
+            </div>
+          </div>
 
           <div class="train-workflow-card train-workflow-card-manual">
             <div class="train-card-accent">MANUAL</div>
             <div class="section-header compact">
               <div>
                 <div class="section-title">手动训练模型</div>
-                <div class="hint-text">只按当前手动训练参数重训模型，不执行训练使用天数寻优。</div>
+                <div class="hint-text">两套模型各自使用独立训练参数；默认值来自各自的自动寻优推荐，也可手动覆盖。</div>
               </div>
             </div>
 
-            <div class="form-grid four-col">
-              <label class="field">
-                <span>训练模式</span>
-                <select id="training-mode">
-                  <option value="rolling_window" selected>按最近 N 天训练</option>
-                  <option value="manual_date_range">手动起止日期</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>训练使用天数</span>
-                <input type="number" id="training-window-days" min="7" max="730" value="60" />
-              </label>
-              <label class="field">
-                <span>训练起始日期</span>
-                <div class="date-picker" id="train-start-picker" data-input-id="train-start-date">
-                  <input class="date-display" id="train-start-date" type="text" readonly />
-                  <button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button>
-                  <div class="date-panel"></div>
+            <div class="manual-model-grid">
+              <div class="manual-model-panel price-panel">
+                <div class="mini-section-head">
+                  <div>
+                    <div class="mini-section-title">具体价格模型训练配置</div>
+                    <div class="hint-text">只预测每个时点的具体价格，评分只看价格误差指标。</div>
+                  </div>
                 </div>
-              </label>
-              <label class="field">
-                <span>训练结束日期</span>
-                <div class="date-picker" id="train-end-picker" data-input-id="train-end-date">
-                  <input class="date-display" id="train-end-date" type="text" readonly />
-                  <button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button>
-                  <div class="date-panel"></div>
+                <div class="form-grid compact-form-grid">
+                  <label class="field">
+                    <span>训练模式</span>
+                    <select id="price-training-mode">
+                      <option value="rolling_window" selected>按最近 N 天训练</option>
+                      <option value="manual_date_range">手动起止日期</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>使用天数</span>
+                    <input type="number" id="price-training-window-days" min="7" max="730" value="60" />
+                  </label>
+                  <label class="field">
+                    <span>验证天数</span>
+                    <input type="number" id="price-valid-days" min="1" max="90" value="14" />
+                  </label>
+                  <label class="field">
+                    <span>训练轮数</span>
+                    <input type="number" id="price-num-boost-round" min="50" max="3000" step="50" value="400" />
+                  </label>
                 </div>
-              </label>
+                <div class="form-grid compact-form-grid date-config-grid">
+                  <label class="field">
+                    <span>起始日期</span>
+                    <div class="date-picker" id="price-train-start-picker" data-input-id="price-train-start-date">
+                      <input class="date-display" id="price-train-start-date" type="text" readonly />
+                      <button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button>
+                      <div class="date-panel"></div>
+                    </div>
+                  </label>
+                  <label class="field">
+                    <span>结束日期</span>
+                    <div class="date-picker" id="price-train-end-picker" data-input-id="price-train-end-date">
+                      <input class="date-display" id="price-train-end-date" type="text" readonly />
+                      <button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button>
+                      <div class="date-panel"></div>
+                    </div>
+                  </label>
+                </div>
+                <div class="toggle-row compact-toggle-row">
+                  <label class="switch-item"><input type="checkbox" id="price-enable-start" checked /><span>启用起始</span></label>
+                  <label class="switch-item"><input type="checkbox" id="price-enable-end" checked /><span>启用结束</span></label>
+                </div>
+              </div>
+
+              <div class="manual-model-panel interval-panel">
+                <div class="mini-section-head">
+                  <div>
+                    <div class="mini-section-title">价格区间概率模型训练配置</div>
+                    <div class="hint-text">只预测每个时点的价格区间及概率，评分只看区间概率指标。</div>
+                  </div>
+                </div>
+                <div class="form-grid compact-form-grid">
+                  <label class="field">
+                    <span>训练模式</span>
+                    <select id="interval-training-mode">
+                      <option value="rolling_window" selected>按最近 N 天训练</option>
+                      <option value="manual_date_range">手动起止日期</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>使用天数</span>
+                    <input type="number" id="interval-training-window-days" min="7" max="730" value="60" />
+                  </label>
+                  <label class="field">
+                    <span>验证天数</span>
+                    <input type="number" id="interval-valid-days" min="1" max="90" value="14" />
+                  </label>
+                  <label class="field">
+                    <span>训练轮数</span>
+                    <input type="number" id="interval-num-boost-round" min="50" max="3000" step="50" value="400" />
+                  </label>
+                </div>
+                <div class="form-grid compact-form-grid date-config-grid">
+                  <label class="field">
+                    <span>起始日期</span>
+                    <div class="date-picker" id="interval-train-start-picker" data-input-id="interval-train-start-date">
+                      <input class="date-display" id="interval-train-start-date" type="text" readonly />
+                      <button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button>
+                      <div class="date-panel"></div>
+                    </div>
+                  </label>
+                  <label class="field">
+                    <span>结束日期</span>
+                    <div class="date-picker" id="interval-train-end-picker" data-input-id="interval-train-end-date">
+                      <input class="date-display" id="interval-train-end-date" type="text" readonly />
+                      <button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button>
+                      <div class="date-panel"></div>
+                    </div>
+                  </label>
+                </div>
+                <div class="toggle-row compact-toggle-row">
+                  <label class="switch-item"><input type="checkbox" id="interval-enable-start" checked /><span>启用起始</span></label>
+                  <label class="switch-item"><input type="checkbox" id="interval-enable-end" checked /><span>启用结束</span></label>
+                </div>
+              </div>
             </div>
 
-            <div class="form-grid four-col">
-              <label class="field">
-                <span>手动验证集天数</span>
-                <input type="number" id="valid-days" min="1" max="90" value="14" />
-              </label>
-              <label class="field">
-                <span>每个模型最大训练轮数</span>
-                <input type="number" id="num-boost-round" min="50" max="3000" step="50" value="400" />
-              </label>
-            </div>
-
-            <div class="toggle-row">
-              <label class="switch-item">
-                <input type="checkbox" id="enable-start" checked />
-                <span>启用训练起始日期</span>
-              </label>
-              <label class="switch-item">
-                <input type="checkbox" id="enable-end" checked />
-                <span>启用训练结束日期</span>
-              </label>
-              <span class="switch-item">训练模型仅使用当天供需、日期类型和火电容量等特征</span>
-            </div>
-
-            <div class="actions-row">
+            <div class="actions-row manual-actions-row">
+              <span class="hint-text">手动训练会在同一次任务里分别训练两套模型，各自使用上面的参数。</span>
               <button class="primary-btn" id="train-btn">手动重训模型</button>
             </div>
 
@@ -341,16 +397,17 @@
               <button class="stop-btn hidden" id="stop-train-btn" type="button">停止训练</button>
             </div>
           </div>
+          </div>
 
           <div class="train-metrics-section">
-          <div class="subsection-title">当前默认模型分时段指标</div>
+          <div class="subsection-title">当前默认模型版本分时段指标</div>
           <div class="table-shell table-frame table-frame-md">
             <table class="data-table" id="metrics-table">
               <thead>
                 <tr>
                   <th>分时段</th>
-                  <th>相似法参考 MAE</th>
-                  <th>相似法参考 RMSE</th>
+                  <th>净负荷相似法 MAE</th>
+                  <th>净负荷相似法 RMSE</th>
                   <th>模型 MAE</th>
                   <th>模型 RMSE</th>
                   <th>训练样本数</th>
@@ -385,10 +442,8 @@
                     <th>窗口</th>
                     <th>模型 MAE</th>
                     <th>模型 RMSE</th>
-                    <th>多条件相似法 MAE</th>
-                    <th>较多条件提升</th>
-                    <th>仅火电空间相似法 MAE</th>
-                    <th>较火电空间提升</th>
+                    <th>净负荷相似法 MAE</th>
+                    <th>较净负荷相似法提升</th>
                     <th>方向准确率</th>
                     <th>高价尖峰 MAE</th>
                     <th>晚高峰 MAE</th>
@@ -438,71 +493,103 @@
           <div class="section-header">
             <div>
               <div class="section-title">执行预测</div>
-              <div class="hint-text">输入参考天数后执行预测，同时查看最近天和同类型日两条 96 点价格曲线。</div>
+              <div class="hint-text">设置模型版本和三类相似参考参数后执行预测，用图表横向对比多条参考曲线。</div>
             </div>
           </div>
 
-          <div class="form-grid four-col">
-            <label class="field">
-              <span>参考天数</span>
-              <input type="number" id="reference-days" min="1" max="100" value="1" />
-            </label>
-          </div>
-
-          <div class="section-header compact">
-            <div>
-              <div class="section-title">相似法参考曲线设置</div>
-              <div class="hint-text">只影响预测时展示的相似法参考价格，不参与模型训练，也不改变模型预测价格。</div>
+          <div class="predict-control-card">
+            <div class="predict-model-panel">
+              <label class="field predict-model-field">
+                <span>预测模型版本 <button class="help-trigger static-help" type="button" data-help-key="预测模型版本" aria-expanded="false">?</button></span>
+                <select id="predict-model-version">
+                  <option value="">使用当前默认</option>
+                </select>
+                <small>留空使用当前默认模型版本；选择历史版本仅作用于本次预测。</small>
+              </label>
             </div>
-          </div>
 
-          <div class="form-grid four-col">
-            <label class="field">
-              <span>火电空间权重</span>
-              <input type="number" id="similarity-weight-net-load" min="0" step="0.01" value="0.45" />
-            </label>
-            <label class="field">
-              <span>新能源权重</span>
-              <input type="number" id="similarity-weight-renewable-power" min="0" step="0.01" value="0.15" />
-            </label>
-            <label class="field">
-              <span>火电容量权重</span>
-              <input type="number" id="similarity-weight-thermal-on-capacity" min="0" step="0.01" value="0.2" />
-            </label>
-            <label class="field">
-              <span>日期类型权重</span>
-              <input type="number" id="similarity-weight-day-type" min="0" step="0.01" value="0.1" />
-            </label>
-            <label class="field">
-              <span>供需比权重</span>
-              <input type="number" id="similarity-weight-ratio" min="0" step="0.01" value="0.1" />
-            </label>
-          </div>
-
-          <div class="progress-grid">
-            <div class="progress-card progress-card-predict" id="predict-progress-card">
-              <div class="progress-header">
-                <span class="progress-title">预测进度</span>
-                <span class="progress-state-text" id="predict-progress-text">未开始</span>
+            <div class="predict-run-panel">
+              <div class="progress-card progress-card-predict predict-progress-card" id="predict-progress-card">
+                <div class="progress-header">
+                  <span class="progress-title">预测进度</span>
+                  <span class="progress-state-text" id="predict-progress-text">未开始</span>
+                </div>
+                <div class="progress-status-line" id="predict-progress-status">等待执行预测</div>
+                <div class="progress-track">
+                  <div class="progress-fill" id="predict-progress-fill"></div>
+                </div>
               </div>
-              <div class="progress-status-line" id="predict-progress-status">等待执行预测</div>
-              <div class="progress-track">
-                <div class="progress-fill" id="predict-progress-fill"></div>
+
+              <div class="predict-actions">
+                <div class="predict-action-row predict-action-row-primary">
+                  <button class="primary-btn predict-action-main" id="predict-btn">执行预测</button>
+                  <button class="ghost-btn predict-action-side" id="reload-template-btn">重新加载预测文件</button>
+                </div>
+                <div class="predict-action-row predict-action-row-secondary">
+                  <button class="ghost-btn" id="save-template-btn">保存当前编辑</button>
+                  <a class="ghost-btn link-btn" href="/download/output" target="_blank">下载最新结果</a>
+                </div>
+                <button class="stop-btn hidden predict-stop-action" id="stop-predict-btn" type="button">停止预测</button>
               </div>
             </div>
           </div>
 
-          <div class="actions-row">
-            <button class="ghost-btn" id="reload-template-btn">重新加载预测文件</button>
-            <button class="ghost-btn" id="save-template-btn">保存当前编辑</button>
-            <button class="primary-btn" id="predict-btn">执行预测</button>
-            <button class="stop-btn hidden" id="stop-predict-btn" type="button">停止预测</button>
-            <a class="ghost-btn link-btn" href="/download/output" target="_blank">下载最新结果</a>
+          <div class="similarity-config-card">
+            <section class="similarity-config-panel similarity-config-panel-netload">
+              <div class="similarity-config-head">
+                <div class="similarity-config-title">净负荷相似法 <button class="help-trigger static-help" type="button" data-help-key="净负荷相似法" aria-expanded="false">?</button></div>
+                <div class="similarity-config-subtitle">只按净负荷/火电空间找历史相似价格。</div>
+              </div>
+              <div class="similarity-config-inputs">
+                <label class="field predict-reference-field">
+                  <span>最近天数</span>
+                  <input type="number" id="recent-reference-days" min="1" max="100" value="1" />
+                </label>
+                <label class="field predict-reference-field">
+                  <span>同类型日个数</span>
+                  <input type="number" id="same-type-reference-days" min="1" max="100" value="1" />
+                </label>
+              </div>
+            </section>
+
+            <section class="similarity-config-panel">
+              <div class="similarity-config-head">
+                <div class="similarity-config-title">KNN相似法 <button class="help-trigger static-help" type="button" data-help-key="KNN相似法" aria-expanded="false">?</button></div>
+                <div class="similarity-config-subtitle">多因素找相似点，再对保留价格做普通平均；共用左侧最近天数/同类型日个数作为历史范围。</div>
+              </div>
+              <div class="similarity-config-inputs">
+                <label class="field predict-reference-field">
+                  <span>相似点数量 K</span>
+                  <input type="number" id="knn-similar-k" min="1" max="20" value="5" />
+                </label>
+                <label class="field predict-reference-field">
+                  <span>最大距离阈值</span>
+                  <input type="number" id="knn-similar-max-distance" min="0.1" max="20" step="0.1" value="3.0" />
+                </label>
+              </div>
+            </section>
+
+            <section class="similarity-config-panel">
+              <div class="similarity-config-head">
+                <div class="similarity-config-title">加权KNN回归 <button class="help-trigger static-help" type="button" data-help-key="加权KNN回归" aria-expanded="false">?</button></div>
+                <div class="similarity-config-subtitle">多因素找相似点，越相似的历史价格权重越大；共用左侧最近天数/同类型日个数作为历史范围。</div>
+              </div>
+              <div class="similarity-config-inputs">
+                <label class="field predict-reference-field">
+                  <span>相似点数量 K</span>
+                  <input type="number" id="weighted-knn-k" min="1" max="20" value="5" />
+                </label>
+                <label class="field predict-reference-field">
+                  <span>最大距离阈值</span>
+                  <input type="number" id="weighted-knn-max-distance" min="0.1" max="20" step="0.1" value="3.0" />
+                </label>
+              </div>
+            </section>
           </div>
 
           <div class="chart-card">
             <div class="table-toolbar">
-              <div class="toolbar-title">96 点预测曲线 + 区间风险</div>
+              <div class="toolbar-title">96 点预测曲线 + 价格区间概率</div>
               <div class="toolbar-meta" id="prediction-meta">尚未执行预测</div>
               <div class="segmented-control" id="prediction-chart-layout-control" aria-label="图表布局">
                 <span class="segmented-label">图表布局</span>
@@ -510,13 +597,7 @@
                 <button class="segmented-option" type="button" data-chart-layout="side-by-side">左右排列</button>
               </div>
             </div>
-            <div class="chart-stats" id="prediction-stats">
-              <span class="chart-stat">预测最低价：-</span>
-              <span class="chart-stat">预测最高价：-</span>
-              <span class="chart-stat">预测均价：-</span>
-              <span class="chart-stat">参考日期：-</span>
-            </div>
-            <div class="interval-strip" id="prediction-interval-strip"></div>
+            <div class="chart-stats" id="prediction-stats"></div>
             <div class="prediction-chart-grid" id="prediction-chart-grid">
               <article class="strategy-chart-panel">
                 <div class="strategy-chart-title">最近 N 天</div>
@@ -532,8 +613,8 @@
           <div class="model-rank-card">
             <div class="model-rank-head">
               <div>
-                <div class="toolbar-title">分时段模型选择 <button class="help-trigger static-help" type="button" data-help-key="segmentModelSelection" aria-expanded="false">?</button></div>
-                <div class="toolbar-meta" id="model-rank-meta">按验证集指标排序，可把某个时段切换到更适合的算法</div>
+                <div class="toolbar-title">当前版本内分时段算法选择 <button class="help-trigger static-help" type="button" data-help-key="segmentModelSelection" aria-expanded="false">?</button></div>
+                <div class="toolbar-meta" id="model-rank-meta">只影响当前默认模型版本内部的时段算法选择，不切换历史模型版本</div>
               </div>
               <div class="model-rank-controls">
                 <label class="compact-field">
@@ -564,12 +645,6 @@
               <table class="data-table compact-rank-table" id="model-rank-table"></table>
             </div>
           </div>
-
-          <div class="table-toolbar">
-            <div class="toolbar-title">策略对比</div>
-            <div class="toolbar-meta">对比不同参考策略的均价、最高价和最低价。</div>
-          </div>
-          <div class="card-grid metrics-grid" id="comparison-cards"></div>
 
           <div class="accuracy-review-card">
             <div class="accuracy-review-head">
@@ -625,13 +700,13 @@
           <div class="section-header">
             <div>
               <div class="section-title">模型版本</div>
-              <div class="hint-text">选择历史版本作为默认模型，或清理不需要的版本。</div>
+              <div class="hint-text">选择历史训练版本作为默认模型版本，或清理不需要的版本。</div>
             </div>
           </div>
 
           <div class="form-grid version-grid">
             <label class="field select-field version-select-field">
-              <span>历史模型下拉列表</span>
+              <span>历史模型版本下拉列表</span>
               <select id="version-select"></select>
             </label>
             <label class="field select-field version-select-field">
@@ -644,12 +719,11 @@
                 <option value="rolling_30_evening_peak_mae_asc">晚高峰 MAE（小到大）</option>
                 <option value="final_rmse_asc">模型 RMSE（小到大）</option>
                 <option value="final_mae_asc">模型 MAE（小到大）</option>
-                <option value="rolling_30_multi_similarity_mae_asc">30天多条件相似法 MAE（小到大）</option>
-                <option value="rolling_30_thermal_space_similarity_mae_asc">30天仅火电空间相似法 MAE（小到大）</option>
+                <option value="rolling_30_thermal_space_similarity_mae_asc">30天净负荷相似法 MAE（小到大）</option>
               </select>
             </label>
             <div class="actions-row compact-actions">
-              <button class="primary-btn" id="activate-version-btn">设为默认模型</button>
+              <button class="primary-btn" id="activate-version-btn">设为默认模型版本</button>
               <button class="ghost-btn" id="rollback-btn">回退到上一版</button>
               <button class="danger-btn" id="delete-versions-btn">删除选中版本</button>
             </div>
@@ -675,17 +749,13 @@
                     <th class="version-sort-head" data-version-sort="final_rmse_asc">模型 RMSE</th>
                     <th class="version-sort-head" data-version-sort="rolling_14_mae_asc">14天模型 MAE</th>
                     <th>14天模型 RMSE</th>
-                    <th>14天多条件 MAE</th>
-                    <th>14天火电空间 MAE</th>
+                    <th>14天净负荷相似法 MAE</th>
                     <th class="version-sort-head" data-version-sort="rolling_30_mae_asc">30天模型 MAE</th>
                     <th>30天模型 RMSE</th>
-                    <th class="version-sort-head" data-version-sort="rolling_30_multi_similarity_mae_asc">30天多条件 MAE</th>
-                    <th class="version-sort-head" data-version-sort="rolling_30_thermal_space_similarity_mae_asc">30天火电空间 MAE</th>
-                    <th>较多条件提升</th>
-                    <th>较火电空间提升</th>
+                    <th class="version-sort-head" data-version-sort="rolling_30_thermal_space_similarity_mae_asc">30天净负荷相似法 MAE</th>
+                    <th>较净负荷相似法提升</th>
                     <th class="version-sort-head" data-version-sort="rolling_30_high_price_mae_asc">高价尖峰 MAE</th>
-                    <th>尖峰多条件 MAE</th>
-                    <th>尖峰火电空间 MAE</th>
+                    <th>尖峰净负荷相似法 MAE</th>
                     <th class="version-sort-head" data-version-sort="rolling_30_evening_peak_mae_asc">晚高峰 MAE</th>
                     <th>方向准确率</th>
                     <th>最大误差</th>
