@@ -4138,24 +4138,8 @@ function resetSessionProgress() {
 async function loadConfig() {
   App.config = await request("/api/config");
   applyModelTrainingDefaults();
-  if ($("#window-optimization-max-history-days") && App.config?.default_window_optimization_max_history_days) {
-    $("#window-optimization-max-history-days").value = App.config.default_window_optimization_max_history_days;
-  }
-  if ($("#window-optimization-valid-days") && App.config?.default_window_optimization_valid_days) {
-    $("#window-optimization-valid-days").value = App.config.default_window_optimization_valid_days;
-  }
-  if ($("#window-optimization-rolling-horizons") && App.config?.default_window_optimization_rolling_backtest_horizons) {
-    $("#window-optimization-rolling-horizons").value = App.config.default_window_optimization_rolling_backtest_horizons.join(",");
-  }
-  if ($("#realtime-window-optimization-max-history-days") && App.config?.default_window_optimization_max_history_days) {
-    $("#realtime-window-optimization-max-history-days").value = App.config.default_window_optimization_max_history_days;
-  }
-  if ($("#realtime-window-optimization-valid-days") && App.config?.default_window_optimization_valid_days) {
-    $("#realtime-window-optimization-valid-days").value = App.config.default_window_optimization_valid_days;
-  }
-  if ($("#realtime-window-optimization-rolling-horizons") && App.config?.default_window_optimization_rolling_backtest_horizons) {
-    $("#realtime-window-optimization-rolling-horizons").value = App.config.default_window_optimization_rolling_backtest_horizons.join(",");
-  }
+  applyWindowOptimizationDefaults("dayahead");
+  applyWindowOptimizationDefaults("realtime");
   const predictionReference = App.config?.prediction_preferences?.prediction_reference || {};
   const knnDefaults = predictionReference.knn_similarity || App.config?.default_knn_similarity || {};
   if ($("#recent-reference-days")) {
@@ -4195,8 +4179,52 @@ async function loadConfig() {
   renderConfigPaths();
 }
 
-function modelRecommendation(prefix) {
-  const state = App.config?.window_optimization || {};
+function trainingPreferencesForTarget(target = "dayahead") {
+  if (target === "realtime") {
+    return App.config?.realtime_training_preferences || App.config?.training_preferences || {};
+  }
+  return App.config?.training_preferences || {};
+}
+
+function windowOptimizationPreferences(target = "dayahead") {
+  return trainingPreferencesForTarget(target).window_optimization || {};
+}
+
+function applyWindowOptimizationDefaults(target = "dayahead") {
+  const prefix = trainingTargetPrefix(target);
+  const preferences = windowOptimizationPreferences(target);
+  const horizons = preferences.rolling_backtest_horizons
+    || App.config?.default_window_optimization_rolling_backtest_horizons
+    || [14];
+  if ($(`#${prefix}window-optimization-max-history-days`)) {
+    $(`#${prefix}window-optimization-max-history-days`).value = preferences.max_history_days
+      || App.config?.default_window_optimization_max_history_days
+      || 100;
+  }
+  if ($(`#${prefix}window-optimization-valid-days`)) {
+    $(`#${prefix}window-optimization-valid-days`).value = preferences.valid_days
+      || App.config?.default_window_optimization_valid_days
+      || 10;
+  }
+  if ($(`#${prefix}window-optimization-num-boost-round`)) {
+    $(`#${prefix}window-optimization-num-boost-round`).value = preferences.num_boost_round
+      || App.config?.default_window_optimization_num_boost_round
+      || 400;
+  }
+  if ($(`#${prefix}window-optimization-fine-radius`)) {
+    $(`#${prefix}window-optimization-fine-radius`).value = preferences.fine_radius
+      ?? App.config?.default_window_optimization_fine_radius
+      ?? 15;
+  }
+  if ($(`#${prefix}window-optimization-rolling-horizons`)) {
+    $(`#${prefix}window-optimization-rolling-horizons`).value = horizons.join(",");
+  }
+}
+
+function modelRecommendation(prefix, target = "dayahead") {
+  const state = target === "realtime"
+    ? (App.config?.realtime_window_optimization || {})
+    : (App.config?.window_optimization || {});
   const recommendedKey = prefix === "interval" ? "interval_model_recommended" : "price_model_recommended";
   const configKey = prefix === "interval" ? "interval_model_config" : "price_model_config";
   return state[recommendedKey] || state[configKey] || {};
@@ -4205,13 +4233,19 @@ function modelRecommendation(prefix) {
 function applyModelTrainingDefaults() {
   ["dayahead", "realtime"].forEach((target) => {
     ["price", "interval"].forEach((prefix) => {
-      const recommended = modelRecommendation(prefix);
+      const preferenceKey = prefix === "interval" ? "interval_model_config" : "price_model_config";
+      const saved = trainingPreferencesForTarget(target)[preferenceKey] || {};
+      const recommended = Object.keys(saved).length ? saved : modelRecommendation(prefix, target);
       const fieldPrefix = `${trainingTargetPrefix(target)}${prefix}`;
       const mode = recommended.training_mode || App.config?.default_training_mode || "rolling_window";
       if ($(`#${fieldPrefix}-training-mode`)) $(`#${fieldPrefix}-training-mode`).value = mode;
       if ($(`#${fieldPrefix}-training-window-days`)) {
         $(`#${fieldPrefix}-training-window-days`).value = recommended.training_window_days || App.config?.default_training_window_days || 60;
       }
+      if ($(`#${fieldPrefix}-train-start-date`)) $(`#${fieldPrefix}-train-start-date`).value = recommended.start_date || "";
+      if ($(`#${fieldPrefix}-train-end-date`)) $(`#${fieldPrefix}-train-end-date`).value = recommended.end_date || "";
+      if ($(`#${fieldPrefix}-enable-start`)) $(`#${fieldPrefix}-enable-start`).checked = Boolean(recommended.enable_start);
+      if ($(`#${fieldPrefix}-enable-end`)) $(`#${fieldPrefix}-enable-end`).checked = Boolean(recommended.enable_end);
       if ($(`#${fieldPrefix}-valid-days`)) $(`#${fieldPrefix}-valid-days`).value = recommended.valid_days || 14;
       if ($(`#${fieldPrefix}-num-boost-round`)) $(`#${fieldPrefix}-num-boost-round`).value = recommended.num_boost_round || 400;
     });
@@ -4219,17 +4253,29 @@ function applyModelTrainingDefaults() {
 }
 
 async function saveTrainingPreferences(target = "dayahead") {
+  const windowOptimization = {
+    max_history_days: currentWindowOptimizationMaxHistoryDays(target),
+    valid_days: currentWindowOptimizationValidDays(target),
+    num_boost_round: currentWindowOptimizationNumBoostRound(target),
+    fine_radius: currentWindowOptimizationFineRadius(target),
+    rolling_backtest_horizons: currentWindowOptimizationRollingHorizons(target),
+  };
   const preferences = await request("/api/training/preferences", {
     method: "POST",
     body: JSON.stringify({
       target,
+      price_model_config: collectModelTrainingConfig("price", target),
+      interval_model_config: collectModelTrainingConfig("interval", target),
+      window_optimization: windowOptimization,
       ...collectTrainingAdvancedConfig(target),
     }),
   });
+  const preferenceKey = target === "realtime" ? "realtime_training_preferences" : "training_preferences";
   App.config = {
     ...App.config,
-    training_preferences: preferences.preferences,
-    prediction_preferences: preferences.preferences,
+    [preferenceKey]: preferences.preferences,
+    training_preferences: target === "realtime" ? App.config?.training_preferences : preferences.preferences,
+    prediction_preferences: target === "realtime" ? App.config?.prediction_preferences : preferences.preferences,
   };
   showToast("训练配置已保存，重新训练后生效");
 }

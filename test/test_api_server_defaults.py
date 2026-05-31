@@ -49,6 +49,74 @@ class ApiServerDefaultsTests(unittest.TestCase):
         self.assertEqual(loaded["prediction_reference"]["knn_similarity"]["knn_k"], 7)
         self.assertEqual(loaded["prediction_reference"]["knn_similarity"]["weighted_knn_max_distance"], 1.8)
 
+    def test_training_preferences_persist_training_and_window_parameters(self) -> None:
+        from dayahead_core import load_training_preferences, save_training_preferences
+
+        with TemporaryDirectory() as temp_dir:
+            save_training_preferences(
+                temp_dir,
+                {
+                    "price_model_config": {
+                        "training_mode": "rolling_window",
+                        "training_window_days": 88,
+                        "valid_days": 9,
+                        "num_boost_round": 650,
+                    },
+                    "interval_model_config": {
+                        "training_mode": "manual_date_range",
+                        "training_window_days": 60,
+                        "enable_start": True,
+                        "enable_end": True,
+                        "start_date": "2026-01-01",
+                        "end_date": "2026-05-20",
+                        "valid_days": 6,
+                        "num_boost_round": 550,
+                    },
+                    "window_optimization": {
+                        "max_history_days": 240,
+                        "valid_days": 12,
+                        "num_boost_round": 700,
+                        "fine_radius": 21,
+                        "rolling_backtest_horizons": [7, 14, 30],
+                    },
+                },
+            )
+            loaded = load_training_preferences(temp_dir)
+
+        self.assertEqual(loaded["price_model_config"]["training_window_days"], 88)
+        self.assertEqual(loaded["price_model_config"]["valid_days"], 9)
+        self.assertEqual(loaded["price_model_config"]["num_boost_round"], 650)
+        self.assertEqual(loaded["interval_model_config"]["training_mode"], "manual_date_range")
+        self.assertEqual(loaded["interval_model_config"]["start_date"], "2026-01-01")
+        self.assertEqual(loaded["interval_model_config"]["end_date"], "2026-05-20")
+        self.assertEqual(loaded["window_optimization"]["max_history_days"], 240)
+        self.assertEqual(loaded["window_optimization"]["rolling_backtest_horizons"], [7, 14, 30])
+
+    def test_realtime_training_preferences_are_saved_in_root_target_section(self) -> None:
+        import json
+
+        from api_server import load_target_training_preferences, save_target_training_preferences
+
+        with TemporaryDirectory() as temp_dir:
+            save_target_training_preferences(
+                "realtime",
+                {
+                    "price_model_config": {
+                        "training_mode": "rolling_window",
+                        "training_window_days": 77,
+                        "valid_days": 5,
+                        "num_boost_round": 500,
+                    }
+                },
+                model_root=Path(temp_dir),
+            )
+            root_payload = json.loads((Path(temp_dir) / "training_preferences.json").read_text(encoding="utf-8"))
+            loaded = load_target_training_preferences("realtime", Path(temp_dir))
+
+        self.assertEqual(root_payload["target_preferences"]["realtime"]["price_model_config"]["training_window_days"], 77)
+        self.assertEqual(loaded["price_model_config"]["valid_days"], 5)
+        self.assertFalse((Path(temp_dir) / "realtime_price" / "training_preferences.json").exists())
+
     def test_remove_tree_with_retry_handles_transient_directory_not_empty(self) -> None:
         import api_server
 

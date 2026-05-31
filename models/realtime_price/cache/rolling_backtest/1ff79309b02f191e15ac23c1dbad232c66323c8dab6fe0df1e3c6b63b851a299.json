@@ -1,0 +1,340 @@
+{
+  "rows": 1344,
+  "test_date_start": "2026-05-13",
+  "test_date_end": "2026-05-26",
+  "overall": {
+    "rows": 1344,
+    "mae": 48.288,
+    "rmse": 108.94,
+    "bias": 18.9584,
+    "max_abs_error": 910.0671,
+    "p90_abs_error": 152.5714,
+    "direction_accuracy": 74.25,
+    "over_rate": 65.77,
+    "under_rate": 34.23
+  },
+  "net_load_only_baseline": {
+    "rows": 1344,
+    "mae": 62.6961,
+    "rmse": 154.5749,
+    "bias": 18.8346,
+    "max_abs_error": 1083.7859,
+    "p90_abs_error": 164.5333,
+    "direction_accuracy": 60.16,
+    "over_rate": 61.76,
+    "under_rate": 33.56
+  },
+  "net_load_only_baseline_label": "净负荷相似法预测价格",
+  "model_vs_net_load_only_similarity": {
+    "model": {
+      "rows": 1344,
+      "mae": 48.288,
+      "rmse": 108.94,
+      "bias": 18.9584,
+      "max_abs_error": 910.0671,
+      "p90_abs_error": 152.5714,
+      "direction_accuracy": 74.25,
+      "over_rate": 65.77,
+      "under_rate": 34.23
+    },
+    "baseline": {
+      "rows": 1344,
+      "mae": 62.6961,
+      "rmse": 154.5749,
+      "bias": 18.8346,
+      "max_abs_error": 1083.7859,
+      "p90_abs_error": 164.5333,
+      "direction_accuracy": 60.16,
+      "over_rate": 61.76,
+      "under_rate": 33.56
+    },
+    "mae_improvement": 14.4081,
+    "mae_improvement_pct": 22.98
+  },
+  "segments": {
+    "segment_1": {
+      "rows": 224,
+      "mae": 56.3812,
+      "rmse": 104.0429,
+      "bias": 21.3202,
+      "max_abs_error": 285.0747,
+      "p90_abs_error": 225.878,
+      "direction_accuracy": 81.08,
+      "over_rate": 62.95,
+      "under_rate": 37.05
+    },
+    "segment_2": {
+      "rows": 224,
+      "mae": 28.8275,
+      "rmse": 47.2995,
+      "bias": 9.6136,
+      "max_abs_error": 221.5835,
+      "p90_abs_error": 83.1666,
+      "direction_accuracy": 73.16,
+      "over_rate": 63.84,
+      "under_rate": 36.16
+    },
+    "segment_3": {
+      "rows": 224,
+      "mae": 42.5656,
+      "rmse": 74.0825,
+      "bias": 15.7519,
+      "max_abs_error": 259.6004,
+      "p90_abs_error": 150.1247,
+      "direction_accuracy": 77.23,
+      "over_rate": 73.21,
+      "under_rate": 26.79
+    },
+    "segment_4": {
+      "rows": 224,
+      "mae": 34.7584,
+      "rmse": 56.8336,
+      "bias": 6.4729,
+      "max_abs_error": 261.4383,
+      "p90_abs_error": 96.6159,
+      "direction_accuracy": 63.92,
+      "over_rate": 73.21,
+      "under_rate": 26.79
+    },
+    "segment_5": {
+      "rows": 224,
+      "mae": 75.6862,
+      "rmse": 189.3307,
+      "bias": 47.4179,
+      "max_abs_error": 910.0671,
+      "p90_abs_error": 193.4174,
+      "direction_accuracy": 79.7,
+      "over_rate": 62.05,
+      "under_rate": 37.95
+    },
+    "segment_6": {
+      "rows": 224,
+      "mae": 51.509,
+      "rmse": 116.5376,
+      "bias": 13.1736,
+      "max_abs_error": 578.389,
+      "p90_abs_error": 141.6952,
+      "direction_accuracy": 69.65,
+      "over_rate": 59.38,
+      "under_rate": 40.62
+    }
+  },
+  "segment_net_load_only_baseline": {
+    "segment_1": {
+      "rows": 224,
+      "mae": 48.1472,
+      "rmse": 96.6844,
+      "bias": -8.2018,
+      "max_abs_error": 542.9075,
+      "p90_abs_error": 182.9667,
+      "direction_accuracy": 58.38,
+      "over_rate": 62.5,
+      "under_rate": 37.5
+    },
+    "segment_2": {
+      "rows": 224,
+      "mae": 47.1641,
+      "rmse": 85.1984,
+      "bias": -2.0118,
+      "max_abs_error": 293.5191,
+      "p90_abs_error": 162.7757,
+      "direction_accuracy": 60.53,
+      "over_rate": 59.38,
+      "under_rate": 37.95
+    },
+    "segment_3": {
+      "rows": 224,
+      "mae": 50.8849,
+      "rmse": 83.8571,
+      "bias": 16.1337,
+      "max_abs_error": 275.0877,
+      "p90_abs_error": 157.2021,
+      "direction_accuracy": 70.3,
+      "over_rate": 61.16,
+      "under_rate": 24.55
+    },
+    "segment_4": {
+      "rows": 224,
+      "mae": 46.7171,
+      "rmse": 78.3062,
+      "bias": 21.881,
+      "max_abs_error": 251.8217,
+      "p90_abs_error": 157.2603,
+      "direction_accuracy": 55.67,
+      "over_rate": 69.64,
+      "under_rate": 19.2
+    },
+    "segment_5": {
+      "rows": 224,
+      "mae": 88.4606,
+      "rmse": 220.4523,
+      "bias": 34.4418,
+      "max_abs_error": 1000.0,
+      "p90_abs_error": 196.2605,
+      "direction_accuracy": 68.32,
+      "over_rate": 63.39,
+      "under_rate": 36.61
+    },
+    "segment_6": {
+      "rows": 224,
+      "mae": 94.8026,
+      "rmse": 254.9325,
+      "bias": 50.7645,
+      "max_abs_error": 1083.7859,
+      "p90_abs_error": 201.7848,
+      "direction_accuracy": 53.73,
+      "over_rate": 54.46,
+      "under_rate": 45.54
+    }
+  },
+  "daily_error_rank": {
+    "best": [
+      {
+        "date": "2026-05-21",
+        "mae": 7.2433,
+        "rmse": 15.419,
+        "max_abs_error": 99.2441,
+        "direction_accuracy": 84.29
+      },
+      {
+        "date": "2026-05-24",
+        "mae": 9.2131,
+        "rmse": 27.7626,
+        "max_abs_error": 221.5835,
+        "direction_accuracy": 78.57
+      },
+      {
+        "date": "2026-05-20",
+        "mae": 14.4732,
+        "rmse": 27.7508,
+        "max_abs_error": 161.8025,
+        "direction_accuracy": 87.93
+      },
+      {
+        "date": "2026-05-23",
+        "mae": 14.575,
+        "rmse": 30.0094,
+        "max_abs_error": 184.619,
+        "direction_accuracy": 79.37
+      },
+      {
+        "date": "2026-05-14",
+        "mae": 16.3916,
+        "rmse": 22.817,
+        "max_abs_error": 81.3945,
+        "direction_accuracy": 73.44
+      }
+    ],
+    "worst": [
+      {
+        "date": "2026-05-26",
+        "mae": 189.6935,
+        "rmse": 296.2623,
+        "max_abs_error": 910.0671,
+        "direction_accuracy": 69.15
+      },
+      {
+        "date": "2026-05-18",
+        "mae": 107.5438,
+        "rmse": 178.4431,
+        "max_abs_error": 578.389,
+        "direction_accuracy": 80.65
+      },
+      {
+        "date": "2026-05-25",
+        "mae": 84.6334,
+        "rmse": 127.6896,
+        "max_abs_error": 519.5544,
+        "direction_accuracy": 68.13
+      },
+      {
+        "date": "2026-05-17",
+        "mae": 81.7169,
+        "rmse": 114.4824,
+        "max_abs_error": 261.4383,
+        "direction_accuracy": 66.67
+      },
+      {
+        "date": "2026-05-16",
+        "mae": 38.372,
+        "rmse": 60.6874,
+        "max_abs_error": 204.7655,
+        "direction_accuracy": 57.65
+      }
+    ]
+  },
+  "spike_errors": {
+    "high_threshold": 387.517,
+    "high": {
+      "rows": 135,
+      "mae": 202.8387,
+      "rmse": 288.4401,
+      "bias": 21.9186,
+      "max_abs_error": 910.0671,
+      "p90_abs_error": 509.2585,
+      "direction_accuracy": 69.57,
+      "over_rate": 43.7,
+      "under_rate": 56.3
+    },
+    "high_net_load_only_baseline": {
+      "rows": 135,
+      "mae": 295.5988,
+      "rmse": 434.2871,
+      "bias": 32.291,
+      "max_abs_error": 1071.7013,
+      "p90_abs_error": 917.198,
+      "direction_accuracy": 52.17,
+      "over_rate": 32.59,
+      "under_rate": 67.41
+    },
+    "high_model_vs_net_load_only_similarity": {
+      "model": {
+        "rows": 135,
+        "mae": 202.8387,
+        "rmse": 288.4401,
+        "bias": 21.9186,
+        "max_abs_error": 910.0671,
+        "p90_abs_error": 509.2585,
+        "direction_accuracy": 69.57,
+        "over_rate": 43.7,
+        "under_rate": 56.3
+      },
+      "baseline": {
+        "rows": 135,
+        "mae": 295.5988,
+        "rmse": 434.2871,
+        "bias": 32.291,
+        "max_abs_error": 1071.7013,
+        "p90_abs_error": 917.198,
+        "direction_accuracy": 52.17,
+        "over_rate": 32.59,
+        "under_rate": 67.41
+      },
+      "mae_improvement": 92.7601,
+      "mae_improvement_pct": 31.38
+    },
+    "low_threshold": 0.0,
+    "low": {
+      "rows": 252,
+      "mae": 23.1403,
+      "rmse": 46.0363,
+      "bias": 22.469,
+      "max_abs_error": 254.7127,
+      "p90_abs_error": 47.7851,
+      "direction_accuracy": null,
+      "over_rate": 86.9,
+      "under_rate": 13.1
+    },
+    "low_net_load_only_baseline": {
+      "rows": 252,
+      "mae": 46.4344,
+      "rmse": 82.0186,
+      "bias": 46.4344,
+      "max_abs_error": 275.0877,
+      "p90_abs_error": 162.2288,
+      "direction_accuracy": null,
+      "over_rate": 75.0,
+      "under_rate": 0.0
+    }
+  }
+}

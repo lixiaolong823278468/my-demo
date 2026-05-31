@@ -2060,17 +2060,17 @@
     }
   },
   "window_optimization": {
-    "run_stamp": "20260530_193427",
+    "run_stamp": "20260531_232305",
     "segment_search_enabled": true,
     "segment_count": 6,
-    "best_window_days": 37,
-    "best_interval_window_days": 48,
-    "best_thermal_capacity_window_days": 37,
+    "best_window_days": 35,
+    "best_interval_window_days": 40,
+    "best_thermal_capacity_window_days": 35,
     "rolling_backtest_horizons": [
-      15
+      14
     ],
-    "score": 84.9954,
-    "interval_score": 33.763,
+    "score": 122.2311,
+    "interval_score": 34.1231,
     "thermal_capacity_score": null
   }
 }

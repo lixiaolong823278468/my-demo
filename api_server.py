@@ -118,20 +118,22 @@ def target_model_root(target: str | None, model_root: Path = MODEL_ROOT) -> Path
 
 def load_target_training_preferences(target: str | None, model_root: Path = MODEL_ROOT) -> dict[str, Any]:
     normalized = normalize_model_target(target)
-    root = target_model_root(normalized, model_root)
-    if normalized == MODEL_TARGET_REALTIME:
-        preference_path = root / "training_preferences.json"
-        if preference_path.exists():
-            return load_training_preferences(root)
-        day_ahead_preferences = load_training_preferences(model_root)
-        save_training_preferences(root, day_ahead_preferences)
-        return load_training_preferences(root)
-    return load_training_preferences(root)
+    preferences = load_training_preferences(model_root)
+    target_preferences = preferences.get("target_preferences") if isinstance(preferences.get("target_preferences"), dict) else {}
+    if normalized in target_preferences and isinstance(target_preferences[normalized], dict):
+        return dict(target_preferences[normalized])
+    return {key: value for key, value in preferences.items() if key != "target_preferences"}
 
 
 def save_target_training_preferences(target: str | None, preferences: dict[str, Any], model_root: Path = MODEL_ROOT) -> dict[str, Any]:
-    root = target_model_root(target, model_root)
-    return save_training_preferences(root, preferences)
+    normalized = normalize_model_target(target)
+    if normalized == MODEL_TARGET_DAYAHEAD:
+        return save_training_preferences(model_root, preferences)
+    saved = save_training_preferences(model_root, {"target_preferences": {normalized: preferences}})
+    target_preferences = saved.get("target_preferences") if isinstance(saved.get("target_preferences"), dict) else {}
+    if normalized in target_preferences and isinstance(target_preferences[normalized], dict):
+        return dict(target_preferences[normalized])
+    return {key: value for key, value in saved.items() if key != "target_preferences"}
 
 
 def parse_segment_config_payload(payload: dict[str, Any]) -> list[dict[str, object]] | None:
@@ -1259,6 +1261,8 @@ def build_train_worker(payload: dict[str, Any]) -> Callable[[str], dict[str, Any
                 "segment_config": segment_config or DEFAULT_SEGMENT_CONFIG,
                 "high_price_weighting": high_price_weighting,
                 "price_intervals": price_intervals,
+                "price_model_config": price_model_config,
+                "interval_model_config": interval_model_config,
             },
             model_root=base_model_root,
         )
@@ -1667,6 +1671,14 @@ def positive_int(value: Any, default: int) -> int:
     return parsed if parsed >= 1 else default
 
 
+def nonnegative_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return parsed if parsed >= 0 else default
+
+
 def parse_model_training_config(
     payload: dict[str, Any],
     key: str,
@@ -1678,6 +1690,8 @@ def parse_model_training_config(
     raw_config = payload.get(key)
     config = raw_config if isinstance(raw_config, dict) else {}
     training_mode = str(config.get("training_mode") or payload.get("training_mode") or "rolling_window")
+    enable_start = bool(config.get("enable_start", payload.get("enable_start", True)))
+    enable_end = bool(config.get("enable_end", payload.get("enable_end", True)))
     training_window_days = (
         positive_int(config.get("training_window_days", payload.get("training_window_days")), default_window_days)
         if training_mode == "rolling_window"
@@ -1687,11 +1701,13 @@ def parse_model_training_config(
         "training_mode": training_mode,
         "training_window_days": training_window_days,
         "start_date": (config.get("start_date") or payload.get("start_date") or None)
-        if training_mode != "rolling_window" and config.get("enable_start", payload.get("enable_start", True))
+        if training_mode != "rolling_window" and enable_start
         else None,
         "end_date": (config.get("end_date") or payload.get("end_date") or None)
-        if training_mode != "rolling_window" and config.get("enable_end", payload.get("enable_end", True))
+        if training_mode != "rolling_window" and enable_end
         else None,
+        "enable_start": enable_start,
+        "enable_end": enable_end,
         "valid_days": positive_int(config.get("valid_days", payload.get("valid_days")), default_valid_days),
         "num_boost_round": positive_int(config.get("num_boost_round", payload.get("num_boost_round")), default_num_boost_round),
     }
@@ -1720,9 +1736,15 @@ def build_window_optimization_worker_payload(
     payload: dict[str, Any] | None = None,
     *,
     force: bool | None = None,
+    target: str = MODEL_TARGET_DAYAHEAD,
 ) -> dict[str, Any]:
     payload = payload or {}
-    preferences = load_training_preferences(MODEL_ROOT)
+    preferences = load_target_training_preferences(target)
+    window_preferences = preferences.get("window_optimization") if isinstance(preferences.get("window_optimization"), dict) else {}
+    window_source = {**window_preferences, **payload}
+    price_model_source = payload if isinstance(payload.get("price_model_config"), dict) else preferences
+    interval_model_source = payload if isinstance(payload.get("interval_model_config"), dict) else preferences
+    thermal_capacity_model_source = payload if isinstance(payload.get("thermal_capacity_model_config"), dict) else preferences
 
     has_segment_payload = "segment_mode" in payload or "segment_config" in payload
     has_high_price_payload = (
@@ -1737,34 +1759,34 @@ def build_window_optimization_worker_payload(
 
     worker_payload: dict[str, Any] = {
         "reason": reason,
-        "max_history_days": resolve_window_optimization_max_history_days(payload),
+        "max_history_days": resolve_window_optimization_max_history_days(window_source),
         "price_model_config": parse_model_training_config(
-            payload,
+            price_model_source,
             "price_model_config",
             default_window_days=DEFAULT_TRAINING_WINDOW_DAYS,
             default_valid_days=AUTO_WINDOW_VALID_DAYS,
             default_num_boost_round=AUTO_WINDOW_NUM_BOOST_ROUND,
         ),
         "interval_model_config": parse_model_training_config(
-            payload,
+            interval_model_source,
             "interval_model_config",
             default_window_days=DEFAULT_TRAINING_WINDOW_DAYS,
             default_valid_days=AUTO_WINDOW_VALID_DAYS,
             default_num_boost_round=AUTO_WINDOW_NUM_BOOST_ROUND,
         ),
         "thermal_capacity_model_config": parse_model_training_config(
-            payload,
+            thermal_capacity_model_source,
             "thermal_capacity_model_config",
             default_window_days=DEFAULT_TRAINING_WINDOW_DAYS,
             default_valid_days=AUTO_WINDOW_VALID_DAYS,
             default_num_boost_round=AUTO_WINDOW_NUM_BOOST_ROUND,
         ),
-        "fine_radius": int(payload.get("fine_radius") or AUTO_WINDOW_FINE_RADIUS),
+        "fine_radius": nonnegative_int(window_source.get("fine_radius"), AUTO_WINDOW_FINE_RADIUS),
         "segment_mode": segment_source.get("segment_mode", "default"),
         "segment_config": segment_source.get("segment_config"),
         "high_price_weighting": parse_high_price_weighting_payload(high_price_source),
         "price_intervals": normalize_price_intervals(price_interval_source.get("price_intervals"), allow_legacy_open_bounds=True),
-        "rolling_backtest_horizons": list(parse_rolling_backtest_horizons(payload)),
+        "rolling_backtest_horizons": list(parse_rolling_backtest_horizons(window_source)),
         "segment_search_enabled": bool(payload.get("segment_search_enabled")),
         "segment_search_counts": payload.get("segment_search_counts") or [],
         "segment_search_configs": payload.get("segment_search_configs") or [],
@@ -1856,6 +1878,8 @@ def build_window_optimization_worker(
     payload: dict[str, Any] | None = None,
     *,
     target_model_root: Path = MODEL_ROOT,
+    preference_target: str = MODEL_TARGET_DAYAHEAD,
+    preference_model_root: Path = MODEL_ROOT,
     optimization_output_root: Path = WINDOW_OPTIMIZATION_OUTPUT_ROOT,
     state_loader: Callable[[], dict[str, Any]] | None = None,
     state_writer: Callable[[dict[str, Any]], None] | None = None,
@@ -1905,14 +1929,25 @@ def build_window_optimization_worker(
 
         STATE.append_log(job_id, f"开始{task_label}：参与时段数 {', '.join(str(item['segment_count']) for item in segment_search_configs)}", 1)
         STATE.raise_if_cancelled(job_id)
-        save_training_preferences(
-            target_model_root,
+        save_target_training_preferences(
+            preference_target,
             {
                 "segment_mode": "custom" if base_segment_config else "default",
                 "segment_config": base_segment_config or DEFAULT_SEGMENT_CONFIG,
                 "high_price_weighting": high_price_weighting,
                 "price_intervals": price_intervals,
+                "price_model_config": price_model_config,
+                "interval_model_config": interval_model_config,
+                "thermal_capacity_model_config": thermal_capacity_model_config,
+                "window_optimization": {
+                    "max_history_days": max_history_days,
+                    "valid_days": valid_days,
+                    "num_boost_round": num_boost_round,
+                    "fine_radius": fine_radius,
+                    "rolling_backtest_horizons": list(rolling_backtest_horizons),
+                },
             },
+            model_root=preference_model_root,
         )
 
         history_signature = current_history_signature()
@@ -2354,7 +2389,7 @@ def check_realtime_window_optimization(reason: str = "manual", force: bool = Tru
     payload = payload or {}
     if STATE.has_running_job():
         return {"started": False, "reason": "job_running", "state": realtime_window_optimization_state()}
-    worker_payload = build_window_optimization_worker_payload(reason, payload, force=force)
+    worker_payload = build_window_optimization_worker_payload(reason, payload, force=force, target=MODEL_TARGET_REALTIME)
     try:
         mark_realtime_window_optimization_attempt(current_history_signature(), reason, force=force, payload=worker_payload)
     except Exception:
@@ -2364,6 +2399,7 @@ def check_realtime_window_optimization(reason: str = "manual", force: bool = Tru
         build_window_optimization_worker(
             worker_payload,
             target_model_root=REALTIME_MODEL_ROOT,
+            preference_target=MODEL_TARGET_REALTIME,
             optimization_output_root=REALTIME_WINDOW_OPTIMIZATION_OUTPUT_ROOT,
             state_loader=realtime_window_optimization_state,
             state_writer=save_realtime_window_optimization_state,
@@ -2390,7 +2426,12 @@ def dual_window_target_payload(payload: dict[str, Any], target: str) -> dict[str
 def run_window_optimization_for_target(payload: dict[str, Any], target: str, job_id: str) -> dict[str, Any]:
     normalized = normalize_model_target(target)
     target_payload = dual_window_target_payload(payload, normalized)
-    worker_payload = build_window_optimization_worker_payload("dual_control", target_payload, force=bool(target_payload.get("force", True)))
+    worker_payload = build_window_optimization_worker_payload(
+        "dual_control",
+        target_payload,
+        force=bool(target_payload.get("force", True)),
+        target=normalized,
+    )
     try:
         signature = current_history_signature()
     except Exception:
@@ -2401,6 +2442,7 @@ def run_window_optimization_for_target(payload: dict[str, Any], target: str, job
         worker = build_window_optimization_worker(
             worker_payload,
             target_model_root=REALTIME_MODEL_ROOT,
+            preference_target=MODEL_TARGET_REALTIME,
             optimization_output_root=REALTIME_WINDOW_OPTIMIZATION_OUTPUT_ROOT,
             state_loader=realtime_window_optimization_state,
             state_writer=save_realtime_window_optimization_state,
@@ -2592,6 +2634,39 @@ class ApiHandler(BaseHTTPRequestHandler):
                             "price_intervals": parse_price_intervals_payload(payload),
                         }
                     )
+                    if isinstance(payload.get("price_model_config"), dict):
+                        preference_payload["price_model_config"] = parse_model_training_config(
+                            payload,
+                            "price_model_config",
+                            default_window_days=resolve_default_training_window_days(),
+                            default_valid_days=14,
+                            default_num_boost_round=400,
+                        )
+                    if isinstance(payload.get("interval_model_config"), dict):
+                        preference_payload["interval_model_config"] = parse_model_training_config(
+                            payload,
+                            "interval_model_config",
+                            default_window_days=resolve_default_training_window_days(),
+                            default_valid_days=14,
+                            default_num_boost_round=400,
+                        )
+                    if isinstance(payload.get("thermal_capacity_model_config"), dict):
+                        preference_payload["thermal_capacity_model_config"] = parse_model_training_config(
+                            payload,
+                            "thermal_capacity_model_config",
+                            default_window_days=resolve_default_training_window_days(),
+                            default_valid_days=AUTO_WINDOW_VALID_DAYS,
+                            default_num_boost_round=AUTO_WINDOW_NUM_BOOST_ROUND,
+                        )
+                    window_payload = payload.get("window_optimization") if isinstance(payload.get("window_optimization"), dict) else {}
+                    if window_payload:
+                        preference_payload["window_optimization"] = {
+                            "max_history_days": resolve_window_optimization_max_history_days(window_payload),
+                            "valid_days": positive_int(window_payload.get("valid_days"), AUTO_WINDOW_VALID_DAYS),
+                            "num_boost_round": positive_int(window_payload.get("num_boost_round"), AUTO_WINDOW_NUM_BOOST_ROUND),
+                            "fine_radius": nonnegative_int(window_payload.get("fine_radius"), AUTO_WINDOW_FINE_RADIUS),
+                            "rolling_backtest_horizons": list(parse_rolling_backtest_horizons(window_payload)),
+                        }
                 if path == "/api/prediction/preferences":
                     preference_payload["prediction_reference"] = parse_prediction_reference_payload(payload)
                 preferences = save_target_training_preferences(target, preference_payload)
@@ -2645,7 +2720,9 @@ class ApiHandler(BaseHTTPRequestHandler):
     def get_config(self) -> dict[str, Any]:
         optimization_state = window_optimization_state()
         optimization_defaults = window_optimization_config_defaults(optimization_state)
-        preferences = load_training_preferences(MODEL_ROOT)
+        preferences = load_target_training_preferences(MODEL_TARGET_DAYAHEAD)
+        realtime_preferences = load_target_training_preferences(MODEL_TARGET_REALTIME)
+        window_preferences = preferences.get("window_optimization") if isinstance(preferences.get("window_optimization"), dict) else {}
         prediction_reference = normalize_prediction_reference_preferences(preferences.get("prediction_reference"))
         return {
             "app_name": "日前电价预测平台",
@@ -2668,12 +2745,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             "default_training_window_days": resolve_default_training_window_days(optimization_state),
             "window_optimization": optimization_state,
             "realtime_window_optimization": realtime_window_optimization_state(),
-            "default_window_optimization_max_history_days": resolve_window_optimization_max_history_days(),
-            "default_window_optimization_valid_days": optimization_defaults["valid_days"],
-            "default_window_optimization_rolling_backtest_horizons": optimization_defaults["rolling_backtest_horizons"],
+            "default_window_optimization_max_history_days": window_preferences.get("max_history_days") or resolve_window_optimization_max_history_days(),
+            "default_window_optimization_valid_days": window_preferences.get("valid_days") or optimization_defaults["valid_days"],
+            "default_window_optimization_num_boost_round": window_preferences.get("num_boost_round") or AUTO_WINDOW_NUM_BOOST_ROUND,
+            "default_window_optimization_fine_radius": window_preferences.get("fine_radius") or AUTO_WINDOW_FINE_RADIUS,
+            "default_window_optimization_rolling_backtest_horizons": (
+                window_preferences.get("rolling_backtest_horizons") or optimization_defaults["rolling_backtest_horizons"]
+            ),
             "max_reference_days": 100,
             "prediction_preferences": preferences,
             "training_preferences": preferences,
+            "realtime_training_preferences": realtime_preferences,
             "default_segment_config": DEFAULT_SEGMENT_CONFIG,
             "reference_strategy_options": [
                 {"key": "recent_n_days", "label": "最近 N 天"},

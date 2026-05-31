@@ -3096,11 +3096,116 @@ def default_training_preferences() -> dict:
         "segment_config": DEFAULT_SEGMENT_CONFIG,
         "high_price_weighting": {"enabled": False, "quantile": 0.8, "multiplier": 2.0},
         "price_intervals": normalize_price_intervals(DEFAULT_PRICE_INTERVALS),
+        "price_model_config": default_model_training_preferences(),
+        "interval_model_config": default_model_training_preferences(),
+        "thermal_capacity_model_config": default_model_training_preferences(default_valid_days=10),
+        "window_optimization": default_window_optimization_preferences(),
         "prediction_reference": {
             "recent_reference_days": 1,
             "same_type_reference_days": 1,
             "knn_similarity": dict(DEFAULT_KNN_SIMILARITY_CONFIG),
         },
+        "target_preferences": {},
+    }
+
+
+def positive_preference_int(value: object, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return parsed if parsed >= 1 else default
+
+
+def default_model_training_preferences(
+    *,
+    default_window_days: int = 60,
+    default_valid_days: int = 14,
+    default_num_boost_round: int = 400,
+) -> dict[str, object]:
+    return {
+        "training_mode": "rolling_window",
+        "training_window_days": default_window_days,
+        "start_date": None,
+        "end_date": None,
+        "enable_start": False,
+        "enable_end": False,
+        "valid_days": default_valid_days,
+        "num_boost_round": default_num_boost_round,
+    }
+
+
+def normalize_model_training_preferences(
+    preferences: dict[str, object] | None = None,
+    *,
+    default_valid_days: int = 14,
+) -> dict[str, object]:
+    preferences = preferences or {}
+    defaults = default_model_training_preferences(default_valid_days=default_valid_days)
+    training_mode = str(preferences.get("training_mode") or defaults["training_mode"])
+    if training_mode not in {"rolling_window", "manual_date_range"}:
+        training_mode = str(defaults["training_mode"])
+    start_date = str(preferences.get("start_date") or "").strip() or None
+    end_date = str(preferences.get("end_date") or "").strip() or None
+    return {
+        "training_mode": training_mode,
+        "training_window_days": positive_preference_int(
+            preferences.get("training_window_days"),
+            int(defaults["training_window_days"]),
+        ),
+        "start_date": start_date,
+        "end_date": end_date,
+        "enable_start": bool(preferences.get("enable_start", bool(start_date))),
+        "enable_end": bool(preferences.get("enable_end", bool(end_date))),
+        "valid_days": positive_preference_int(preferences.get("valid_days"), int(defaults["valid_days"])),
+        "num_boost_round": positive_preference_int(
+            preferences.get("num_boost_round"),
+            int(defaults["num_boost_round"]),
+        ),
+    }
+
+
+def default_window_optimization_preferences() -> dict[str, object]:
+    return {
+        "max_history_days": 100,
+        "valid_days": 10,
+        "num_boost_round": 400,
+        "fine_radius": 15,
+        "rolling_backtest_horizons": [14],
+    }
+
+
+def normalize_window_optimization_preferences(preferences: dict[str, object] | None = None) -> dict[str, object]:
+    preferences = preferences or {}
+    defaults = default_window_optimization_preferences()
+    raw_horizons = preferences.get("rolling_backtest_horizons", preferences.get("rolling_backtest_days"))
+    if isinstance(raw_horizons, str):
+        raw_items = [item.strip() for item in raw_horizons.replace("，", ",").split(",")]
+    elif isinstance(raw_horizons, (list, tuple, set)):
+        raw_items = list(raw_horizons)
+    else:
+        raw_items = []
+    horizons: list[int] = []
+    seen: set[int] = set()
+    for item in raw_items:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value < 1 or value > 365 or value in seen:
+            continue
+        seen.add(value)
+        horizons.append(value)
+    try:
+        fine_radius = int(preferences.get("fine_radius", defaults["fine_radius"]))
+    except (TypeError, ValueError):
+        fine_radius = int(defaults["fine_radius"])
+    return {
+        "max_history_days": positive_preference_int(preferences.get("max_history_days"), int(defaults["max_history_days"])),
+        "valid_days": positive_preference_int(preferences.get("valid_days"), int(defaults["valid_days"])),
+        "num_boost_round": positive_preference_int(preferences.get("num_boost_round"), int(defaults["num_boost_round"])),
+        "fine_radius": max(0, fine_radius),
+        "rolling_backtest_horizons": horizons or list(defaults["rolling_backtest_horizons"]),
     }
 
 
@@ -3115,6 +3220,40 @@ def normalize_prediction_reference_preferences(preferences: dict[str, object] | 
     }
 
 
+def apply_training_preference_fields(current: dict[str, object], data: dict[str, object]) -> dict[str, object]:
+    if data.get("segment_mode") in {"default", "custom"}:
+        current["segment_mode"] = data.get("segment_mode")
+    if isinstance(data.get("segment_config"), list):
+        current["segment_config"] = segment_metadata(normalize_segment_config(data["segment_config"]))
+    if isinstance(data.get("high_price_weighting"), dict):
+        high_config = data["high_price_weighting"]
+        current["high_price_weighting"] = {
+            "enabled": bool(high_config.get("enabled", False)),
+            "quantile": min(0.99, max(0.5, float(high_config.get("quantile", 0.8)))),
+            "multiplier": max(1.0, float(high_config.get("multiplier", 2.0))),
+        }
+    if isinstance(data.get("price_intervals"), list):
+        current["price_intervals"] = normalize_price_intervals(data["price_intervals"], allow_legacy_open_bounds=True)
+    if isinstance(data.get("price_model_config"), dict):
+        current["price_model_config"] = normalize_model_training_preferences(data["price_model_config"])
+    if isinstance(data.get("interval_model_config"), dict):
+        current["interval_model_config"] = normalize_model_training_preferences(data["interval_model_config"])
+    if isinstance(data.get("thermal_capacity_model_config"), dict):
+        current["thermal_capacity_model_config"] = normalize_model_training_preferences(
+            data["thermal_capacity_model_config"],
+            default_valid_days=10,
+        )
+    if isinstance(data.get("window_optimization"), dict):
+        current["window_optimization"] = normalize_window_optimization_preferences(data["window_optimization"])
+    if isinstance(data.get("prediction_reference"), dict):
+        current["prediction_reference"] = normalize_prediction_reference_preferences(data["prediction_reference"])
+    return current
+
+
+def training_preferences_without_targets(preferences: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in preferences.items() if key != "target_preferences"}
+
+
 def load_training_preferences(model_root: str | Path = DEFAULT_MODEL_ROOT) -> dict:
     path = training_preferences_path(model_root)
     if not path.exists():
@@ -3124,40 +3263,39 @@ def load_training_preferences(model_root: str | Path = DEFAULT_MODEL_ROOT) -> di
     except (OSError, json.JSONDecodeError):
         return default_training_preferences()
     preferences = default_training_preferences()
-    if isinstance(data, dict) and data.get("segment_mode") == "custom" and isinstance(data.get("segment_config"), list):
-        preferences["segment_mode"] = "custom"
-        preferences["segment_config"] = segment_metadata(normalize_segment_config(data["segment_config"]))
-    if isinstance(data, dict) and isinstance(data.get("high_price_weighting"), dict):
-        high_config = data["high_price_weighting"]
-        preferences["high_price_weighting"] = {
-            "enabled": bool(high_config.get("enabled", False)),
-            "quantile": min(0.99, max(0.5, float(high_config.get("quantile", 0.8)))),
-            "multiplier": max(1.0, float(high_config.get("multiplier", 2.0))),
-        }
-    if isinstance(data, dict) and isinstance(data.get("price_intervals"), list):
-        preferences["price_intervals"] = normalize_price_intervals(data["price_intervals"], allow_legacy_open_bounds=True)
-    if isinstance(data, dict) and isinstance(data.get("prediction_reference"), dict):
-        preferences["prediction_reference"] = normalize_prediction_reference_preferences(data["prediction_reference"])
+    if isinstance(data, dict):
+        apply_training_preference_fields(preferences, data)
+        target_preferences: dict[str, object] = {}
+        raw_targets = data.get("target_preferences")
+        if isinstance(raw_targets, dict):
+            for target, target_data in raw_targets.items():
+                if not isinstance(target_data, dict):
+                    continue
+                target_preferences[str(target)] = apply_training_preference_fields(
+                    training_preferences_without_targets(preferences),
+                    target_data,
+                )
+        preferences["target_preferences"] = target_preferences
     return preferences
 
 
 def save_training_preferences(model_root: str | Path, preferences: dict) -> dict:
     current = load_training_preferences(model_root)
-    if preferences.get("segment_mode") in {"default", "custom"}:
-        current["segment_mode"] = preferences.get("segment_mode")
-    if isinstance(preferences.get("segment_config"), list):
-        current["segment_config"] = segment_metadata(normalize_segment_config(preferences["segment_config"]))
-    if isinstance(preferences.get("high_price_weighting"), dict):
-        high_config = preferences["high_price_weighting"]
-        current["high_price_weighting"] = {
-            "enabled": bool(high_config.get("enabled", False)),
-            "quantile": min(0.99, max(0.5, float(high_config.get("quantile", 0.8)))),
-            "multiplier": max(1.0, float(high_config.get("multiplier", 2.0))),
-        }
-    if isinstance(preferences.get("price_intervals"), list):
-        current["price_intervals"] = normalize_price_intervals(preferences["price_intervals"])
-    if isinstance(preferences.get("prediction_reference"), dict):
-        current["prediction_reference"] = normalize_prediction_reference_preferences(preferences["prediction_reference"])
+    apply_training_preference_fields(current, preferences)
+    if isinstance(preferences.get("target_preferences"), dict):
+        current_targets = current.get("target_preferences") if isinstance(current.get("target_preferences"), dict) else {}
+        updated_targets = dict(current_targets)
+        for target, target_data in preferences["target_preferences"].items():
+            if not isinstance(target_data, dict):
+                continue
+            target_key = str(target)
+            base_target = updated_targets.get(target_key)
+            if not isinstance(base_target, dict):
+                base_target = training_preferences_without_targets(current)
+            else:
+                base_target = dict(base_target)
+            updated_targets[target_key] = apply_training_preference_fields(base_target, target_data)
+        current["target_preferences"] = updated_targets
     path = training_preferences_path(model_root)
     write_json(path, current)
     return current
