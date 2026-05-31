@@ -1,0 +1,45 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const html = fs.readFileSync(path.join(__dirname, "../frontend_app/index.html"), "utf8");
+const appJs = fs.readFileSync(path.join(__dirname, "../frontend_app/assets/app.js"), "utf8");
+
+assert.match(html, /id="predict-model-version"/);
+assert.match(html, /id="predict-realtime-model-version"/);
+assert.match(appJs, /realtime_model_version_key/);
+assert.match(appJs, /loadRealtimeModelVersions/);
+assert.match(html, /id="dual-optimize-window-btn"/);
+assert.match(html, /id="dayahead-training-suite"/);
+assert.match(html, /id="realtime-training-suite"/);
+assert.match(html, /id="dayahead-training-panel"/);
+assert.match(html, /id="realtime-training-panel"/);
+assert.match(html, /id="realtime-segment-config-table"/);
+assert.match(html, /id="realtime-price-interval-table"/);
+assert.match(html, /id="realtime-price-training-mode"/);
+assert.match(html, /id="realtime-window-optimization-max-history-days"/);
+assert.match(html, /id="train-realtime-btn"/);
+assert.match(appJs, /startDualWindowOptimization/);
+assert.match(appJs, /\/api\/dual-window-optimization\/run/);
+assert.match(appJs, /async function startTrain\(target = "dayahead"\)/);
+assert.match(appJs, /target: target === "realtime" \? "realtime" : "dayahead"/);
+assert.match(appJs, /collectTrainingAdvancedConfig\(normalizedTarget\)/);
+assert.match(appJs, /dayahead_payload: collectWindowOptimizationPayload\("dayahead"\)/);
+assert.match(appJs, /realtime_payload: collectWindowOptimizationPayload\("realtime"\)/);
+assert.match(appJs, /collectWindowOptimizationPayload\("realtime"\)/);
+assert.match(appJs, /const defaultSegmentCount = 6;/);
+assert.match(appJs, /const segmentSearchCountsStorageKey = "dayahead_segment_search_counts_v2";/);
+assert.match(appJs, /saveSegmentSearchCounts\(\[selectedCount\], "dayahead"\)/);
+assert.match(appJs, /saveSegmentSearchCounts\(\[selectedCount\], "realtime"\)/);
+assert.doesNotMatch(html, /<option value="5" selected>/);
+assert.match(html, /<option value="6" selected>/);
+assert.match(appJs, /#train-realtime-btn/);
+assert.match(html, /id="model-version-target"/);
+assert.match(html, /id="version-diagnostics-panel"/);
+assert.match(appJs, /renderTargetModelVersions/);
+assert.match(appJs, /loadModelVersionsForTarget/);
+assert.match(appJs, /new URLSearchParams\(\{ metric, target: App\.versionTarget \|\| "dayahead" \}\)/);
+assert.match(appJs, /target: App\.versionTarget \|\| "dayahead",\s*selected_segment_price_models:/);
+assert.match(appJs, /renderTargetModelVersions\(normalizedTarget,[\s\S]*await loadModelCandidateRankings\(\)/);
+
+console.log("frontend dual model controls checks passed");

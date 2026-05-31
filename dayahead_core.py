@@ -7,6 +7,7 @@ import gc
 import re
 import shutil
 import time
+import uuid
 import warnings
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
@@ -29,6 +30,7 @@ from data_quality import (
 from price_interval import (
     DEFAULT_PRICE_INTERVALS,
     append_interval_prediction_columns,
+    available_interval_backends,
     load_interval_model_bundle,
     normalize_price_intervals,
     predict_interval_probabilities,
@@ -39,13 +41,21 @@ from price_interval import (
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_HISTORY_DIR = BASE_DIR / "数据"
 DEFAULT_MODEL_ROOT = BASE_DIR / "models"
+DEFAULT_REALTIME_MODEL_ROOT = DEFAULT_MODEL_ROOT / "realtime_price"
 DEFAULT_OUTPUT_FILE = BASE_DIR / "output" / "dayahead_price_prediction.xlsx"
 DEFAULT_FORECAST_FILE = BASE_DIR / "预测文件" / "预测文件.xlsx"
+DEFAULT_MULTI_DAY_FORECAST_FILE = DEFAULT_FORECAST_FILE.parent / "预测文件-N天.xlsx"
+DEFAULT_MULTI_DAY_OUTPUT_FILE = BASE_DIR / "output" / "multi_day_price_prediction.xlsx"
 PRICE_FLOOR = 0.0
 PRICE_CAP = 1500.0
-HISTORY_CACHE_VERSION = 2
+HISTORY_CACHE_VERSION = 4
 
 TARGET_COLUMN = "日前出清价格(元/MWh)"
+REALTIME_TARGET_SOURCE_COLUMN = "实时出清价格(元/MWh)"
+REALTIME_DATA_MODE = "realtime"
+DAYAHEAD_DATA_MODE = "dayahead"
+MODEL_TARGET_DAYAHEAD = "dayahead"
+MODEL_TARGET_REALTIME = "realtime"
 NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN = "net_load_only_similar_price"
 NET_LOAD_ONLY_SIMILAR_GAP_COLUMN = "net_load_only_similar_gap"
 KNN_SIMILAR_PRICE_COLUMN = "knn_similar_price"
@@ -57,6 +67,10 @@ RENEWABLE_POWER_COLUMN = "renewable_power"
 DAY_TYPE_COLUMN = "day_type"
 THERMAL_SPACE_WEIGHT_KEY = "thermal_space"
 THERMAL_SPACE_LOAD_RATIO_COLUMN = "thermal_space_load_ratio"
+THERMAL_CAPACITY_SOURCE_COLUMN = "thermal_capacity_source"
+THERMAL_CAPACITY_VALUE_COLUMN = "thermal_capacity_value"
+THERMAL_CAPACITY_MODEL_VALUE_COLUMN = "thermal_capacity_model_value"
+THERMAL_CAPACITY_FILE_VALUE_COLUMN = "thermal_capacity_file_value"
 DEFAULT_SIMILARITY_REFERENCE_DAYS = 100
 DEFAULT_KNN_SIMILARITY_CONFIG = {
     "knn_k": 5,
@@ -64,6 +78,35 @@ DEFAULT_KNN_SIMILARITY_CONFIG = {
     "weighted_knn_k": 5,
     "weighted_knn_max_distance": 3.0,
 }
+
+
+def normalize_model_target(target: str | None) -> str:
+    normalized = str(target or MODEL_TARGET_DAYAHEAD).strip().lower()
+    if normalized in {"", "dayahead", "day_ahead", "日前"}:
+        return MODEL_TARGET_DAYAHEAD
+    if normalized in {"realtime", "real_time", "实时"}:
+        return MODEL_TARGET_REALTIME
+    raise ValueError(f"未知模型目标: {target}")
+
+
+def model_target_context(target: str | None, base_model_root: str | Path = DEFAULT_MODEL_ROOT) -> dict[str, object]:
+    normalized = normalize_model_target(target)
+    base_root = Path(base_model_root)
+    if normalized == MODEL_TARGET_DAYAHEAD:
+        model_root = base_root
+    elif base_root.name == "realtime_price":
+        model_root = base_root
+    else:
+        model_root = base_root / "realtime_price"
+    return {
+        "target": normalized,
+        "data_mode": REALTIME_DATA_MODE if normalized == MODEL_TARGET_REALTIME else DAYAHEAD_DATA_MODE,
+        "model_root": model_root,
+        "target_column": REALTIME_TARGET_SOURCE_COLUMN if normalized == MODEL_TARGET_REALTIME else TARGET_COLUMN,
+        "trains_capacity": normalized == MODEL_TARGET_DAYAHEAD,
+    }
+
+
 FEATURE_COLUMNS = [
     TOTAL_LOAD_COLUMN,
     "net_load",
@@ -77,6 +120,52 @@ FEATURE_COLUMNS = [
     "is_weekend",
     "is_holiday",
 ]
+LAG_PRICE_COLUMNS = [
+    "price_lag_1d",
+    "price_lag_2d",
+    "price_lag_3d",
+    "price_lag_7d",
+    "price_ma_3d",
+    "price_ma_7d",
+    "price_std_7d",
+]
+LAG_LOAD_COLUMNS = [
+    "net_load_lag_1d",
+]
+LAG_FEATURE_COLUMNS = list(FEATURE_COLUMNS) + LAG_PRICE_COLUMNS + LAG_LOAD_COLUMNS
+THERMAL_CAPACITY_FEATURE_COLUMNS = [
+    "total_load_mean",
+    "total_load_max",
+    "total_load_min",
+    "renewable_power_mean",
+    "renewable_power_max",
+    "renewable_power_min",
+    "net_load_mean",
+    "net_load_max",
+    "net_load_min",
+    "net_load_peak_valley",
+    "net_load_max_ramp",
+    "thermal_space_load_ratio_mean",
+    "renewable_share_mean",
+    "weekday",
+    "month",
+    "is_weekend",
+    "is_holiday",
+    "previous_thermal_on_capacity",
+]
+KNN_FEATURE_COLUMNS = [
+    KNN_SIMILAR_PRICE_COLUMN,
+    WEIGHTED_KNN_PRICE_COLUMN,
+    KNN_SIMILAR_COUNT_COLUMN,
+    KNN_SIMILAR_DISTANCE_COLUMN,
+]
+HIGH_PRICE_ADJUSTED_PRICE_COLUMN = "high_price_adjusted_price"
+HIGH_PRICE_ADJUSTMENT_COLUMN = "high_price_adjustment"
+HIGH_PRICE_ADJUSTMENT_REASON_COLUMN = "high_price_adjustment_reason"
+SCENARIO_SIMILARITY_ADJUSTED_PRICE_COLUMN = "scenario_similarity_adjusted_price"
+SIMILARITY_BLEND_WEIGHT_COLUMN = "similarity_blend_weight"
+SIMILARITY_ADJUSTMENT_COLUMN = "similarity_adjustment"
+SIMILARITY_ADJUSTMENT_REASON_COLUMN = "similarity_adjustment_reason"
 REFERENCE_STRATEGIES = OrderedDict(
     [
         ("recent_n_days", "最近 N 天"),
@@ -94,11 +183,12 @@ def period_to_time(period_boundary: int) -> str:
 
 SEGMENTS = OrderedDict(
     [
-        ("night", (1, 24)),
-        ("morning_peak", (25, 40)),
-        ("midday", (41, 60)),
-        ("evening_peak", (61, 80)),
-        ("late_night", (81, 96)),
+        ("segment_1", (1, 16)),
+        ("segment_2", (17, 32)),
+        ("segment_3", (33, 48)),
+        ("segment_4", (49, 64)),
+        ("segment_5", (65, 80)),
+        ("segment_6", (81, 96)),
     ]
 )
 DEFAULT_SEGMENT_CONFIG = [
@@ -139,6 +229,11 @@ class TrainConfig:
     interval_num_boost_round: int | None = None
     interval_start_date: str | None = None
     interval_end_date: str | None = None
+    thermal_capacity_valid_days: int | None = None
+    thermal_capacity_training_window_days: int | None = None
+    thermal_capacity_num_boost_round: int | None = None
+    thermal_capacity_start_date: str | None = None
+    thermal_capacity_end_date: str | None = None
     similarity_reference_days: int = DEFAULT_SIMILARITY_REFERENCE_DAYS
     enable_rolling_backtest: bool = True
     rolling_backtest_horizons: tuple[int, ...] = (14, 30)
@@ -147,6 +242,14 @@ class TrainConfig:
     high_price_quantile: float = 0.8
     high_price_weight_multiplier: float = 2.0
     price_intervals: list[dict[str, object]] | None = None
+    direct_feature_variant_keys: tuple[str, ...] | None = None
+    model_backend_keys: tuple[str, ...] | None = None
+    interval_backend_keys: tuple[str, ...] | None = None
+    thermal_capacity_backend_keys: tuple[str, ...] | None = None
+    train_interval_model: bool = True
+    train_thermal_capacity_model: bool = True
+    feature_cache_root: Path | None = None
+    data_mode: str = DAYAHEAD_DATA_MODE
 
 
 @dataclass
@@ -183,6 +286,18 @@ class PredictCompareResult:
     selected_strategy_key: str
     selected_strategy_label: str
     strategy_results: dict[str, PredictResult]
+    quality_report_path: Path | None = None
+
+
+@dataclass
+class MultiDayPredictResult:
+    baseline_date: str
+    forecast_dates: list[str]
+    output_file: Path
+    template_updated: bool
+    selected_strategy_key: str
+    selected_strategy_label: str
+    days: list[dict[str, object]]
     quality_report_path: Path | None = None
 
 
@@ -336,6 +451,7 @@ def direct_model_variants() -> OrderedDict[str, list[str]]:
     return OrderedDict(
         [
             ("no_lag_96", training_feature_columns()),
+            ("with_lag_96", list(LAG_FEATURE_COLUMNS)),
         ]
     )
 
@@ -353,7 +469,7 @@ def select_prediction_model_variant(metadata: dict, forecast_df: pd.DataFrame) -
         return "no_lag_96"
     if "direct_price" in variants:
         return "direct_price"
-    allowed_features = set(training_feature_columns())
+    allowed_features = set(LAG_FEATURE_COLUMNS)
     for key, value in variants.items():
         feature_columns = value.get("feature_columns") or []
         if set(feature_columns).issubset(allowed_features):
@@ -459,6 +575,24 @@ def list_excel_files_for_date_window(
     return sorted(scoped_files)
 
 
+def excel_file_signature(
+    history_dir: str | Path,
+    start_date: str | pd.Timestamp | None = None,
+    end_date: str | pd.Timestamp | None = None,
+    leading_days: int = 0,
+    excel_files: list[Path] | None = None,
+) -> list[dict[str, object]]:
+    files = excel_files if excel_files is not None else list_excel_files_for_date_window(history_dir, start_date, end_date, leading_days)
+    return [
+        {
+            "path": str(path.resolve()),
+            "size": path.stat().st_size,
+            "mtime_ns": path.stat().st_mtime_ns,
+        }
+        for path in files
+    ]
+
+
 def build_history_source_signature(
     source: str | Path,
     holiday_file: str | Path | None,
@@ -467,16 +601,8 @@ def build_history_source_signature(
     scope: dict | None = None,
 ) -> dict:
     source_path = Path(source).resolve()
-    files = []
-    for file_path in (excel_files if excel_files is not None else list_excel_files(source_path)):
-        stat = file_path.stat()
-        files.append(
-            {
-                "path": str(file_path.resolve()),
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-            }
-        )
+    signature_files = excel_files if excel_files is not None else list_excel_files(source_path)
+    files = excel_file_signature(source_path, excel_files=signature_files)
     holiday_signature = None
     if holiday_file:
         holiday_path = Path(holiday_file).resolve()
@@ -499,6 +625,34 @@ def build_history_source_signature(
     return payload
 
 
+def history_cache_signature(
+    history_dir: str | Path,
+    holiday_file: str | Path | None = None,
+    require_target: bool = True,
+    start_date: str | pd.Timestamp | None = None,
+    end_date: str | pd.Timestamp | None = None,
+    leading_days: int = 0,
+    data_mode: str = DAYAHEAD_DATA_MODE,
+    excel_files: list[Path] | None = None,
+) -> dict:
+    scoped_files = excel_files if excel_files is not None else list_excel_files_for_date_window(history_dir, start_date, end_date, leading_days)
+    scope = {
+        "start_date": str(parse_optional_date(start_date).date()) if parse_optional_date(start_date) is not None else None,
+        "end_date": str(parse_optional_date(end_date).date()) if parse_optional_date(end_date) is not None else None,
+        "leading_days": int(leading_days or 0),
+    }
+    signature = build_history_source_signature(history_dir, holiday_file, require_target, excel_files=scoped_files, scope=scope)
+    normalized_data_mode = str(data_mode or DAYAHEAD_DATA_MODE)
+    signature["excel_files"] = signature["files"]
+    if normalized_data_mode != DAYAHEAD_DATA_MODE:
+        signature["cache_key"] = derived_cache_key(
+            signature["cache_key"],
+            json.dumps({"history_data_mode": normalized_data_mode}, ensure_ascii=False, sort_keys=True),
+        )
+    signature["history_data_mode"] = normalized_data_mode
+    return signature
+
+
 def derived_cache_key(source_key: str, namespace: str) -> str:
     raw = json.dumps(
         {
@@ -508,6 +662,43 @@ def derived_cache_key(source_key: str, namespace: str) -> str:
         },
         sort_keys=True,
     )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def training_run_fingerprint(config: TrainConfig, history_signature: dict[str, object]) -> str:
+    payload = {
+        "history": history_signature,
+        "data_mode": config.data_mode,
+        "training_window_days": config.training_window_days,
+        "valid_days": config.valid_days,
+        "num_boost_round": config.num_boost_round,
+        "start_date": config.start_date,
+        "end_date": config.end_date,
+        "interval_training_window_days": config.interval_training_window_days,
+        "interval_valid_days": config.interval_valid_days,
+        "interval_num_boost_round": config.interval_num_boost_round,
+        "interval_start_date": config.interval_start_date,
+        "interval_end_date": config.interval_end_date,
+        "thermal_capacity_training_window_days": config.thermal_capacity_training_window_days,
+        "thermal_capacity_valid_days": config.thermal_capacity_valid_days,
+        "thermal_capacity_num_boost_round": config.thermal_capacity_num_boost_round,
+        "thermal_capacity_start_date": config.thermal_capacity_start_date,
+        "thermal_capacity_end_date": config.thermal_capacity_end_date,
+        "similarity_reference_days": config.similarity_reference_days,
+        "rolling_backtest_horizons": config.rolling_backtest_horizons,
+        "segment_config": config.segment_config,
+        "high_price_weight_enabled": config.high_price_weight_enabled,
+        "high_price_quantile": config.high_price_quantile,
+        "high_price_weight_multiplier": config.high_price_weight_multiplier,
+        "price_intervals": config.price_intervals,
+        "direct_feature_variant_keys": config.direct_feature_variant_keys,
+        "model_backend_keys": config.model_backend_keys,
+        "interval_backend_keys": config.interval_backend_keys,
+        "thermal_capacity_backend_keys": config.thermal_capacity_backend_keys,
+        "train_interval_model": config.train_interval_model,
+        "train_thermal_capacity_model": config.train_thermal_capacity_model,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -574,7 +765,7 @@ def required_raw_history_columns(require_target: bool) -> list[str]:
 
 
 def required_training_feature_cache_columns() -> list[str]:
-    return sorted(set(FEATURE_COLUMNS + [TARGET_COLUMN, "date", "period", "segment"]))
+    return sorted(set(LAG_FEATURE_COLUMNS + [TARGET_COLUMN, "date", "period", "segment"]))
 
 
 def quality_report_status(issues: list[DataQualityIssue], blocked: bool = False) -> str:
@@ -597,17 +788,25 @@ def load_cached_history_collection(
     start_date: str | pd.Timestamp | None = None,
     end_date: str | pd.Timestamp | None = None,
     leading_days: int = 0,
+    cache_dir: str | Path | None = None,
+    data_mode: str = DAYAHEAD_DATA_MODE,
 ) -> tuple[pd.DataFrame, list[str], set[pd.Timestamp], dict, list[DataQualityIssue]]:
     holiday_dates = load_holiday_calendar(holiday_file)
     scoped_files = list_excel_files_for_date_window(history_dir, start_date, end_date, leading_days=leading_days)
-    scope = {
-        "start_date": str(parse_optional_date(start_date).date()) if parse_optional_date(start_date) is not None else None,
-        "end_date": str(parse_optional_date(end_date).date()) if parse_optional_date(end_date) is not None else None,
-        "leading_days": int(leading_days or 0),
-    }
-    signature = build_history_source_signature(history_dir, holiday_file, require_target, excel_files=scoped_files, scope=scope)
-    cache_dir = Path(model_root) / "cache"
-    cached = load_dataframe_cache(cache_dir, "history_raw", signature["cache_key"])
+    normalized_data_mode = str(data_mode or DAYAHEAD_DATA_MODE)
+    signature = history_cache_signature(
+        history_dir,
+        holiday_file=holiday_file,
+        require_target=require_target,
+        start_date=start_date,
+        end_date=end_date,
+        leading_days=leading_days,
+        data_mode=normalized_data_mode,
+        excel_files=scoped_files,
+    )
+    history_cache_dir = Path(cache_dir) if cache_dir is not None else Path(model_root) / "cache"
+    cache_name = "history_raw" if normalized_data_mode == DAYAHEAD_DATA_MODE else f"history_raw_{normalized_data_mode}"
+    cached = load_dataframe_cache(history_cache_dir, cache_name, signature["cache_key"])
     if cached is not None:
         cached_frame, skipped_sheets = cached
         missing_columns = missing_dataframe_columns(cached_frame, required_raw_history_columns(require_target))
@@ -626,12 +825,13 @@ def load_cached_history_collection(
             progress_end=progress_end,
             progress_label=progress_label,
             excel_files=scoped_files,
+            data_mode=normalized_data_mode,
         )
     except ValueError as exc:
         if builder.quality_issues:
             raise DataQualityValidationError(str(exc), builder.quality_issues) from exc
         raise
-    save_dataframe_cache(cache_dir, "history_raw", signature["cache_key"], history_df, builder.skipped_sheets)
+    save_dataframe_cache(history_cache_dir, cache_name, signature["cache_key"], history_df, builder.skipped_sheets)
     return history_df, builder.skipped_sheets, holiday_dates, signature, builder.quality_issues
 
 
@@ -798,6 +998,7 @@ class DayAheadDataBuilder:
         progress_end: int | None = None,
         progress_label: str = "正在读取数据",
         excel_files: list[Path] | None = None,
+        data_mode: str = DAYAHEAD_DATA_MODE,
     ) -> pd.DataFrame:
         all_days: list[pd.DataFrame] = []
         self.skipped_sheets = []
@@ -841,7 +1042,14 @@ class DayAheadDataBuilder:
                         continue
                     raise DataQualityValidationError("历史数据存在关键字段异常", validation_issues)
                 try:
-                    day_df = self.prepare_single_sheet(raw_df, file_path, str(sheet_name), trade_date, require_target)
+                    day_df = self.prepare_single_sheet(
+                        raw_df,
+                        file_path,
+                        str(sheet_name),
+                        trade_date,
+                        require_target,
+                        data_mode=data_mode,
+                    )
                     all_days.append(day_df)
                 except (KeyError, ValueError) as exc:
                     self.quality_issues.append(
@@ -877,19 +1085,32 @@ class DayAheadDataBuilder:
         sheet_name: str,
         trade_date: pd.Timestamp,
         require_target: bool,
+        data_mode: str = DAYAHEAD_DATA_MODE,
     ) -> pd.DataFrame:
         day_df = raw_df.copy().iloc[:96].reset_index(drop=True)
         if len(day_df) < 96:
             raise ValueError(f"{file_path.name} - {sheet_name} 不是 96 行时段数据")
         day_df.columns = [str(column).strip() for column in day_df.columns]
 
-        total_power_col = resolve_column(day_df.columns, ["总加电力值(MW)", "总加电力值"], required=True)
-        power_col = resolve_column(day_df.columns, ["电力值(MW)", "电力值"], required=True)
-        target_col = resolve_column(
-            day_df.columns,
-            ["日前出清价格(元/MWh)", "日前-出清价格(元/MWh)", "日前出清价格", "出清价格"],
-            required=require_target,
-        )
+        normalized_data_mode = str(data_mode or DAYAHEAD_DATA_MODE)
+        if normalized_data_mode == REALTIME_DATA_MODE:
+            total_power_col = resolve_column(day_df.columns, ["用电负荷(MW)", "用电负荷"], required=True)
+            power_col = resolve_column(day_df.columns, ["新能源总计划(MW)", "新能源总计划"], required=True)
+            thermal_power_col = resolve_column(day_df.columns, ["火电总计划(MW)", "火电总计划"], required=True)
+            target_col = resolve_column(
+                day_df.columns,
+                [REALTIME_TARGET_SOURCE_COLUMN, "实时-出清价格(元/MWh)", "实时出清价格"],
+                required=require_target,
+            )
+        else:
+            total_power_col = resolve_column(day_df.columns, ["总加电力值(MW)", "总加电力值"], required=True)
+            power_col = resolve_column(day_df.columns, ["电力值(MW)", "电力值"], required=True)
+            thermal_power_col = None
+            target_col = resolve_column(
+                day_df.columns,
+                ["日前出清价格(元/MWh)", "日前-出清价格(元/MWh)", "日前出清价格", "出清价格"],
+                required=require_target,
+            )
         overview_col = resolve_column(day_df.columns, ["日前-出清概况", "日前出清概况", "出清概况"], required=False)
 
         overview_series = pd.Series([np.nan] * len(day_df))
@@ -903,7 +1124,7 @@ class DayAheadDataBuilder:
         day_type = day_type_of(date_value, self.holiday_dates)
         total_load = to_numeric(day_df[total_power_col])
         renewable_power = to_numeric(day_df[power_col])
-        thermal_space = total_load - renewable_power
+        thermal_space = to_numeric(day_df[thermal_power_col]) if thermal_power_col else total_load - renewable_power
         result = pd.DataFrame(
             {
                 "date": date_value,
@@ -944,11 +1165,615 @@ def split_train_valid(data: pd.DataFrame, valid_days: int) -> tuple[pd.DataFrame
     return train_df, valid_df
 
 
+def attach_lag_features(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    for column in LAG_PRICE_COLUMNS + LAG_LOAD_COLUMNS:
+        if column not in result.columns:
+            result[column] = np.nan
+    if result.empty or "date" not in result.columns or "period" not in result.columns:
+        return result
+
+    result["date"] = pd.to_datetime(result["date"], errors="coerce").dt.normalize()
+    result["period"] = pd.to_numeric(result["period"], errors="coerce")
+    target_values = pd.to_numeric(result[TARGET_COLUMN], errors="coerce") if TARGET_COLUMN in result.columns else pd.Series(np.nan, index=result.index)
+    net_load_values = pd.to_numeric(result["net_load"], errors="coerce") if "net_load" in result.columns else pd.Series(np.nan, index=result.index)
+    source = pd.DataFrame(
+        {
+            "date": result["date"],
+            "period": result["period"],
+            TARGET_COLUMN: target_values,
+            "net_load": net_load_values,
+        }
+    )
+    lookup_source = (
+        source.groupby(["date", "period"], as_index=False)
+        .agg({TARGET_COLUMN: "mean", "net_load": "mean"})
+        .sort_values(["period", "date"])
+        .reset_index(drop=True)
+    )
+
+    base_index = pd.Series(np.arange(len(result)), name="__lag_row")
+    working = pd.concat([base_index, result[["date", "period"]].reset_index(drop=True)], axis=1)
+    for days in (1, 2, 3, 7):
+        lag_source = lookup_source[["date", "period", TARGET_COLUMN]].copy()
+        lag_source["date"] = lag_source["date"] + pd.Timedelta(days=days)
+        lag_source = lag_source.rename(columns={TARGET_COLUMN: f"price_lag_{days}d"})
+        working = working.merge(lag_source, on=["date", "period"], how="left")
+
+    load_source = lookup_source[["date", "period", "net_load"]].copy()
+    load_source["date"] = load_source["date"] + pd.Timedelta(days=1)
+    load_source = load_source.rename(columns={"net_load": "net_load_lag_1d"})
+    working = working.merge(load_source, on=["date", "period"], how="left")
+
+    ordered = lookup_source.copy()
+    shifted_prices = ordered.groupby("period", sort=False)[TARGET_COLUMN].shift(1)
+    ordered["price_ma_3d"] = shifted_prices.groupby(ordered["period"], sort=False).transform(
+        lambda series: series.rolling(3, min_periods=1).mean()
+    )
+    ordered["price_ma_7d"] = shifted_prices.groupby(ordered["period"], sort=False).transform(
+        lambda series: series.rolling(7, min_periods=1).mean()
+    )
+    ordered["price_std_7d"] = shifted_prices.groupby(ordered["period"], sort=False).transform(
+        lambda series: series.rolling(7, min_periods=1).std(ddof=0)
+    )
+    rolling_source = ordered[["date", "period", "price_ma_3d", "price_ma_7d", "price_std_7d"]]
+    working = working.merge(rolling_source, on=["date", "period"], how="left")
+
+    working = working.sort_values("__lag_row").reset_index(drop=True)
+    for column in LAG_PRICE_COLUMNS + LAG_LOAD_COLUMNS:
+        result[column] = pd.to_numeric(working[column], errors="coerce").to_numpy()
+    return result
+
+
+def attach_forecast_lag_features(forecast_df: pd.DataFrame, history_df: pd.DataFrame) -> pd.DataFrame:
+    forecast = forecast_df.copy()
+    forecast_columns = set(forecast.columns)
+    forecast["__forecast_lag_row"] = np.arange(len(forecast))
+    forecast["__is_forecast_row"] = True
+    history = history_df.copy()
+    history["__forecast_lag_row"] = np.nan
+    history["__is_forecast_row"] = False
+    if TARGET_COLUMN not in forecast.columns:
+        forecast[TARGET_COLUMN] = np.nan
+    combined = pd.concat([history, forecast], ignore_index=True, sort=False)
+    combined = attach_lag_features(combined)
+    result = (
+        combined[combined["__is_forecast_row"]]
+        .sort_values("__forecast_lag_row")
+        .drop(columns=["__forecast_lag_row", "__is_forecast_row"], errors="ignore")
+        .reset_index(drop=True)
+    )
+    if TARGET_COLUMN not in forecast_columns and TARGET_COLUMN in result.columns:
+        result = result.drop(columns=[TARGET_COLUMN])
+    return result
+
+
+def apply_template_reference_lag_features(forecast_df: pd.DataFrame, template_reference_df: pd.DataFrame | None) -> pd.DataFrame:
+    if template_reference_df is None or template_reference_df.empty:
+        return forecast_df
+    result = forecast_df.copy()
+    reference = template_reference_df.copy()
+    reference["period"] = pd.to_numeric(reference["period"], errors="coerce")
+    reference = reference.dropna(subset=["period"]).drop_duplicates("period").set_index("period")
+    period_index = pd.to_numeric(result["period"], errors="coerce")
+    baseline_prices = period_index.map(pd.to_numeric(reference.get(TARGET_COLUMN), errors="coerce"))
+    baseline_net_load = period_index.map(pd.to_numeric(reference.get("net_load"), errors="coerce"))
+    for column in LAG_PRICE_COLUMNS:
+        result[column] = baseline_prices.to_numpy()
+    result["price_std_7d"] = 0.0
+    result["net_load_lag_1d"] = baseline_net_load.to_numpy()
+    return result
+
+
 def calculate_metrics(actual: np.ndarray, predicted: np.ndarray) -> dict[str, float]:
     errors = actual - predicted
     mae = float(np.mean(np.abs(errors)))
     rmse = float(np.sqrt(np.mean(np.square(errors))))
     return {"mae": round(mae, 4), "rmse": round(rmse, 4)}
+
+
+def _first_numeric_value(series: pd.Series) -> float | None:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    return float(values.iloc[0]) if not values.empty else None
+
+
+def extract_forecast_thermal_capacity_file_value(forecast_df: pd.DataFrame) -> float | None:
+    if "thermal_on_capacity" not in forecast_df.columns:
+        return None
+    return _first_numeric_value(forecast_df["thermal_on_capacity"])
+
+
+def build_daily_thermal_capacity_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "date" not in frame.columns:
+        return pd.DataFrame()
+    working = frame.copy()
+    working["date"] = pd.to_datetime(working["date"], errors="coerce").dt.normalize()
+    working = working.dropna(subset=["date"]).sort_values(["date", "period"] if "period" in working.columns else ["date"])
+    if working.empty:
+        return pd.DataFrame()
+    for column in [TOTAL_LOAD_COLUMN, RENEWABLE_POWER_COLUMN, "net_load", THERMAL_SPACE_LOAD_RATIO_COLUMN, "thermal_on_capacity"]:
+        if column not in working.columns:
+            working[column] = np.nan
+        working[column] = pd.to_numeric(working[column], errors="coerce")
+    daily_rows: list[dict[str, object]] = []
+    for date_value, day_df in working.groupby("date", sort=True):
+        total_load = day_df[TOTAL_LOAD_COLUMN]
+        renewable = day_df[RENEWABLE_POWER_COLUMN]
+        net_load = day_df["net_load"]
+        total_load_mean = float(total_load.mean()) if total_load.notna().any() else np.nan
+        renewable_mean = float(renewable.mean()) if renewable.notna().any() else np.nan
+        net_diff = net_load.diff().abs()
+        capacity_value = _first_numeric_value(day_df["thermal_on_capacity"])
+        date_row = day_df.iloc[0]
+        daily_rows.append(
+            {
+                "date": pd.Timestamp(date_value).normalize(),
+                "total_load_mean": total_load_mean,
+                "total_load_max": float(total_load.max()) if total_load.notna().any() else np.nan,
+                "total_load_min": float(total_load.min()) if total_load.notna().any() else np.nan,
+                "renewable_power_mean": renewable_mean,
+                "renewable_power_max": float(renewable.max()) if renewable.notna().any() else np.nan,
+                "renewable_power_min": float(renewable.min()) if renewable.notna().any() else np.nan,
+                "net_load_mean": float(net_load.mean()) if net_load.notna().any() else np.nan,
+                "net_load_max": float(net_load.max()) if net_load.notna().any() else np.nan,
+                "net_load_min": float(net_load.min()) if net_load.notna().any() else np.nan,
+                "net_load_peak_valley": float(net_load.max() - net_load.min()) if net_load.notna().any() else np.nan,
+                "net_load_max_ramp": float(net_diff.max()) if net_diff.notna().any() else 0.0,
+                "thermal_space_load_ratio_mean": float(day_df[THERMAL_SPACE_LOAD_RATIO_COLUMN].mean()) if day_df[THERMAL_SPACE_LOAD_RATIO_COLUMN].notna().any() else np.nan,
+                "renewable_share_mean": float(renewable_mean / total_load_mean) if total_load_mean and np.isfinite(total_load_mean) else np.nan,
+                "weekday": int(date_row.get("weekday", pd.Timestamp(date_value).weekday())),
+                "month": int(date_row.get("month", pd.Timestamp(date_value).month)),
+                "is_weekend": int(date_row.get("is_weekend", int(pd.Timestamp(date_value).weekday() >= 5))),
+                "is_holiday": int(date_row.get("is_holiday", 0)),
+                "thermal_on_capacity": capacity_value,
+            }
+        )
+    daily = pd.DataFrame(daily_rows).sort_values("date").reset_index(drop=True)
+    previous = pd.to_numeric(daily["thermal_on_capacity"], errors="coerce").shift(1)
+    daily["previous_thermal_on_capacity"] = previous.combine_first(pd.to_numeric(daily["thermal_on_capacity"], errors="coerce"))
+    return daily
+
+
+def split_daily_train_valid(daily_df: pd.DataFrame, valid_days: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    clean = daily_df.dropna(subset=["thermal_on_capacity"]).copy()
+    clean = clean.dropna(subset=THERMAL_CAPACITY_FEATURE_COLUMNS, how="any")
+    if clean.empty:
+        return clean, clean.copy()
+    if valid_days > 0 and len(clean) > valid_days:
+        return clean.iloc[:-valid_days].copy(), clean.iloc[-valid_days:].copy()
+    return clean.copy(), clean.iloc[0:0].copy()
+
+
+def thermal_capacity_metrics(actual: pd.Series | np.ndarray, predicted: np.ndarray) -> dict[str, float | int | None]:
+    actual_array = np.asarray(actual, dtype=float)
+    predicted_array = np.asarray(predicted, dtype=float)
+    valid = np.isfinite(actual_array) & np.isfinite(predicted_array)
+    if not np.any(valid):
+        return {"valid_rows": 0, "mae": None, "rmse": None, "max_error": None, "bias": None, "score": None}
+    errors = predicted_array[valid] - actual_array[valid]
+    mae = float(np.mean(np.abs(errors)))
+    rmse = float(np.sqrt(np.mean(np.square(errors))))
+    return {
+        "valid_rows": int(np.sum(valid)),
+        "mae": mae,
+        "rmse": rmse,
+        "max_error": float(np.max(np.abs(errors))),
+        "bias": float(np.mean(errors)),
+        "score": float(mae + 0.2 * rmse),
+    }
+
+
+class RidgeThermalCapacityModel:
+    def __init__(
+        self,
+        feature_columns: list[str],
+        coefficients: list[float],
+        intercept: float,
+        means: list[float],
+        scales: list[float],
+    ) -> None:
+        self.feature_columns = feature_columns
+        self.coefficients = np.asarray(coefficients, dtype=float)
+        self.intercept = float(intercept)
+        self.means = np.asarray(means, dtype=float)
+        self.scales = np.asarray(scales, dtype=float)
+
+    def predict(self, frame: pd.DataFrame | np.ndarray) -> np.ndarray:
+        values = frame.to_numpy(dtype=float) if isinstance(frame, pd.DataFrame) else np.asarray(frame, dtype=float)
+        scaled = (values - self.means) / self.scales
+        return scaled @ self.coefficients + self.intercept
+
+    def save(self, output_path: Path) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(
+                {
+                    "feature_columns": self.feature_columns,
+                    "coefficients": self.coefficients.tolist(),
+                    "intercept": self.intercept,
+                    "means": self.means.tolist(),
+                    "scales": self.scales.tolist(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    @classmethod
+    def load(cls, model_path: Path) -> "RidgeThermalCapacityModel":
+        payload = json.loads(model_path.read_text(encoding="utf-8"))
+        return cls(
+            list(payload.get("feature_columns") or []),
+            list(payload.get("coefficients") or []),
+            float(payload.get("intercept") or 0.0),
+            list(payload.get("means") or []),
+            list(payload.get("scales") or []),
+        )
+
+
+def available_thermal_capacity_backends() -> OrderedDict[str, str]:
+    backends: OrderedDict[str, str] = OrderedDict()
+    try:
+        import xgboost  # noqa: F401
+
+        backends["xgboost"] = "XGBoost"
+    except Exception:
+        pass
+    try:
+        import lightgbm  # noqa: F401
+
+        backends["lightgbm"] = "LightGBM"
+    except Exception:
+        pass
+    try:
+        import catboost  # noqa: F401
+
+        backends["catboost"] = "CatBoost"
+    except Exception:
+        pass
+    backends["ridge"] = "Ridge"
+    return backends
+
+
+def thermal_capacity_model_file_name(backend: str) -> str:
+    if backend == "lightgbm":
+        return "thermal_capacity_model.txt"
+    if backend == "catboost":
+        return "thermal_capacity_model.cbm"
+    if backend == "ridge":
+        return "thermal_capacity_model_ridge.json"
+    return "thermal_capacity_model.json"
+
+
+def train_ridge_thermal_capacity_model(
+    train_x: pd.DataFrame,
+    train_y: pd.Series,
+    output_path: Path,
+    alpha: float = 1.0,
+) -> RidgeThermalCapacityModel:
+    values = train_x.to_numpy(dtype=float)
+    target = train_y.to_numpy(dtype=float)
+    means = np.nanmean(values, axis=0)
+    scales = np.nanstd(values, axis=0)
+    scales = np.where(np.isfinite(scales) & (scales > 1e-9), scales, 1.0)
+    scaled = (values - means) / scales
+    design = np.column_stack([np.ones(len(scaled)), scaled])
+    penalty = np.eye(design.shape[1]) * float(alpha)
+    penalty[0, 0] = 0.0
+    solution = np.linalg.pinv(design.T @ design + penalty) @ design.T @ target
+    model = RidgeThermalCapacityModel(
+        list(train_x.columns),
+        coefficients=solution[1:].astype(float).tolist(),
+        intercept=float(solution[0]),
+        means=means.astype(float).tolist(),
+        scales=scales.astype(float).tolist(),
+    )
+    model.save(output_path)
+    return model
+
+
+def train_thermal_capacity_backend(
+    backend: str,
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    feature_columns: list[str],
+    num_boost_round: int,
+    output_path: Path,
+) -> tuple[object, np.ndarray, int | None]:
+    train_x = train_df[feature_columns].astype(float)
+    train_y = train_df["thermal_on_capacity"].astype(float)
+    valid_x = valid_df[feature_columns].astype(float) if not valid_df.empty else None
+
+    if backend == "ridge":
+        model = train_ridge_thermal_capacity_model(train_x, train_y, output_path)
+        evaluation_x = valid_x if valid_x is not None else train_x
+        return model, model.predict(evaluation_x), None
+
+    if backend == "lightgbm":
+        import lightgbm as lgb
+
+        train_dataset = lgb.Dataset(train_x, label=train_y, feature_name=feature_columns)
+        valid_sets = [train_dataset]
+        callbacks = []
+        if valid_x is not None:
+            valid_sets.append(lgb.Dataset(valid_x, label=valid_df["thermal_on_capacity"].astype(float), reference=train_dataset, feature_name=feature_columns))
+            callbacks.append(lgb.early_stopping(30, verbose=False))
+        model = lgb.train(
+            {
+                "objective": "regression",
+                "metric": "rmse",
+                "learning_rate": 0.05,
+                "max_depth": 5,
+                "seed": 42,
+                "verbosity": -1,
+            },
+            train_dataset,
+            num_boost_round=max(1, int(num_boost_round)),
+            valid_sets=valid_sets,
+            callbacks=callbacks,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(model.model_to_string(), encoding="utf-8")
+        best_iteration = int(model.best_iteration) if getattr(model, "best_iteration", 0) else None
+        evaluation_x = valid_x if valid_x is not None else train_x
+        prediction = model.predict(evaluation_x, num_iteration=best_iteration)
+        return model, np.asarray(prediction, dtype=float), best_iteration
+
+    if backend == "catboost":
+        from catboost import CatBoostRegressor
+
+        model = CatBoostRegressor(
+            iterations=max(1, int(num_boost_round)),
+            learning_rate=0.05,
+            depth=5,
+            loss_function="RMSE",
+            random_seed=42,
+            verbose=False,
+            allow_writing_files=False,
+        )
+        fit_kwargs: dict[str, object] = {}
+        if valid_x is not None:
+            fit_kwargs["eval_set"] = (valid_x, valid_df["thermal_on_capacity"].astype(float))
+            fit_kwargs["early_stopping_rounds"] = 30
+            fit_kwargs["use_best_model"] = True
+        model.fit(train_x, train_y, **fit_kwargs)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        model.save_model(str(output_path))
+        best_iteration = int(model.get_best_iteration()) if model.get_best_iteration() is not None else None
+        evaluation_x = valid_x if valid_x is not None else train_x
+        return model, np.asarray(model.predict(evaluation_x), dtype=float), best_iteration
+
+    import xgboost as xgb
+
+    dtrain = xgb.DMatrix(train_x, label=train_y, feature_names=feature_columns)
+    evals = [(dtrain, "train")]
+    train_kwargs: dict[str, object] = {
+        "params": {**DEFAULT_XGB_PARAMS, "objective": "reg:squarederror"},
+        "dtrain": dtrain,
+        "num_boost_round": max(1, int(num_boost_round)),
+        "evals": evals,
+        "verbose_eval": False,
+    }
+    dvalid = None
+    if valid_x is not None:
+        dvalid = xgb.DMatrix(valid_x, label=valid_df["thermal_on_capacity"].astype(float), feature_names=feature_columns)
+        evals.append((dvalid, "valid"))
+        train_kwargs["early_stopping_rounds"] = 30
+    model = xgb.train(**train_kwargs)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    model.save_model(str(output_path))
+    best_iteration = int(model.attr("best_iteration")) if model.attr("best_iteration") else None
+    evaluation_matrix = dvalid if dvalid is not None else dtrain
+    iteration_range = (0, best_iteration + 1) if best_iteration is not None else None
+    prediction = model.predict(evaluation_matrix, iteration_range=iteration_range) if iteration_range else model.predict(evaluation_matrix)
+    return model, np.asarray(prediction, dtype=float), best_iteration
+
+
+def select_best_thermal_capacity_variant(variant_metrics: dict[str, dict[str, object]]) -> str | None:
+    candidates: list[tuple[float, str]] = []
+    for key, metrics in variant_metrics.items():
+        overall = metrics.get("overall") if isinstance(metrics.get("overall"), dict) else metrics
+        score = overall.get("score") if isinstance(overall, dict) else None
+        if score is not None and np.isfinite(float(score)):
+            candidates.append((float(score), key))
+    if not candidates:
+        return None
+    return min(candidates)[1]
+
+
+def train_thermal_capacity_model(
+    history_df: pd.DataFrame,
+    output_dir: Path,
+    valid_days: int,
+    num_boost_round: int,
+    backends: dict[str, str] | None = None,
+) -> dict[str, object]:
+    daily_df = build_daily_thermal_capacity_frame(history_df)
+    train_df, valid_df = split_daily_train_valid(daily_df, valid_days)
+    backends = backends or available_thermal_capacity_backends()
+    metadata: dict[str, object] = {
+        "enabled": False,
+        "feature_columns": list(THERMAL_CAPACITY_FEATURE_COLUMNS),
+        "target_column": "thermal_on_capacity",
+        "model_path": "thermal_capacity_model/thermal_capacity_model.json",
+        "train_rows": int(len(train_df)),
+        "valid_rows": int(len(valid_df)),
+        "metrics": {"overall": {"valid_rows": 0, "mae": None, "rmse": None, "max_error": None, "bias": None, "score": None}},
+        "model_variants": {},
+        "variant_metrics": {},
+    }
+    if train_df.empty or len(train_df) < 2:
+        metadata["reason"] = "not_enough_training_rows"
+        return metadata
+    output_dir.mkdir(parents=True, exist_ok=True)
+    variant_metrics: dict[str, dict[str, object]] = {}
+    model_variants: dict[str, dict[str, object]] = {}
+    evaluation_df = valid_df if not valid_df.empty else train_df
+    evaluation_actual = evaluation_df["thermal_on_capacity"]
+    for backend_key, backend_label in backends.items():
+        variant_key = f"thermal_capacity_{backend_key}"
+        variant_dir = output_dir / variant_key
+        model_file = thermal_capacity_model_file_name(backend_key)
+        model_path = variant_dir / model_file
+        try:
+            _model, prediction, best_iteration = train_thermal_capacity_backend(
+                backend_key,
+                train_df,
+                valid_df,
+                list(THERMAL_CAPACITY_FEATURE_COLUMNS),
+                num_boost_round,
+                model_path,
+            )
+            metrics = thermal_capacity_metrics(evaluation_actual, prediction)
+            metrics["train_rows"] = int(len(train_df))
+            metrics["valid_rows"] = int(len(valid_df))
+            metrics["best_iteration"] = best_iteration
+            variant_metrics[variant_key] = {"overall": metrics}
+            model_variants[variant_key] = {
+                "model_dir": f"thermal_capacity_model/{variant_key}",
+                "model_path": f"thermal_capacity_model/{variant_key}/{model_file}",
+                "model_backend": backend_key,
+                "model_backend_label": backend_label,
+                "feature_columns": list(THERMAL_CAPACITY_FEATURE_COLUMNS),
+            }
+        except Exception as exc:
+            variant_metrics[variant_key] = {
+                "overall": {
+                    "valid_rows": 0,
+                    "mae": None,
+                    "rmse": None,
+                    "max_error": None,
+                    "bias": None,
+                    "score": None,
+                    "error": str(exc),
+                }
+            }
+
+    selected_model_key = select_best_thermal_capacity_variant(variant_metrics)
+    if not selected_model_key or selected_model_key not in model_variants:
+        metadata.update(
+            {
+                "reason": "no_valid_thermal_capacity_backend",
+                "model_variants": model_variants,
+                "variant_metrics": variant_metrics,
+            }
+        )
+        return metadata
+
+    selected_variant = model_variants[selected_model_key]
+    metadata.update(
+        {
+            "enabled": True,
+            "selected_model_key": selected_model_key,
+            "selected_model_backend": selected_variant["model_backend"],
+            "selected_model_backend_label": selected_variant["model_backend_label"],
+            "model_path": selected_variant["model_path"],
+            "model_variants": model_variants,
+            "variant_metrics": variant_metrics,
+            "train_rows": int(len(train_df)),
+            "valid_rows": int(len(valid_df)),
+            "train_dates": pd.to_datetime(train_df["date"]).dt.strftime("%Y-%m-%d").tolist(),
+            "valid_dates": pd.to_datetime(valid_df["date"]).dt.strftime("%Y-%m-%d").tolist(),
+            "metrics": variant_metrics[selected_model_key],
+        }
+    )
+    return metadata
+
+
+def predict_thermal_capacity_value(
+    forecast_df: pd.DataFrame,
+    model_entry: dict[str, object] | None,
+    file_value: float | None = None,
+) -> float | None:
+    if not model_entry or not model_entry.get("model"):
+        return None
+    feature_columns = list((model_entry.get("metadata") or {}).get("feature_columns") or THERMAL_CAPACITY_FEATURE_COLUMNS)
+    daily_df = build_daily_thermal_capacity_frame(forecast_df)
+    if daily_df.empty:
+        return None
+    if file_value is not None and "previous_thermal_on_capacity" in daily_df.columns:
+        daily_df.loc[:, "previous_thermal_on_capacity"] = float(file_value)
+    feature_df = daily_df[feature_columns].astype(float)
+    if feature_df.isna().any().any():
+        feature_df = feature_df.ffill().bfill().fillna(0.0)
+    backend = str(model_entry.get("backend") or (model_entry.get("metadata") or {}).get("selected_model_backend") or "xgboost")
+    prediction = predict_thermal_capacity_backend(feature_df, model_entry["model"], backend, feature_columns)
+    if len(prediction) == 0 or not np.isfinite(float(prediction[0])):
+        return None
+    return float(prediction[0])
+
+
+def load_thermal_capacity_backend_model(model_path: Path, backend: str) -> object:
+    if backend == "ridge":
+        return RidgeThermalCapacityModel.load(model_path)
+    if backend == "lightgbm":
+        import lightgbm as lgb
+
+        return lgb.Booster(model_str=model_path.read_text(encoding="utf-8"))
+    if backend == "catboost":
+        from catboost import CatBoostRegressor
+
+        model = CatBoostRegressor()
+        model.load_model(str(model_path))
+        return model
+    import xgboost as xgb
+
+    model = xgb.Booster()
+    model.load_model(str(model_path))
+    return model
+
+
+def predict_thermal_capacity_backend(
+    feature_df: pd.DataFrame,
+    model: object,
+    backend: str,
+    feature_columns: list[str],
+) -> np.ndarray:
+    if backend in {"ridge", "lightgbm", "catboost"}:
+        return np.asarray(model.predict(feature_df), dtype=float)
+    import xgboost as xgb
+
+    dmatrix = xgb.DMatrix(feature_df, feature_names=feature_columns)
+    return np.asarray(model.predict(dmatrix), dtype=float)
+
+
+def build_thermal_capacity_choice(
+    forecast_df: pd.DataFrame,
+    config: dict[str, object] | None,
+    model_predicted_value: float | None,
+) -> dict[str, object]:
+    config = config or {}
+    mode = str(config.get("mode") or config.get("thermal_capacity_mode") or "manual").strip().lower()
+    file_value = extract_forecast_thermal_capacity_file_value(forecast_df)
+    manual_value_raw = config.get("manual_value", config.get("manual_thermal_on_capacity"))
+    manual_value = float(manual_value_raw) if manual_value_raw not in (None, "") else file_value
+    if mode == "model":
+        if model_predicted_value is None:
+            raise ValueError("已选择开机容量模型预测值，但当前模型版本没有可用的开机容量模型预测结果")
+        source = "model"
+        value = float(model_predicted_value)
+    else:
+        source = "manual"
+        value = float(manual_value) if manual_value is not None else np.nan
+    return {
+        "source": source,
+        "value": value,
+        "model_value": float(model_predicted_value) if model_predicted_value is not None else None,
+        "file_value": float(file_value) if file_value is not None else None,
+        "manual_value": float(manual_value) if manual_value is not None else None,
+    }
+
+
+def apply_thermal_capacity_choice(forecast_df: pd.DataFrame, choice: dict[str, object]) -> pd.DataFrame:
+    result = forecast_df.copy()
+    value = float(choice["value"])
+    result["thermal_on_capacity"] = value
+    result[THERMAL_CAPACITY_SOURCE_COLUMN] = str(choice.get("source") or "")
+    result[THERMAL_CAPACITY_VALUE_COLUMN] = value
+    result[THERMAL_CAPACITY_MODEL_VALUE_COLUMN] = choice.get("model_value")
+    result[THERMAL_CAPACITY_FILE_VALUE_COLUMN] = choice.get("file_value")
+    return result
 
 
 def nearest_similarity_price(target_loads: np.ndarray, ref_loads: np.ndarray, ref_prices: np.ndarray, k: int = 3) -> tuple[np.ndarray, np.ndarray]:
@@ -1177,10 +2002,25 @@ def resolve_training_date_range(history_df: pd.DataFrame, config: TrainConfig) -
     return pd.Timestamp(selected_dates[0]).strftime("%Y-%m-%d"), pd.Timestamp(selected_dates[-1]).strftime("%Y-%m-%d")
 
 
+def training_history_signature(config: TrainConfig) -> dict:
+    feature_reference_days = max(7, normalize_similarity_reference_days(config.similarity_reference_days))
+    return history_cache_signature(
+        config.history_dir,
+        holiday_file=config.holiday_file,
+        require_target=True,
+        start_date=config.start_date,
+        end_date=config.end_date,
+        leading_days=feature_reference_days,
+        data_mode=config.data_mode,
+    )
+
+
 def build_training_frame(
     config: TrainConfig,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[pd.DataFrame, list[str], Path]:
+    feature_reference_days = max(7, normalize_similarity_reference_days(config.similarity_reference_days))
+    feature_cache_dir = Path(config.feature_cache_root) if config.feature_cache_root is not None else config.model_root / "cache"
     try:
         history_df, skipped_sheets, _, history_signature, quality_issues = load_cached_history_collection(
             config.history_dir,
@@ -1193,7 +2033,9 @@ def build_training_frame(
             progress_label="正在加载历史数据文件",
             start_date=config.start_date,
             end_date=config.end_date,
-            leading_days=1,
+            leading_days=feature_reference_days,
+            cache_dir=feature_cache_dir,
+            data_mode=config.data_mode,
         )
     except DataQualityValidationError as exc:
         report_path = save_quality_report(
@@ -1221,9 +2063,26 @@ def build_training_frame(
             "training_window_days": config.training_window_days,
         },
     )
-    feature_cache_key = derived_cache_key(history_signature["cache_key"], "direct_price_training_features")
-    feature_cache_dir = config.model_root / "cache"
     raw_history_df = history_df
+    effective_start_date, effective_end_date = resolve_training_date_range(raw_history_df, config)
+    feature_context_start_date = effective_start_date
+    if feature_context_start_date:
+        feature_context_start_date = (
+            pd.Timestamp(feature_context_start_date) - pd.Timedelta(days=feature_reference_days)
+        ).strftime("%Y-%m-%d")
+    feature_cache_payload = {
+        "namespace": "direct_price_training_features",
+        "similarity_reference_days": feature_reference_days,
+        "feature_context_start_date": feature_context_start_date,
+        "effective_start_date": effective_start_date,
+        "effective_end_date": effective_end_date,
+    }
+    if str(config.data_mode or DAYAHEAD_DATA_MODE) != DAYAHEAD_DATA_MODE:
+        feature_cache_payload["data_mode"] = str(config.data_mode or DAYAHEAD_DATA_MODE)
+    feature_cache_key = derived_cache_key(
+        history_signature["cache_key"],
+        json.dumps(feature_cache_payload, ensure_ascii=False, sort_keys=True),
+    )
     cached_features = load_dataframe_cache(feature_cache_dir, "training_features", feature_cache_key)
     if cached_features is not None:
         history_df, _ = cached_features
@@ -1238,10 +2097,11 @@ def build_training_frame(
         missing_columns = []
     if cached_features is None:
         emit_progress(progress_callback, "正在准备训练特征", 19)
+        history_df = filter_date_range(raw_history_df, feature_context_start_date, effective_end_date)
+        history_df = attach_lag_features(history_df)
         save_dataframe_cache(feature_cache_dir, "training_features", feature_cache_key, history_df, skipped_sheets)
         emit_progress(progress_callback, "训练特征构建完成", 21)
     full_feature_history_df = history_df.copy()
-    effective_start_date, effective_end_date = resolve_training_date_range(history_df, config)
     if config.training_window_days:
         emit_progress(progress_callback, f"按最近 {config.training_window_days} 天训练使用天数过滤数据", 22)
     history_df = filter_date_range(history_df, effective_start_date, effective_end_date)
@@ -1251,6 +2111,7 @@ def build_training_frame(
     if history_df.empty:
         raise ValueError("数据加载后经清洗为空，请检查历史数据文件是否包含有效数据。")
     history_df.attrs["full_feature_history_df"] = full_feature_history_df
+    history_df.attrs["history_signature"] = history_signature
     return history_df, skipped_sheets, quality_report_path
 
 
@@ -1261,6 +2122,7 @@ def model_training_frame_from_base(
     valid_days: int,
     start_date: str | None,
     end_date: str | None,
+    similarity_reference_days: int | None = None,
 ) -> pd.DataFrame:
     scoped_config = TrainConfig(
         valid_days=valid_days,
@@ -1268,6 +2130,8 @@ def model_training_frame_from_base(
         start_date=start_date,
         end_date=end_date,
     )
+    if missing_dataframe_columns(base_history_df, LAG_PRICE_COLUMNS + LAG_LOAD_COLUMNS):
+        base_history_df = attach_lag_features(base_history_df)
     effective_start_date, effective_end_date = resolve_training_date_range(base_history_df, scoped_config)
     scoped_df = filter_date_range(base_history_df, effective_start_date, effective_end_date)
     scoped_df = scoped_df.dropna(subset=[TARGET_COLUMN, "net_load"]).reset_index(drop=True)
@@ -1616,6 +2480,229 @@ def summarize_prediction_errors(error_df: pd.DataFrame, predicted_column: str = 
     }
 
 
+def apply_high_price_probability_adjustment(
+    frame: pd.DataFrame,
+    *,
+    price_column: str = "predicted_price",
+    high_probability_column: str = "high_price_probability",
+    extreme_probability_column: str = "extreme_price_probability",
+    high_price_floor: float = 600.0,
+    high_probability_threshold: float = 0.30,
+    extreme_probability_threshold: float = 0.10,
+    max_adjustment: float = 120.0,
+    extreme_max_adjustment: float = 180.0,
+    min_adjustable_price: float = 250.0,
+) -> pd.DataFrame:
+    result = frame.copy()
+    if price_column not in result.columns:
+        result[HIGH_PRICE_ADJUSTED_PRICE_COLUMN] = np.nan
+        result[HIGH_PRICE_ADJUSTMENT_COLUMN] = np.nan
+        result[HIGH_PRICE_ADJUSTMENT_REASON_COLUMN] = ""
+        return result
+    prices = pd.to_numeric(result[price_column], errors="coerce")
+    high_probability = (
+        pd.to_numeric(result[high_probability_column], errors="coerce").fillna(0.0)
+        if high_probability_column in result.columns
+        else pd.Series(0.0, index=result.index)
+    )
+    extreme_probability = (
+        pd.to_numeric(result[extreme_probability_column], errors="coerce").fillna(0.0)
+        if extreme_probability_column in result.columns
+        else pd.Series(0.0, index=result.index)
+    )
+
+    adjusted = prices.copy()
+    eligible = (
+        prices.notna()
+        & (prices >= float(min_adjustable_price))
+        & (prices < float(high_price_floor))
+        & (high_probability >= float(high_probability_threshold))
+    )
+    risk_target = float(high_price_floor) * high_probability + prices * (1.0 - high_probability)
+    adjustment_limit = pd.Series(float(max_adjustment), index=result.index)
+    adjustment_limit.loc[extreme_probability >= float(extreme_probability_threshold)] = float(extreme_max_adjustment)
+    capped_target = pd.concat([risk_target, prices + adjustment_limit], axis=1).min(axis=1)
+    adjusted.loc[eligible] = capped_target.loc[eligible]
+    adjusted = pd.Series(clip_price_series(adjusted.to_numpy(dtype=float)), index=result.index)
+    adjustment = (adjusted - prices).fillna(0.0)
+    result[HIGH_PRICE_ADJUSTED_PRICE_COLUMN] = adjusted
+    result[HIGH_PRICE_ADJUSTMENT_COLUMN] = adjustment
+    result[HIGH_PRICE_ADJUSTMENT_REASON_COLUMN] = np.where(
+        eligible & (adjustment > 0),
+        np.where(
+            extreme_probability >= float(extreme_probability_threshold),
+            "extreme_price_probability",
+            "high_price_probability",
+        ),
+        "",
+    )
+    return result
+
+
+def apply_scenario_similarity_reference_adjustment(
+    frame: pd.DataFrame,
+    *,
+    price_column: str = "predicted_price",
+    similarity_column: str = NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN,
+    min_downward_gap: float = 50.0,
+    renewable_ratio_floor: float = 0.18,
+    renewable_quantile: float = 0.60,
+    net_load_quantile: float = 0.40,
+    high_probability_column: str = "high_price_probability",
+    extreme_probability_column: str = "extreme_price_probability",
+    high_probability_block_threshold: float = 0.30,
+    extreme_probability_block_threshold: float = 0.10,
+    blocked_segments: tuple[str, ...] = ("segment_5",),
+) -> pd.DataFrame:
+    result = frame.copy()
+    required_columns = [price_column, similarity_column, TOTAL_LOAD_COLUMN, RENEWABLE_POWER_COLUMN, "net_load"]
+    if any(column not in result.columns for column in required_columns):
+        prices = pd.to_numeric(result[price_column], errors="coerce") if price_column in result.columns else pd.Series(np.nan, index=result.index)
+        result[SCENARIO_SIMILARITY_ADJUSTED_PRICE_COLUMN] = prices
+        result[SIMILARITY_BLEND_WEIGHT_COLUMN] = 0.0
+        result[SIMILARITY_ADJUSTMENT_COLUMN] = 0.0
+        result[SIMILARITY_ADJUSTMENT_REASON_COLUMN] = ""
+        return result
+
+    prices = pd.to_numeric(result[price_column], errors="coerce")
+    similar = pd.to_numeric(result[similarity_column], errors="coerce")
+    total_load = pd.to_numeric(result[TOTAL_LOAD_COLUMN], errors="coerce")
+    renewable_power = pd.to_numeric(result[RENEWABLE_POWER_COLUMN], errors="coerce")
+    net_load = pd.to_numeric(result["net_load"], errors="coerce")
+    renewable_ratio = (renewable_power / total_load.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+
+    renewable_trigger = pd.Series(False, index=result.index)
+    net_load_trigger = pd.Series(False, index=result.index)
+    group_source = result["date"] if "date" in result.columns else pd.Series("all", index=result.index)
+    for _, index in result.groupby(group_source, dropna=False).groups.items():
+        group_index = pd.Index(index)
+        group_ratio = renewable_ratio.loc[group_index]
+        group_net_load = net_load.loc[group_index]
+        if group_ratio.notna().any():
+            threshold = max(float(renewable_ratio_floor), float(group_ratio.quantile(float(renewable_quantile))))
+            renewable_trigger.loc[group_index] = group_ratio >= threshold
+        if group_net_load.notna().any():
+            net_load_trigger.loc[group_index] = group_net_load <= float(group_net_load.quantile(float(net_load_quantile)))
+
+    high_probability = (
+        pd.to_numeric(result[high_probability_column], errors="coerce").fillna(0.0)
+        if high_probability_column in result.columns
+        else pd.Series(0.0, index=result.index)
+    )
+    extreme_probability = (
+        pd.to_numeric(result[extreme_probability_column], errors="coerce").fillna(0.0)
+        if extreme_probability_column in result.columns
+        else pd.Series(0.0, index=result.index)
+    )
+    blocked_segment_mask = result.get("segment", pd.Series("", index=result.index)).astype(str).isin(blocked_segments)
+    model_minus_similarity = prices - similar
+    downward_mask = (
+        prices.notna()
+        & similar.notna()
+        & (model_minus_similarity >= float(min_downward_gap))
+        & renewable_trigger
+        & (net_load_trigger | (renewable_ratio >= 0.25))
+        & (high_probability < float(high_probability_block_threshold))
+        & (extreme_probability < float(extreme_probability_block_threshold))
+        & ~blocked_segment_mask
+    )
+
+    gap_weight = ((model_minus_similarity - float(min_downward_gap)) / 200.0).clip(lower=0.0, upper=0.25)
+    ratio_weight = (renewable_ratio.fillna(0.0) - float(renewable_ratio_floor)).clip(lower=0.0) * 0.75
+    blend_weight = (0.45 + ratio_weight + gap_weight).clip(lower=0.0, upper=0.85).where(downward_mask, 0.0)
+    adjusted = prices * (1.0 - blend_weight) + similar * blend_weight
+    adjusted = pd.Series(clip_price_series(adjusted.to_numpy(dtype=float)), index=result.index)
+    adjustment = (adjusted - prices).fillna(0.0)
+
+    result[SCENARIO_SIMILARITY_ADJUSTED_PRICE_COLUMN] = adjusted
+    result[SIMILARITY_BLEND_WEIGHT_COLUMN] = blend_weight.fillna(0.0)
+    result[SIMILARITY_ADJUSTMENT_COLUMN] = adjustment
+    result[SIMILARITY_ADJUSTMENT_REASON_COLUMN] = np.where(
+        downward_mask,
+        "renewable_high_net_load_low_model_above_similarity",
+        "",
+    )
+    return result
+
+
+def summarize_high_price_adjustment_effect(
+    frame: pd.DataFrame,
+    *,
+    original_column: str = "predicted",
+    adjusted_column: str = HIGH_PRICE_ADJUSTED_PRICE_COLUMN,
+    high_threshold: float = 600.0,
+) -> dict:
+    overall_original = summarize_prediction_errors(frame, original_column)
+    overall_adjusted = summarize_prediction_errors(frame, adjusted_column)
+    high_frame = filter_price_range(frame, price_min=high_threshold)
+    high_original = summarize_prediction_errors(high_frame, original_column)
+    high_adjusted = summarize_prediction_errors(high_frame, adjusted_column)
+
+    def delta(before: dict, after: dict) -> dict:
+        before_mae = before.get("mae")
+        after_mae = after.get("mae")
+        if before_mae is None or after_mae is None:
+            return {"mae_delta": None, "mae_delta_pct": None}
+        mae_delta = round(float(after_mae) - float(before_mae), 4)
+        mae_delta_pct = None if float(before_mae) == 0 else round(mae_delta / float(before_mae) * 100, 2)
+        return {"mae_delta": mae_delta, "mae_delta_pct": mae_delta_pct}
+
+    return {
+        "overall": {
+            "original": overall_original,
+            "adjusted": overall_adjusted,
+            **delta(overall_original, overall_adjusted),
+        },
+        "high_price": {
+            "threshold": float(high_threshold),
+            "original": high_original,
+            "adjusted": high_adjusted,
+            **delta(high_original, high_adjusted),
+        },
+    }
+
+
+def build_selected_validation_adjustment_frame(
+    validation_records: list[dict] | pd.DataFrame,
+    selected_segment_price_models: dict[str, str],
+    interval_feature_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    records = pd.DataFrame(validation_records)
+    if records.empty or not selected_segment_price_models:
+        return pd.DataFrame()
+    records = records.copy()
+    records["date"] = pd.to_datetime(records["date"], errors="coerce").dt.normalize()
+    selected_mask = records.apply(
+        lambda row: str(row.get("model_key")) == str(selected_segment_price_models.get(str(row.get("segment")))),
+        axis=1,
+    )
+    selected = records.loc[selected_mask].copy()
+    if selected.empty:
+        return selected
+
+    interval_columns = [
+        "date",
+        "period",
+        "segment",
+        "predicted_interval",
+        "predicted_interval_probability",
+        "high_price_probability",
+        "extreme_price_probability",
+        "interval_backtest_accuracy",
+        "interval_probabilities",
+    ]
+    interval_features = interval_feature_frame[[column for column in interval_columns if column in interval_feature_frame.columns]].copy()
+    if interval_features.empty:
+        return apply_high_price_probability_adjustment(selected, price_column="predicted")
+    interval_features["date"] = pd.to_datetime(interval_features["date"], errors="coerce").dt.normalize()
+    merged = selected.merge(
+        interval_features,
+        on=["date", "period", "segment"],
+        how="left",
+    )
+    return apply_high_price_probability_adjustment(merged, price_column="predicted")
+
+
 def filter_price_range(frame: pd.DataFrame, price_min: float | None = None, price_max: float | None = None) -> pd.DataFrame:
     if frame.empty or "actual" not in frame.columns:
         return frame.iloc[0:0].copy()
@@ -1800,6 +2887,21 @@ def top_daily_error_days(error_df: pd.DataFrame, limit: int = 5) -> dict[str, li
     }
 
 
+def rolling_backtest_cache_key(target: str, run_id: str, horizon: int, config_payload: dict[str, object]) -> str:
+    payload = {
+        "target": normalize_model_target(target),
+        "run_id": str(run_id),
+        "horizon": int(horizon),
+        "config": config_payload,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def rolling_backtest_cache_path(model_root: str | Path, cache_key: str) -> Path:
+    return Path(model_root) / "cache" / "rolling_backtest" / f"{cache_key}.json"
+
+
 def rolling_backtest_selected_model(
     history_df: pd.DataFrame,
     feature_columns: list[str],
@@ -1812,18 +2914,37 @@ def rolling_backtest_selected_model(
     high_price_weight_enabled: bool = False,
     high_price_threshold: float | None = None,
     high_price_weight_multiplier: float = 2.0,
+    cache_root: str | Path | None = None,
+    cache_target: str = DAYAHEAD_DATA_MODE,
+    cache_run_id: str | None = None,
+    cache_config_payload: dict[str, object] | None = None,
 ) -> dict:
     segment_definitions = segment_definitions or normalize_segment_config()
     unique_dates = sorted(pd.to_datetime(history_df["date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique().tolist())
     results: dict[str, dict] = {}
     if len(unique_dates) < 3:
         return results
-    baseline_history_df = attach_similarity_features(
-        history_df,
-        reference_days=similarity_reference_days,
-    )
+    baseline_history_df: pd.DataFrame | None = None
 
     for horizon in horizons:
+        cache_path: Path | None = None
+        if cache_root is not None and cache_run_id:
+            cache_key = rolling_backtest_cache_key(cache_target, cache_run_id, horizon, cache_config_payload or {})
+            cache_path = rolling_backtest_cache_path(cache_root, cache_key)
+            if cache_path.exists():
+                try:
+                    cached_result = json.loads(cache_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    cached_result = None
+                if isinstance(cached_result, dict):
+                    results[str(horizon)] = cached_result
+                    continue
+        if baseline_history_df is None:
+            feature_history_df = attach_lag_features(history_df)
+            baseline_history_df = attach_similarity_features(
+                feature_history_df,
+                reference_days=similarity_reference_days,
+            )
         test_dates = unique_dates[-min(horizon, len(unique_dates) - 1):]
         predictions: list[pd.DataFrame] = []
         for test_date in test_dates:
@@ -1873,6 +2994,8 @@ def rolling_backtest_selected_model(
                 )
         if not predictions:
             results[str(horizon)] = {"rows": 0, "overall": summarize_prediction_errors(pd.DataFrame())}
+            if cache_path is not None:
+                write_json(cache_path, results[str(horizon)])
             continue
         error_df = pd.concat(predictions, ignore_index=True)
         segment_metrics = {
@@ -1909,6 +3032,8 @@ def rolling_backtest_selected_model(
                 "low_net_load_only_baseline": summarize_prediction_errors(low_spike_df, "net_load_only_similar_predicted"),
             },
         }
+        if cache_path is not None:
+            write_json(cache_path, results[str(horizon)])
     return results
 
 
@@ -2110,6 +3235,8 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     ensure_xgboost_available()
     emit_progress(progress_callback, "开始加载历史数据", 5)
     history_df, skipped_sheets, quality_report_path = build_training_frame(config, progress_callback=progress_callback)
+    history_signature = history_df.attrs.get("history_signature") or training_history_signature(config)
+    run_fingerprint = training_run_fingerprint(config, history_signature)
     emit_progress(progress_callback, "历史数据加载完成，开始生成训练样本", 20)
     segment_definitions = normalize_segment_config(config.segment_config)
     segment_config_metadata = segment_metadata(segment_definitions)
@@ -2128,14 +3255,40 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     )
     interval_start_date = config.interval_start_date if config.interval_start_date is not None else config.start_date
     interval_end_date = config.interval_end_date if config.interval_end_date is not None else config.end_date
-    interval_history_df = model_training_frame_from_base(
-        full_feature_history_df,
-        training_window_days=interval_training_window_days,
-        valid_days=interval_valid_days,
-        start_date=interval_start_date,
-        end_date=interval_end_date,
+    thermal_capacity_valid_days = int(
+        config.thermal_capacity_valid_days if config.thermal_capacity_valid_days is not None else config.valid_days
     )
-    interval_history_df["segment"] = assign_segments(interval_history_df["period"], segment_definitions)
+    thermal_capacity_training_window_days = (
+        int(config.thermal_capacity_training_window_days)
+        if config.thermal_capacity_training_window_days is not None
+        else config.training_window_days
+    )
+    thermal_capacity_num_boost_round = int(
+        config.thermal_capacity_num_boost_round if config.thermal_capacity_num_boost_round is not None else config.num_boost_round
+    )
+    thermal_capacity_start_date = config.thermal_capacity_start_date if config.thermal_capacity_start_date is not None else config.start_date
+    thermal_capacity_end_date = config.thermal_capacity_end_date if config.thermal_capacity_end_date is not None else config.end_date
+    interval_history_df = pd.DataFrame()
+    if config.train_interval_model:
+        interval_history_df = model_training_frame_from_base(
+            full_feature_history_df,
+            training_window_days=interval_training_window_days,
+            valid_days=interval_valid_days,
+            start_date=interval_start_date,
+            end_date=interval_end_date,
+            similarity_reference_days=config.similarity_reference_days,
+        )
+        interval_history_df["segment"] = assign_segments(interval_history_df["period"], segment_definitions)
+    thermal_capacity_history_df = pd.DataFrame()
+    if config.train_thermal_capacity_model:
+        thermal_capacity_history_df = model_training_frame_from_base(
+            full_feature_history_df,
+            training_window_days=thermal_capacity_training_window_days,
+            valid_days=thermal_capacity_valid_days,
+            start_date=thermal_capacity_start_date,
+            end_date=thermal_capacity_end_date,
+            similarity_reference_days=config.similarity_reference_days,
+        )
     high_price_threshold = None
     if config.high_price_weight_enabled:
         quantile = min(0.99, max(0.5, float(config.high_price_quantile or 0.8)))
@@ -2144,7 +3297,23 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     staging_dir = config.model_root / "_staging" / run_id
     staging_dir.mkdir(parents=True, exist_ok=True)
     feature_variants = direct_model_variants()
+    if config.direct_feature_variant_keys:
+        allowed_variants = set(config.direct_feature_variant_keys)
+        feature_variants = OrderedDict(
+            (key, value)
+            for key, value in feature_variants.items()
+            if key in allowed_variants
+        )
     model_backends = available_model_backends()
+    if config.model_backend_keys:
+        allowed_backends = set(config.model_backend_keys)
+        model_backends = OrderedDict(
+            (key, value)
+            for key, value in model_backends.items()
+            if key in allowed_backends
+        )
+    if not feature_variants:
+        raise RuntimeError("没有可用的直接价格模型特征组合")
     if not model_backends:
         raise RuntimeError("没有可用的模型训练后端")
     model_variants: OrderedDict[str, dict[str, object]] = OrderedDict()
@@ -2215,17 +3384,80 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     }
     selected_variant_meta = model_variants[selected_model_key]
     price_intervals = normalize_price_intervals(config.price_intervals or load_training_preferences(config.model_root).get("price_intervals"))
-    emit_progress(progress_callback, "正在训练价格区间分类模型", 76)
-    price_interval_model = train_interval_models(
-        interval_history_df,
-        target_column=TARGET_COLUMN,
-        feature_columns=list(selected_variant_meta["feature_columns"]),
-        segment_config=segment_config_metadata,
-        output_dir=staging_dir,
-        intervals=price_intervals,
-        valid_days=interval_valid_days,
-        num_boost_round=interval_num_boost_round,
-    )
+    if config.train_interval_model:
+        interval_backends = available_interval_backends()
+        if config.interval_backend_keys:
+            allowed_interval_backends = set(config.interval_backend_keys)
+            interval_backends = {
+                key: value
+                for key, value in interval_backends.items()
+                if key in allowed_interval_backends
+            }
+        if not interval_backends:
+            raise RuntimeError("没有可用的价格区间模型训练后端")
+        emit_progress(progress_callback, "正在训练价格区间分类模型", 76)
+        price_interval_model = train_interval_models(
+            interval_history_df,
+            target_column=TARGET_COLUMN,
+            feature_columns=list(selected_variant_meta["feature_columns"]),
+            segment_config=segment_config_metadata,
+            output_dir=staging_dir,
+            intervals=price_intervals,
+            valid_days=interval_valid_days,
+            num_boost_round=interval_num_boost_round,
+            backends=interval_backends,
+        )
+    else:
+        price_interval_model = {"enabled": False, "metrics": {}, "model_variants": {}}
+    if config.train_thermal_capacity_model:
+        emit_progress(progress_callback, "正在训练日级火电开机容量模型", 77)
+        thermal_capacity_backends = available_thermal_capacity_backends()
+        if config.thermal_capacity_backend_keys:
+            allowed_thermal_backends = set(config.thermal_capacity_backend_keys)
+            thermal_capacity_backends = OrderedDict(
+                (key, value)
+                for key, value in thermal_capacity_backends.items()
+                if key in allowed_thermal_backends
+            )
+        if not thermal_capacity_backends:
+            raise RuntimeError("没有可用的开机容量模型训练后端")
+        thermal_capacity_model = train_thermal_capacity_model(
+            thermal_capacity_history_df,
+            staging_dir / "thermal_capacity_model",
+            valid_days=thermal_capacity_valid_days,
+            num_boost_round=thermal_capacity_num_boost_round,
+            backends=dict(thermal_capacity_backends),
+        )
+    else:
+        thermal_capacity_model = {"enabled": False, "metrics": {}, "reason": "disabled"}
+    high_price_adjustment_metrics = {}
+    try:
+        interval_bundle = load_interval_model_bundle(staging_dir, price_interval_model)
+        if interval_bundle is not None and valid_dates:
+            validation_feature_df = history_df[
+                pd.to_datetime(history_df["date"], errors="coerce").dt.strftime("%Y-%m-%d").isin(valid_dates)
+            ].copy()
+            interval_prediction = predict_interval_probabilities(validation_feature_df, interval_bundle)
+            validation_intervals = normalize_price_intervals(price_interval_model.get("intervals"))
+            interval_feature_df = append_interval_prediction_columns(
+                validation_feature_df,
+                interval_prediction,
+                validation_intervals,
+                price_column=TARGET_COLUMN,
+            )
+            selected_validation_adjustment_df = build_selected_validation_adjustment_frame(
+                validation_records,
+                selected_segment_price_models,
+                interval_feature_df,
+            )
+            high_price_adjustment_metrics = summarize_high_price_adjustment_effect(
+                selected_validation_adjustment_df,
+                original_column="predicted",
+                adjusted_column=HIGH_PRICE_ADJUSTED_PRICE_COLUMN,
+                high_threshold=600.0,
+            )
+    except Exception as exc:
+        high_price_adjustment_metrics = {"error": str(exc)}
     if config.enable_rolling_backtest:
         horizon_text = "/".join(str(item) for item in config.rolling_backtest_horizons) or "14/30"
         emit_progress(progress_callback, f"正在执行最近 {horizon_text} 天滚动回测", 78)
@@ -2241,6 +3473,20 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
             high_price_weight_enabled=config.high_price_weight_enabled,
             high_price_threshold=high_price_threshold,
             high_price_weight_multiplier=config.high_price_weight_multiplier,
+            cache_root=config.feature_cache_root or config.model_root,
+            cache_target=str(config.data_mode or DAYAHEAD_DATA_MODE),
+            cache_run_id=run_fingerprint,
+            cache_config_payload={
+                "feature_columns": list(selected_variant_meta["feature_columns"]),
+                "model_backend": str(selected_variant_meta["model_backend"]),
+                "training_window_days": config.training_window_days,
+                "num_boost_round": config.num_boost_round,
+                "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
+                "segment_config": segment_config_metadata,
+                "high_price_weight_enabled": config.high_price_weight_enabled,
+                "high_price_threshold": high_price_threshold,
+                "high_price_weight_multiplier": config.high_price_weight_multiplier,
+            },
         )
     else:
         rolling_backtest_metrics = {}
@@ -2250,6 +3496,10 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "model_type": "direct_price_multi_model",
         "target_column": TARGET_COLUMN,
+        "target_market": REALTIME_DATA_MODE if str(config.data_mode or DAYAHEAD_DATA_MODE) == REALTIME_DATA_MODE else DAYAHEAD_DATA_MODE,
+        "target_source_column": REALTIME_TARGET_SOURCE_COLUMN if str(config.data_mode or DAYAHEAD_DATA_MODE) == REALTIME_DATA_MODE else TARGET_COLUMN,
+        "data_mode": str(config.data_mode or DAYAHEAD_DATA_MODE),
+        "training_run_fingerprint": run_fingerprint,
         "feature_columns": selected_variant_meta["feature_columns"],
         "model_variants": dict(model_variants),
         "selected_model_key": selected_model_key,
@@ -2259,6 +3509,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "model_backend_candidates": dict(model_backends),
         "variant_quality_metrics": variant_quality_metrics,
         "price_interval_model": price_interval_model,
+        "thermal_capacity_model": thermal_capacity_model,
         "rolling_backtest_metrics": rolling_backtest_metrics,
         "rolling_backtest_horizons": list(config.rolling_backtest_horizons or (14, 30)),
         "segments": segment_config_metadata,
@@ -2290,6 +3541,14 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
             "valid_days": interval_valid_days,
             "num_boost_round": interval_num_boost_round,
         },
+        "thermal_capacity_model_training_config": {
+            "training_window_days": thermal_capacity_training_window_days,
+            "training_mode": "rolling_window" if thermal_capacity_training_window_days else "manual_date_range",
+            "start_date": thermal_capacity_start_date,
+            "end_date": thermal_capacity_end_date,
+            "valid_days": thermal_capacity_valid_days,
+            "num_boost_round": thermal_capacity_num_boost_round,
+        },
         "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
         "xgboost_params": DEFAULT_XGB_PARAMS,
         "train_start_date": train_dates[0] if train_dates else None,
@@ -2303,6 +3562,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "train_config": {
             "history_dir": str(config.history_dir),
             "holiday_file": str(config.holiday_file) if config.holiday_file else None,
+            "data_mode": str(config.data_mode or DAYAHEAD_DATA_MODE),
             "start_date": config.start_date,
             "end_date": config.end_date,
             "training_window_days": config.training_window_days,
@@ -2325,6 +3585,14 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
                 "valid_days": interval_valid_days,
                 "num_boost_round": interval_num_boost_round,
             },
+            "thermal_capacity_model_config": {
+                "training_window_days": thermal_capacity_training_window_days,
+                "training_mode": "rolling_window" if thermal_capacity_training_window_days else "manual_date_range",
+                "start_date": thermal_capacity_start_date,
+                "end_date": thermal_capacity_end_date,
+                "valid_days": thermal_capacity_valid_days,
+                "num_boost_round": thermal_capacity_num_boost_round,
+            },
             "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
             "segment_config": segment_config_metadata,
             "high_price_weighting": {
@@ -2340,6 +3608,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "blend_method": "direct_price_multi_model",
         "metrics": metrics_summary,
         "variant_metrics": variant_metrics,
+        "high_price_adjustment_metrics": high_price_adjustment_metrics,
         "rolling_backtest_metrics": rolling_backtest_metrics,
     }
     metadata_path = staging_dir / "metadata.json"
@@ -2357,6 +3626,9 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
     log_entry = {
         "run_id": run_id,
         "created_at": metadata["created_at"],
+        "target_market": metadata["target_market"],
+        "target_source_column": metadata["target_source_column"],
+        "data_mode": metadata["data_mode"],
         "train_start_date": metadata["train_start_date"],
         "train_end_date": metadata["train_end_date"],
         "valid_dates": valid_dates,
@@ -2367,6 +3639,7 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "training_mode": metadata["training_mode"],
         "price_model_training_config": metadata["price_model_training_config"],
         "interval_model_training_config": metadata["interval_model_training_config"],
+        "thermal_capacity_model_training_config": metadata["thermal_capacity_model_training_config"],
         "similarity_reference_days": normalize_similarity_reference_days(config.similarity_reference_days),
         "metrics": metrics_summary,
         "variant_metrics": variant_metrics,
@@ -2374,7 +3647,9 @@ def train_and_register(config: TrainConfig, progress_callback: ProgressCallback 
         "selected_segment_price_models": selected_segment_price_models,
         "selected_model_backend": selected_variant_meta["model_backend"],
         "price_interval_model": price_interval_model,
+        "thermal_capacity_model": thermal_capacity_model,
         "variant_quality_metrics": variant_quality_metrics,
+        "high_price_adjustment_metrics": high_price_adjustment_metrics,
         "rolling_backtest_metrics": rolling_backtest_metrics,
         "segment_config": segment_config_metadata,
         "high_price_weighting": metadata["high_price_weighting"],
@@ -2466,9 +3741,55 @@ def load_models(model_root: str | Path) -> tuple[dict, dict[str, object], Path]:
         interval_bundle = load_interval_model_bundle(active_dir, metadata.get("price_interval_model"))
         if interval_bundle is not None:
             models["__price_interval__"] = interval_bundle
+        thermal_capacity_metadata = metadata.get("thermal_capacity_model") if isinstance(metadata.get("thermal_capacity_model"), dict) else {}
+        if thermal_capacity_metadata.get("enabled"):
+            thermal_model_path = active_dir / str(thermal_capacity_metadata.get("model_path") or "thermal_capacity_model/thermal_capacity_model.json")
+            if not thermal_model_path.exists():
+                thermal_model_path = active_dir / "thermal_capacity_model" / "thermal_capacity_model.json"
+            if thermal_model_path.exists():
+                thermal_backend = str(thermal_capacity_metadata.get("selected_model_backend") or "xgboost")
+                thermal_model = load_thermal_capacity_backend_model(thermal_model_path, thermal_backend)
+                models["__thermal_capacity__"] = {"backend": thermal_backend, "model": thermal_model, "metadata": thermal_capacity_metadata}
     else:
         raise ValueError("当前模型缺少多模型直接预测配置，请重新训练模型")
     return metadata, models, active_dir
+
+
+def realtime_model_root(model_root: str | Path = DEFAULT_MODEL_ROOT) -> Path:
+    return Path(model_root) / "realtime_price"
+
+
+def realtime_model_available(model_root: str | Path = DEFAULT_MODEL_ROOT) -> bool:
+    return (realtime_model_root(model_root) / "current" / "metadata.json").exists()
+
+
+def merge_realtime_prediction_columns(base_df: pd.DataFrame, realtime_df: pd.DataFrame) -> pd.DataFrame:
+    result = base_df.copy()
+    if result.empty or realtime_df.empty:
+        return result
+    columns = ["date", "period", "predicted_price", "model_variant"]
+    available_columns = [column for column in columns if column in realtime_df.columns]
+    if not {"date", "period", "predicted_price"}.issubset(set(available_columns)):
+        return result
+    right = realtime_df[available_columns].copy()
+    right["date"] = pd.to_datetime(right["date"], errors="coerce").dt.normalize()
+    right["period"] = pd.to_numeric(right["period"], errors="coerce")
+    right = right.rename(
+        columns={
+            "predicted_price": "realtime_predicted_price",
+            "model_variant": "realtime_model_variant",
+        }
+    )
+    left = result.copy()
+    left["date"] = pd.to_datetime(left["date"], errors="coerce").dt.normalize()
+    left["period"] = pd.to_numeric(left["period"], errors="coerce")
+    merged = left.merge(right, on=["date", "period"], how="left")
+    if "predicted_price" in merged.columns and "realtime_predicted_price" in merged.columns:
+        merged["price_spread_realtime_minus_dayahead"] = (
+            pd.to_numeric(merged["realtime_predicted_price"], errors="coerce")
+            - pd.to_numeric(merged["predicted_price"], errors="coerce")
+        )
+    return merged
 
 
 def resolve_forecast_template_column(columns: Iterable[object], target_date: pd.Timestamp, candidates: list[str], required: bool) -> str | None:
@@ -2486,6 +3807,196 @@ def resolve_forecast_template_column(columns: Iterable[object], target_date: pd.
     if matched:
         return matched[0]
     return resolve_column(names, candidates, required=required)
+
+
+def parse_multi_day_header_date(header: object, default_year: int | None = None) -> pd.Timestamp | None:
+    month_day = extract_month_day(header)
+    if month_day is None:
+        return None
+    year = int(default_year or datetime.now().year)
+    try:
+        return pd.Timestamp(year=year, month=month_day[0], day=month_day[1]).normalize()
+    except ValueError:
+        return None
+
+
+def _is_header_match(header: object, keywords: list[str]) -> bool:
+    normalized = normalize_text(header)
+    return all(normalize_text(keyword) in normalized for keyword in keywords)
+
+
+def _first_valid_value(series: pd.Series, field_name: str) -> float:
+    values = to_numeric(series).dropna()
+    if values.empty:
+        raise ValueError(f"预测文件-N天缺少有效{field_name}")
+    return float(values.iloc[0])
+
+
+def parse_multi_day_forecast_workbook(
+    forecast_file: str | Path = DEFAULT_MULTI_DAY_FORECAST_FILE,
+    default_year: int | None = None,
+) -> dict[str, object]:
+    workbook = pd.read_excel(forecast_file, sheet_name=None)
+    non_empty_sheets = [(str(name), df) for name, df in workbook.items() if not df.empty and len(df.columns) > 0]
+    if not non_empty_sheets:
+        raise ValueError("预测文件-N天没有可用工作表")
+    sheet_name, raw_df = non_empty_sheets[0]
+    raw_df = raw_df.copy().reset_index(drop=True)
+    raw_df.columns = [str(column).strip() if column is not None else "" for column in raw_df.columns]
+    if len(raw_df) < 96:
+        raise ValueError("预测文件-N天有效行数不足 96")
+    raw_df = raw_df.iloc[:96].copy()
+    columns = list(raw_df.columns)
+
+    price_col = next((column for column in columns if _is_header_match(column, ["日前出清价格"])), None)
+    if price_col is None:
+        price_col = next((column for column in columns if _is_header_match(column, ["出清价格"])), None)
+    if price_col is None:
+        raise KeyError("预测文件-N天缺少基准日前出清价格列")
+    baseline_date = parse_multi_day_header_date(price_col, default_year)
+    if baseline_date is None:
+        raise ValueError("预测文件-N天无法从基准日前出清价格列识别日期")
+
+    period_col = resolve_column(columns, ["序号", "时段", "period"], required=False)
+    baseline_renewable_col = resolve_forecast_template_column(raw_df.columns, baseline_date, ["风光电力值", "电力值"], required=False)
+    baseline_total_col = resolve_forecast_template_column(raw_df.columns, baseline_date, ["总加电力值"], required=False)
+    baseline_net_col = resolve_forecast_template_column(raw_df.columns, baseline_date, ["剩余电力值", "火电空间", "火电剩余空间"], required=False)
+    thermal_col = resolve_column(columns, ["火电开机容量", "运行机组容量"], required=False)
+    if thermal_col is None:
+        raise KeyError("预测文件-N天缺少火电开机容量列")
+
+    date_columns: dict[str, dict[str, str]] = {}
+    for column in columns:
+        column_date = parse_multi_day_header_date(column, default_year)
+        if column_date is None or column_date == baseline_date:
+            continue
+        key = column_date.strftime("%Y-%m-%d")
+        entry = date_columns.setdefault(key, {})
+        if _is_header_match(column, ["风光"]) or (_is_header_match(column, ["电力值"]) and not _is_header_match(column, ["总加"])):
+            entry["renewable_power_col"] = column
+        if _is_header_match(column, ["总加"]):
+            entry["total_load_col"] = column
+    forecast_dates = [
+        date_key
+        for date_key, mapping in sorted(date_columns.items())
+        if mapping.get("renewable_power_col") and mapping.get("total_load_col")
+    ]
+    if not forecast_dates:
+        raise ValueError("预测文件-N天没有识别到后续预测日的风光/总加电力值列")
+
+    periods = to_numeric(raw_df[period_col]).fillna(0).astype(int).tolist() if period_col else list(range(1, 97))
+    baseline_prices = to_numeric(raw_df[price_col]).tolist()
+    thermal_capacity = _first_valid_value(raw_df[thermal_col], "火电开机容量")
+    if baseline_net_col:
+        baseline_net = to_numeric(raw_df[baseline_net_col])
+    elif baseline_total_col and baseline_renewable_col:
+        baseline_net = to_numeric(raw_df[baseline_total_col]) - to_numeric(raw_df[baseline_renewable_col])
+    else:
+        baseline_net = pd.Series([np.nan] * len(raw_df), index=raw_df.index)
+    baseline_total = to_numeric(raw_df[baseline_total_col]) if baseline_total_col else pd.Series([np.nan] * len(raw_df), index=raw_df.index)
+    baseline_renewable = to_numeric(raw_df[baseline_renewable_col]) if baseline_renewable_col else pd.Series([np.nan] * len(raw_df), index=raw_df.index)
+
+    rows: list[dict[str, object]] = []
+    for index in range(96):
+        forecast_days: dict[str, dict[str, float]] = {}
+        for date_key in forecast_dates:
+            mapping = date_columns[date_key]
+            renewable_power = float(to_numeric(raw_df[mapping["renewable_power_col"]]).iloc[index])
+            total_load = float(to_numeric(raw_df[mapping["total_load_col"]]).iloc[index])
+            forecast_days[date_key] = {
+                "renewable_power": renewable_power,
+                "total_load": total_load,
+                "net_load": total_load - renewable_power,
+            }
+        rows.append(
+            {
+                "period": int(periods[index]) if index < len(periods) and periods[index] else index + 1,
+                "baseline_total_load": float(baseline_total.iloc[index]) if pd.notna(baseline_total.iloc[index]) else np.nan,
+                "baseline_renewable_power": float(baseline_renewable.iloc[index]) if pd.notna(baseline_renewable.iloc[index]) else np.nan,
+                "baseline_net_load": float(baseline_net.iloc[index]) if pd.notna(baseline_net.iloc[index]) else np.nan,
+                "baseline_price": float(baseline_prices[index]),
+                "thermal_on_capacity": thermal_capacity,
+                "forecast_days": forecast_days,
+            }
+        )
+
+    return {
+        "file_path": str(forecast_file),
+        "sheet_name": sheet_name,
+        "baseline_date": baseline_date.strftime("%Y-%m-%d"),
+        "forecast_dates": forecast_dates,
+        "rows": rows,
+    }
+
+
+def build_multi_day_forecast_frame(
+    parsed: dict[str, object],
+    forecast_date: str,
+    holiday_dates: set[pd.Timestamp] | dict[pd.Timestamp, str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    holiday_dates = holiday_dates or set()
+    baseline_date = pd.Timestamp(str(parsed["baseline_date"])).normalize()
+    target_date = pd.Timestamp(str(forecast_date)).normalize()
+    rows = list(parsed.get("rows") or [])
+    forecast_records: list[dict[str, object]] = []
+    reference_records: list[dict[str, object]] = []
+    target_day_type = day_type_of(target_date, holiday_dates)
+    baseline_day_type = day_type_of(baseline_date, holiday_dates)
+    for row in rows:
+        period = int(row["period"])
+        day_values = (row.get("forecast_days") or {}).get(forecast_date)
+        if not isinstance(day_values, dict):
+            raise KeyError(f"预测文件-N天缺少 {forecast_date} 的第 {period} 点数据")
+        total_load = float(day_values["total_load"])
+        renewable_power = float(day_values["renewable_power"])
+        net_load = float(day_values["net_load"])
+        thermal_capacity = float(row["thermal_on_capacity"])
+        forecast_records.append(
+            {
+                "date": target_date,
+                "period": period,
+                "hour": int((period - 1) // 4),
+                "weekday": int(target_date.weekday()),
+                "month": int(target_date.month),
+                "is_weekend": int(target_day_type == "weekend"),
+                "is_holiday": int(target_day_type == "holiday"),
+                DAY_TYPE_COLUMN: target_day_type,
+                TOTAL_LOAD_COLUMN: total_load,
+                "net_load": net_load,
+                RENEWABLE_POWER_COLUMN: renewable_power,
+                THERMAL_SPACE_LOAD_RATIO_COLUMN: net_load / total_load if total_load else np.nan,
+                "thermal_on_capacity": thermal_capacity,
+                "sheet_name": parsed.get("sheet_name") or "multi_day_forecast",
+                "source_file": parsed.get("file_path") or "",
+            }
+        )
+        baseline_total = float(row.get("baseline_total_load") or np.nan)
+        baseline_net = float(row.get("baseline_net_load") or np.nan)
+        reference_records.append(
+            {
+                "date": baseline_date,
+                "period": period,
+                "hour": int((period - 1) // 4),
+                "weekday": int(baseline_date.weekday()),
+                "month": int(baseline_date.month),
+                "is_weekend": int(baseline_day_type == "weekend"),
+                "is_holiday": int(baseline_day_type == "holiday"),
+                DAY_TYPE_COLUMN: baseline_day_type,
+                TOTAL_LOAD_COLUMN: baseline_total,
+                "net_load": baseline_net,
+                RENEWABLE_POWER_COLUMN: float(row.get("baseline_renewable_power") or np.nan),
+                THERMAL_SPACE_LOAD_RATIO_COLUMN: baseline_net / baseline_total if baseline_total else np.nan,
+                "thermal_on_capacity": thermal_capacity,
+                TARGET_COLUMN: float(row["baseline_price"]),
+                "sheet_name": parsed.get("sheet_name") or "multi_day_forecast",
+                "source_file": parsed.get("file_path") or "",
+            }
+        )
+    forecast_df = pd.DataFrame(forecast_records)
+    forecast_df["segment"] = assign_segments(forecast_df["period"])
+    reference_df = pd.DataFrame(reference_records)
+    reference_df["segment"] = assign_segments(reference_df["period"])
+    return forecast_df, reference_df
 
 
 def try_load_forecast_template(
@@ -2942,6 +4453,9 @@ def run_prediction_with_strategy(
         holiday_dates=holiday_dates,
     )
     strategy_forecast_df = attach_forecast_similarity_features(forecast_df, reference_df, knn_similarity_config)
+    strategy_forecast_df = attach_forecast_lag_features(strategy_forecast_df, history_df)
+    if forecast_df.attrs.get("force_template_lag_reference"):
+        strategy_forecast_df = apply_template_reference_lag_features(strategy_forecast_df, template_reference_df)
 
     prediction_frames: list[pd.DataFrame] = []
     total_segments = len(metadata["segments"])
@@ -2966,6 +4480,7 @@ def run_prediction_with_strategy(
         clipped_predicted_price = clip_price_series(raw_predicted_price)
         segment_df["predicted_price"] = clipped_predicted_price
         segment_df["model_variant"] = variant_key
+        segment_df["dayahead_model_version"] = str(metadata.get("run_id") or "")
         segment_df["model_similarity_diff"] = segment_df["predicted_price"] - segment_df[NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN]
         segment_df["residual_pred"] = segment_df["model_similarity_diff"]
         prediction_frames.append(segment_df)
@@ -2977,7 +4492,78 @@ def run_prediction_with_strategy(
         intervals = normalize_price_intervals(interval_metadata.get("intervals"))
         interval_result = predict_interval_probabilities(result_df, interval_bundle)
         result_df = append_interval_prediction_columns(result_df, interval_result, intervals)
+        result_df = apply_high_price_probability_adjustment(result_df)
+    result_df = apply_scenario_similarity_reference_adjustment(result_df)
     return result_df, reference_dates, strategy_key, strategy_label
+
+
+def append_realtime_prediction_if_available(
+    result_df: pd.DataFrame,
+    *,
+    history_dir: str | Path,
+    model_root: str | Path,
+    holiday_file: str | Path | None,
+    forecast_df: pd.DataFrame,
+    template_reference_df: pd.DataFrame | None,
+    holiday_dates: set[pd.Timestamp],
+    reference_days: int,
+    reference_strategy: str,
+    knn_similarity_config: dict[str, object] | None = None,
+    realtime_model_root_override: str | Path | None = None,
+    realtime_model_version_key: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    realtime_root = Path(realtime_model_root_override) if realtime_model_root_override is not None else realtime_model_root(model_root)
+    if not (realtime_root / "current" / "metadata.json").exists():
+        return result_df
+    try:
+        emit_progress(progress_callback, "正在加载实时价格模型", 88)
+        metadata, models, _ = load_models(realtime_root)
+        segment_definitions = normalize_segment_config(metadata.get("segment_config") or metadata.get("segments"))
+        realtime_forecast_df = forecast_df.copy()
+        realtime_forecast_df["segment"] = assign_segments(realtime_forecast_df["period"], segment_definitions)
+        forecast_date = pd.to_datetime(realtime_forecast_df["date"], errors="coerce").min()
+        history_start_date, history_end_date = prediction_history_window(forecast_date, reference_days)
+        realtime_history_df, _, _, _, _ = load_cached_history_collection(
+            history_dir,
+            holiday_file,
+            True,
+            realtime_root,
+            start_date=history_start_date,
+            end_date=history_end_date,
+            data_mode=REALTIME_DATA_MODE,
+        )
+        realtime_history_df["segment"] = assign_segments(realtime_history_df["period"], segment_definitions)
+        realtime_prediction_df, _, _, _ = run_prediction_with_strategy(
+            history_df=realtime_history_df,
+            forecast_df=realtime_forecast_df,
+            template_reference_df=None,
+            holiday_dates=holiday_dates,
+            metadata=metadata,
+            models=models,
+            reference_days=reference_days,
+            reference_strategy=reference_strategy,
+            knn_similarity_config=knn_similarity_config,
+            progress_callback=progress_callback,
+            segment_progress_start=88,
+            segment_progress_span=3,
+        )
+        merged = merge_realtime_prediction_columns(result_df, realtime_prediction_df)
+        merged["realtime_prediction_status"] = "ok"
+        merged["realtime_prediction_error"] = None
+        merged["realtime_model_version"] = str(metadata.get("run_id") or realtime_model_version_key or "")
+        merged.attrs.update(result_df.attrs)
+        merged.attrs["realtime_prediction_status"] = "ok"
+        return merged
+    except Exception as exc:  # noqa: BLE001
+        fallback = result_df.copy()
+        fallback["realtime_prediction_status"] = "failed"
+        fallback["realtime_prediction_error"] = str(exc)
+        fallback.attrs.update(result_df.attrs)
+        fallback.attrs["realtime_prediction_status"] = "failed"
+        fallback.attrs["realtime_prediction_error"] = str(exc)
+        emit_progress(progress_callback, f"实时价格模型预测失败，已保留日前预测结果：{exc}", 91)
+        return fallback
 
 
 def predict_prices(
@@ -2989,6 +4575,9 @@ def predict_prices(
     reference_days: int = 1,
     reference_strategy: str = "recent_n_days",
     knn_similarity_config: dict[str, object] | None = None,
+    thermal_capacity_config: dict[str, object] | None = None,
+    realtime_model_root_override: str | Path | None = None,
+    realtime_model_version_key: str | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> PredictResult:
     ensure_xgboost_available()
@@ -3002,6 +4591,16 @@ def predict_prices(
         progress_callback=progress_callback,
     )
     emit_progress(progress_callback, "正在执行预测策略", 50)
+    thermal_file_value = extract_forecast_thermal_capacity_file_value(forecast_df)
+    thermal_model_value = predict_thermal_capacity_value(
+        forecast_df,
+        models.get("__thermal_capacity__") if isinstance(models, dict) else None,
+        thermal_file_value,
+    )
+    forecast_df = apply_thermal_capacity_choice(
+        forecast_df,
+        build_thermal_capacity_choice(forecast_df, thermal_capacity_config, thermal_model_value),
+    )
     result_df, reference_dates, strategy_key, strategy_label = run_prediction_with_strategy(
         history_df=history_df,
         forecast_df=forecast_df,
@@ -3014,15 +4613,29 @@ def predict_prices(
         knn_similarity_config=knn_similarity_config,
         progress_callback=progress_callback,
     )
+    result_df = append_realtime_prediction_if_available(
+        result_df,
+        history_dir=history_dir,
+        model_root=model_root,
+        holiday_file=holiday_file,
+        forecast_df=forecast_df,
+        template_reference_df=template_reference_df,
+        holiday_dates=holiday_dates,
+        reference_days=reference_days,
+        reference_strategy=strategy_key,
+        knn_similarity_config=knn_similarity_config,
+        realtime_model_root_override=realtime_model_root_override,
+        realtime_model_version_key=realtime_model_version_key,
+        progress_callback=progress_callback,
+    )
     emit_progress(progress_callback, "正在导出预测结果", 92)
     export_prediction(result_df, output_file)
-    template_updated = write_prediction_to_template(forecast_file, result_df)
     emit_progress(progress_callback, "预测任务完成", 100)
     forecast_date = pd.to_datetime(result_df["date"]).dt.strftime("%Y-%m-%d").iloc[0]
     return PredictResult(
         forecast_date=forecast_date,
         output_file=Path(output_file),
-        template_updated=template_updated,
+        template_updated=False,
         reference_strategy_key=strategy_key,
         reference_strategy_label=strategy_label,
         reference_days_requested=reference_days,
@@ -3043,6 +4656,9 @@ def predict_prices_compare(
     same_type_reference_days: int | None = None,
     selected_strategy: str = "recent_n_days",
     knn_similarity_config: dict[str, object] | None = None,
+    thermal_capacity_config: dict[str, object] | None = None,
+    realtime_model_root_override: str | Path | None = None,
+    realtime_model_version_key: str | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> PredictCompareResult:
     ensure_xgboost_available()
@@ -3061,6 +4677,16 @@ def predict_prices_compare(
         holiday_file=holiday_file,
         reference_days=max_reference_days,
         progress_callback=progress_callback,
+    )
+    thermal_file_value = extract_forecast_thermal_capacity_file_value(forecast_df)
+    thermal_model_value = predict_thermal_capacity_value(
+        forecast_df,
+        models.get("__thermal_capacity__") if isinstance(models, dict) else None,
+        thermal_file_value,
+    )
+    forecast_df = apply_thermal_capacity_choice(
+        forecast_df,
+        build_thermal_capacity_choice(forecast_df, thermal_capacity_config, thermal_model_value),
     )
 
     strategy_keys = list(REFERENCE_STRATEGIES.keys())
@@ -3083,6 +4709,21 @@ def predict_prices_compare(
             segment_progress_start=55 + int((strategy_index - 1) * 15),
             segment_progress_span=12,
         )
+        result_df = append_realtime_prediction_if_available(
+            result_df,
+            history_dir=history_dir,
+            model_root=model_root,
+            holiday_file=holiday_file,
+            forecast_df=forecast_df,
+            template_reference_df=template_reference_df,
+            holiday_dates=holiday_dates,
+            reference_days=strategy_reference_days,
+            reference_strategy=strategy_key,
+            knn_similarity_config=knn_similarity_config,
+            realtime_model_root_override=realtime_model_root_override,
+            realtime_model_version_key=realtime_model_version_key,
+            progress_callback=progress_callback,
+        )
         forecast_date = pd.to_datetime(result_df["date"]).dt.strftime("%Y-%m-%d").iloc[0]
         strategy_results[strategy_key] = PredictResult(
             forecast_date=forecast_date,
@@ -3099,20 +4740,19 @@ def predict_prices_compare(
     selected_result = strategy_results[selected_strategy_key]
     emit_progress(progress_callback, "正在导出预测结果", 92)
     export_prediction(selected_result.result_df, output_file)
-    template_updated = write_prediction_to_template(forecast_file, selected_result.result_df)
     emit_progress(progress_callback, f"预测完成，已选择策略 {selected_result.reference_strategy_label}", 100)
 
     return PredictCompareResult(
         forecast_date=selected_result.forecast_date,
         output_file=Path(output_file),
-        template_updated=template_updated,
+        template_updated=False,
         selected_strategy_key=selected_strategy_key,
         selected_strategy_label=REFERENCE_STRATEGIES[selected_strategy_key],
         strategy_results={
             key: PredictResult(
                 forecast_date=value.forecast_date,
                 output_file=value.output_file,
-                template_updated=template_updated if key == selected_strategy_key else False,
+                template_updated=False,
                 reference_strategy_key=value.reference_strategy_key,
                 reference_strategy_label=value.reference_strategy_label,
                 reference_days_requested=value.reference_days_requested,
@@ -3124,6 +4764,102 @@ def predict_prices_compare(
         },
         quality_report_path=quality_report_path,
     )
+
+
+def predict_multi_day_prices(
+    history_dir: str | Path,
+    forecast_file: str | Path = DEFAULT_MULTI_DAY_FORECAST_FILE,
+    model_root: str | Path = DEFAULT_MODEL_ROOT,
+    output_file: str | Path = DEFAULT_MULTI_DAY_OUTPUT_FILE,
+    holiday_file: str | Path | None = None,
+    reference_days: int = 1,
+    knn_similarity_config: dict[str, object] | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> MultiDayPredictResult:
+    ensure_xgboost_available()
+    reference_days = normalize_reference_days(reference_days)
+    knn_similarity_config = normalize_knn_similarity_config(knn_similarity_config)
+    forecast_default_year = default_forecast_year_from_model(model_root)
+    parsed = parse_multi_day_forecast_workbook(forecast_file, default_year=forecast_default_year)
+    baseline_date = str(parsed.get("baseline_date") or "")
+    forecast_dates = list(parsed.get("forecast_dates") or [])
+    if not forecast_dates:
+        raise ValueError("预测文件-N天没有可预测日期")
+    emit_progress(progress_callback, f"已识别 {len(forecast_dates)} 个预测日", 5)
+
+    latest_forecast_date = pd.Timestamp(max(forecast_dates)).normalize()
+    history_start_date, history_end_date = prediction_history_window(latest_forecast_date, reference_days)
+    history_df, _, holiday_dates, _, history_quality_issues = load_cached_history_collection(
+        history_dir,
+        holiday_file,
+        True,
+        model_root,
+        progress_callback=progress_callback,
+        progress_start=8,
+        progress_end=24,
+        progress_label="正在加载多天预测历史数据",
+        start_date=history_start_date,
+        end_date=history_end_date,
+    )
+    emit_progress(progress_callback, "正在加载模型", 26)
+    metadata, models, _ = load_models(model_root)
+    model_segment_definitions = normalize_segment_config(metadata.get("segment_config") or metadata.get("segments"))
+    history_df["segment"] = assign_segments(history_df["period"], model_segment_definitions)
+    quality_report_path = save_quality_report(
+        task_type="predict",
+        status=quality_report_status(history_quality_issues),
+        issues=history_quality_issues,
+        metadata={"forecast_file": str(forecast_file), "history_dir": str(history_dir), "mode": "multi_day"},
+    )
+
+    days: list[dict[str, object]] = []
+    total_days = len(forecast_dates)
+    for index, forecast_date in enumerate(forecast_dates, start=1):
+        emit_progress(progress_callback, f"正在预测 {forecast_date} ({index}/{total_days})", 30 + int((index - 1) / total_days * 55))
+        forecast_df, template_reference_df = build_multi_day_forecast_frame(parsed, forecast_date, holiday_dates)
+        forecast_df["segment"] = assign_segments(forecast_df["period"], model_segment_definitions)
+        forecast_df.attrs["force_template_lag_reference"] = True
+        template_reference_df["segment"] = assign_segments(template_reference_df["period"], model_segment_definitions)
+        result_df, reference_dates, strategy_key, strategy_label = run_prediction_with_strategy(
+            history_df=history_df,
+            forecast_df=forecast_df,
+            template_reference_df=template_reference_df,
+            holiday_dates=holiday_dates,
+            metadata=metadata,
+            models=models,
+            reference_days=reference_days,
+            reference_strategy="recent_n_days",
+            knn_similarity_config=knn_similarity_config,
+            progress_callback=progress_callback,
+            segment_progress_start=32 + int((index - 1) / total_days * 55),
+            segment_progress_span=max(1, int(45 / total_days)),
+        )
+        days.append(
+            {
+                "forecast_date": forecast_date,
+                "reference_strategy_key": strategy_key,
+                "reference_strategy_label": strategy_label,
+                "reference_days_requested": reference_days,
+                "reference_dates": reference_dates,
+                "result_df": result_df,
+                "rows": result_df,
+            }
+        )
+
+    emit_progress(progress_callback, "正在导出多天预测结果", 94)
+    export_multi_day_prediction_workbook({"days": days}, output_file)
+    emit_progress(progress_callback, "多天预测完成", 100)
+    return MultiDayPredictResult(
+        baseline_date=baseline_date,
+        forecast_dates=forecast_dates,
+        output_file=Path(output_file),
+        template_updated=False,
+        selected_strategy_key="recent_n_days",
+        selected_strategy_label=REFERENCE_STRATEGIES["recent_n_days"],
+        days=days,
+        quality_report_path=quality_report_path,
+    )
+
 
 def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:
     output_path = Path(output_file)
@@ -3137,6 +4873,10 @@ def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:
         RENEWABLE_POWER_COLUMN,
         THERMAL_SPACE_LOAD_RATIO_COLUMN,
         "thermal_on_capacity",
+        THERMAL_CAPACITY_SOURCE_COLUMN,
+        THERMAL_CAPACITY_VALUE_COLUMN,
+        THERMAL_CAPACITY_MODEL_VALUE_COLUMN,
+        THERMAL_CAPACITY_FILE_VALUE_COLUMN,
         DAY_TYPE_COLUMN,
         NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN,
         KNN_SIMILAR_PRICE_COLUMN,
@@ -3146,6 +4886,20 @@ def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:
         "model_variant",
         "model_similarity_diff",
         "predicted_price",
+        "realtime_predicted_price",
+        "price_spread_realtime_minus_dayahead",
+        "dayahead_model_version",
+        "realtime_model_version",
+        "realtime_model_variant",
+        "realtime_prediction_status",
+        "realtime_prediction_error",
+        SCENARIO_SIMILARITY_ADJUSTED_PRICE_COLUMN,
+        SIMILARITY_BLEND_WEIGHT_COLUMN,
+        SIMILARITY_ADJUSTMENT_COLUMN,
+        SIMILARITY_ADJUSTMENT_REASON_COLUMN,
+        HIGH_PRICE_ADJUSTED_PRICE_COLUMN,
+        HIGH_PRICE_ADJUSTMENT_COLUMN,
+        HIGH_PRICE_ADJUSTMENT_REASON_COLUMN,
         "predicted_interval",
         "predicted_interval_probability",
         "interval_probabilities",
@@ -3164,6 +4918,121 @@ def export_prediction(result_df: pd.DataFrame, output_file: str | Path) -> None:
         export_df.to_excel(writer, index=False, sheet_name="prediction")
 
 
+def export_multi_day_prediction_workbook(result: dict[str, object] | MultiDayPredictResult, output_file: str | Path) -> Path:
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    days = result.days if isinstance(result, MultiDayPredictResult) else result.get("days", [])
+    if not days:
+        raise ValueError("\u6682\u65e0\u53ef\u5bfc\u51fa\u7684\u591a\u5929\u9884\u6d4b\u7ed3\u679c")
+
+    temp_path = output_path.with_name(f".{output_path.stem}.{uuid.uuid4().hex}.tmp{output_path.suffix or '.xlsx'}")
+
+    column_specs = [
+        ("predicted_price", "\u6a21\u578b\u9884\u6d4b\u4ef7\u683c"),
+        (SCENARIO_SIMILARITY_ADJUSTED_PRICE_COLUMN, "\u573a\u666f\u76f8\u4f3c\u6cd5\u4fee\u6b63\u53c2\u8003\u4ef7"),
+        (NET_LOAD_ONLY_SIMILAR_PRICE_COLUMN, "\u51c0\u8d1f\u8377\u76f8\u4f3c\u6cd5\u9884\u6d4b\u4ef7\u683c"),
+        (KNN_SIMILAR_PRICE_COLUMN, "KNN\u76f8\u4f3c\u6cd5\u9884\u6d4b\u4ef7\u683c"),
+        (WEIGHTED_KNN_PRICE_COLUMN, "\u52a0\u6743KNN\u56de\u5f52\u9884\u6d4b\u4ef7\u683c"),
+        ("predicted_interval", "\u4ef7\u683c\u533a\u95f4"),
+        ("predicted_interval_probability", "\u4ef7\u683c\u533a\u95f4\u6982\u7387"),
+        ("high_price_probability", "\u9ad8\u4ef7\u6982\u7387"),
+    ]
+    written_sheets = 0
+    try:
+        with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+            used_sheet_names: set[str] = set()
+            for index, day in enumerate(days, start=1):
+                forecast_date = str(day.get("forecast_date") or "")
+                rows = day.get("rows")
+                if rows is None:
+                    rows = []
+                if isinstance(rows, pd.DataFrame):
+                    rows_df = rows.sort_values("period").copy() if "period" in rows.columns else rows.copy()
+                else:
+                    rows_df = pd.DataFrame(list(rows)) if rows else pd.DataFrame()
+                    if "period" in rows_df.columns:
+                        rows_df = rows_df.sort_values("period")
+
+                export_data: dict[str, list[object]] = {}
+                for key, label in column_specs:
+                    if key in rows_df.columns:
+                        export_data[f"{forecast_date} {label}".strip()] = rows_df[key].tolist()
+                if not export_data:
+                    fallback_date = forecast_date or f"\u7b2c{index}\u5929"
+                    export_data[f"{fallback_date} \u6a21\u578b\u9884\u6d4b\u4ef7\u683c"] = []
+
+                base_sheet_name = (forecast_date[:31] or f"prediction_{index}")[:31]
+                sheet_name = base_sheet_name
+                suffix = 2
+                while sheet_name in used_sheet_names:
+                    suffix_text = f"_{suffix}"
+                    sheet_name = f"{base_sheet_name[:31 - len(suffix_text)]}{suffix_text}"
+                    suffix += 1
+                used_sheet_names.add(sheet_name)
+                pd.DataFrame(export_data).to_excel(writer, index=False, sheet_name=sheet_name)
+                written_sheets += 1
+
+        if written_sheets <= 0:
+            raise ValueError("\u6682\u65e0\u53ef\u5bfc\u51fa\u7684\u591a\u5929\u9884\u6d4b\u7ed3\u679c")
+        workbook = load_workbook(temp_path)
+        try:
+            if not any(sheet.sheet_state == "visible" for sheet in workbook.worksheets):
+                raise ValueError("\u591a\u5929\u9884\u6d4b\u5bfc\u51fa\u7ed3\u679c\u6ca1\u6709\u53ef\u89c1 Sheet")
+        finally:
+            workbook.close()
+        temp_path.replace(output_path)
+    except Exception:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
+    return output_path
+
+def save_workbook_with_replacement(
+    workbook: object,
+    target_file: str | Path,
+    retries: int = 3,
+    delay_seconds: float = 0.2,
+) -> None:
+    target_path = Path(target_file)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        temp_path = target_path.with_name(f".{target_path.stem}.{uuid.uuid4().hex}.tmp.xlsx")
+        try:
+            workbook.save(temp_path)  # type: ignore[attr-defined]
+            validation_workbook = load_workbook(temp_path, read_only=True, data_only=True)
+            try:
+                if not validation_workbook.sheetnames:
+                    raise ValueError(f"保存预测文件失败：临时文件无可用 Sheet，路径 {temp_path}")
+            finally:
+                validation_workbook.close()
+            temp_path.replace(target_path)
+            return
+        except OSError as exc:
+            last_error = exc
+            gc.collect()
+            if attempt < retries - 1:
+                time.sleep(delay_seconds * (attempt + 1))
+        except Exception:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+            raise
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+    if last_error is not None:
+        raise last_error
+
+
 def write_prediction_to_template(forecast_file: str | Path, result_df: pd.DataFrame) -> bool:
     workbook = load_workbook(forecast_file)
     for sheet in workbook.worksheets:
@@ -3180,8 +5049,12 @@ def write_prediction_to_template(forecast_file: str | Path, result_df: pd.DataFr
         predicted_values = result_df.sort_values("period")["predicted_price"].tolist()
         for row_idx, value in enumerate(predicted_values, start=2):
             sheet.cell(row=row_idx, column=target_col).value = round(float(value), 4)
-        workbook.save(forecast_file)
+        try:
+            save_workbook_with_replacement(workbook, forecast_file)
+        finally:
+            workbook.close()
         return True
+    workbook.close()
     return False
 
 
@@ -3441,6 +5314,190 @@ def version_algorithm_variants(metadata: dict) -> list[dict[str, object | None]]
     ]
 
 
+def version_price_interval_metrics(metadata: dict) -> dict[str, object | None]:
+    interval_model = metadata.get("price_interval_model") if isinstance(metadata.get("price_interval_model"), dict) else {}
+    metrics = interval_model.get("metrics") if isinstance(interval_model.get("metrics"), dict) else {}
+    overall = metrics.get("overall") if isinstance(metrics.get("overall"), dict) else metrics
+    return {
+        "accuracy": nested_metric(overall, "interval_accuracy"),
+        "top2_accuracy": nested_metric(overall, "top2_accuracy"),
+        "logloss": nested_metric(overall, "logloss") or nested_metric(overall, "log_loss"),
+        "high_price_recall": nested_metric(overall, "high_price_recall"),
+        "score": nested_metric(overall, "score"),
+    }
+
+
+def version_interval_training_rows(interval_model: dict) -> dict[str, int | None]:
+    selected_key = interval_model.get("selected_model_key") or interval_model.get("model_key")
+    variant_metrics = interval_model.get("variant_metrics") if isinstance(interval_model.get("variant_metrics"), dict) else {}
+    selected_metrics = variant_metrics.get(selected_key) if selected_key in variant_metrics else None
+    if not isinstance(selected_metrics, dict):
+        selected_metrics = interval_model.get("metrics") if isinstance(interval_model.get("metrics"), dict) else {}
+    segments = selected_metrics.get("segments") if isinstance(selected_metrics.get("segments"), dict) else {}
+    train_rows = 0
+    valid_rows = 0
+    found_train = False
+    found_valid = False
+    for row in segments.values():
+        if not isinstance(row, dict):
+            continue
+        try:
+            train_rows += int(float(row.get("train_rows")))
+            found_train = True
+        except (TypeError, ValueError):
+            pass
+        try:
+            valid_rows += int(float(row.get("valid_rows")))
+            found_valid = True
+        except (TypeError, ValueError):
+            pass
+    return {
+        "train_rows": train_rows if found_train else interval_model.get("train_rows"),
+        "valid_rows": valid_rows if found_valid else interval_model.get("valid_rows"),
+    }
+
+
+def version_thermal_capacity_metrics(metadata: dict) -> dict[str, object | None]:
+    thermal_model = metadata.get("thermal_capacity_model") if isinstance(metadata.get("thermal_capacity_model"), dict) else {}
+    metrics = thermal_model.get("metrics") if isinstance(thermal_model.get("metrics"), dict) else {}
+    overall = metrics.get("overall") if isinstance(metrics.get("overall"), dict) else metrics
+    return {
+        "mae": nested_metric(overall, "mae"),
+        "rmse": nested_metric(overall, "rmse"),
+        "max_error": nested_metric(overall, "max_error"),
+        "bias": nested_metric(overall, "bias"),
+        "score": nested_metric(overall, "score"),
+    }
+
+
+def version_training_config(metadata: dict, key: str, fallback_window: object | None = None, fallback_valid_days: object | None = None) -> dict[str, object | None]:
+    config = metadata.get(key) if isinstance(metadata.get(key), dict) else {}
+    return {
+        "training_mode": config.get("training_mode") or metadata.get("training_mode"),
+        "training_window_days": config.get("training_window_days", fallback_window),
+        "valid_days": config.get("valid_days", fallback_valid_days),
+        "num_boost_round": config.get("num_boost_round") or metadata.get("num_boost_round"),
+        "start_date": config.get("start_date") or metadata.get("train_start_date"),
+        "end_date": config.get("end_date") or metadata.get("train_end_date"),
+    }
+
+
+def build_version_summary(metadata: dict, quality_metrics: dict[str, object | None], rolling_metrics: dict[str, object | None], segment_count: int | None) -> dict[str, object]:
+    interval_model = metadata.get("price_interval_model") if isinstance(metadata.get("price_interval_model"), dict) else {}
+    thermal_model = metadata.get("thermal_capacity_model") if isinstance(metadata.get("thermal_capacity_model"), dict) else {}
+    interval_metrics = version_price_interval_metrics(metadata)
+    interval_rows = version_interval_training_rows(interval_model)
+    thermal_metrics = version_thermal_capacity_metrics(metadata)
+    return {
+        "price_model": {
+            "backend": metadata.get("selected_model_backend"),
+            "backend_label": metadata.get("selected_model_backend_label") or metadata.get("selected_model_backend"),
+            "selected_model_key": metadata.get("selected_model_key"),
+            "mae": quality_metrics.get("final_mae"),
+            "rmse": quality_metrics.get("final_rmse"),
+            "rolling_30_mae": rolling_metrics.get("rolling_30_mae"),
+            "rolling_30_rmse": rolling_metrics.get("rolling_30_rmse"),
+            "high_price_mae": rolling_metrics.get("rolling_30_high_price_mae"),
+            "training_window_days": metadata.get("training_window_days"),
+            "valid_days": metadata.get("valid_days"),
+            "sample_rows": metadata.get("sample_rows"),
+            "segment_count": segment_count,
+        },
+        "price_interval_model": {
+            "enabled": interval_model.get("enabled"),
+            "selected_model_key": interval_model.get("selected_model_key") or interval_model.get("model_key"),
+            "accuracy": interval_metrics.get("accuracy"),
+            "top2_accuracy": interval_metrics.get("top2_accuracy"),
+            "logloss": interval_metrics.get("logloss"),
+            "high_price_recall": interval_metrics.get("high_price_recall"),
+            "interval_count": len(interval_model.get("intervals") or []) if isinstance(interval_model.get("intervals"), list) else None,
+            "train_rows": interval_rows.get("train_rows"),
+            "valid_rows": interval_rows.get("valid_rows"),
+            "feature_count": len(interval_model.get("feature_columns") or []) if isinstance(interval_model.get("feature_columns"), list) else None,
+        },
+        "thermal_capacity_model": {
+            "enabled": thermal_model.get("enabled"),
+            "selected_model_key": thermal_model.get("selected_model_key"),
+            "selected_model_backend": thermal_model.get("selected_model_backend"),
+            "selected_model_backend_label": thermal_model.get("selected_model_backend_label") or thermal_model.get("selected_model_backend"),
+            "candidate_count": len(thermal_model.get("model_variants") or {}) if isinstance(thermal_model.get("model_variants"), dict) else None,
+            "mae": thermal_metrics.get("mae"),
+            "rmse": thermal_metrics.get("rmse"),
+            "max_error": thermal_metrics.get("max_error"),
+            "bias": thermal_metrics.get("bias"),
+            "feature_count": len(thermal_model.get("feature_columns") or []) if isinstance(thermal_model.get("feature_columns"), list) else None,
+        },
+    }
+
+
+def build_version_detail(metadata: dict, algorithm_variants: list[dict[str, object | None]], segment_config: list | None) -> dict[str, object]:
+    interval_model = metadata.get("price_interval_model") if isinstance(metadata.get("price_interval_model"), dict) else {}
+    thermal_model = metadata.get("thermal_capacity_model") if isinstance(metadata.get("thermal_capacity_model"), dict) else {}
+    interval_metrics = version_price_interval_metrics(metadata)
+    interval_rows = version_interval_training_rows(interval_model)
+    thermal_metrics = version_thermal_capacity_metrics(metadata)
+    intervals = interval_model.get("intervals") if isinstance(interval_model.get("intervals"), list) else []
+    interval_features = interval_model.get("feature_columns") if isinstance(interval_model.get("feature_columns"), list) else []
+    thermal_features = thermal_model.get("feature_columns") if isinstance(thermal_model.get("feature_columns"), list) else []
+    return {
+        "training": {
+            "price": version_training_config(metadata, "price_model_training_config", metadata.get("training_window_days"), metadata.get("valid_days")),
+            "interval": version_training_config(
+                metadata,
+                "interval_model_training_config",
+                metadata.get("interval_training_window_days"),
+                metadata.get("interval_valid_days"),
+            ),
+            "thermal_capacity": version_training_config(
+                metadata,
+                "thermal_capacity_model_training_config",
+                metadata.get("thermal_capacity_training_window_days"),
+                metadata.get("thermal_capacity_valid_days"),
+            ),
+        },
+        "price_model": {
+            "selected_model_key": metadata.get("selected_model_key"),
+            "selected_model_backend": metadata.get("selected_model_backend"),
+            "selected_model_backend_label": metadata.get("selected_model_backend_label") or metadata.get("selected_model_backend"),
+            "algorithm_variants": algorithm_variants,
+            "selected_segment_price_models": metadata.get("selected_segment_price_models") if isinstance(metadata.get("selected_segment_price_models"), dict) else {},
+            "model_backend_candidates": metadata.get("model_backend_candidates") if isinstance(metadata.get("model_backend_candidates"), list) else [],
+            "variant_quality_metrics": metadata.get("variant_quality_metrics") if isinstance(metadata.get("variant_quality_metrics"), dict) else {},
+            "segment_config": segment_config or [],
+            "segment_count": len(segment_config or []),
+            "high_price_weighting": metadata.get("high_price_weighting") if isinstance(metadata.get("high_price_weighting"), dict) else {},
+            "high_price_adjustment_metrics": metadata.get("high_price_adjustment_metrics") if isinstance(metadata.get("high_price_adjustment_metrics"), dict) else {},
+            "rolling_backtest_metrics": metadata.get("rolling_backtest_metrics") if isinstance(metadata.get("rolling_backtest_metrics"), dict) else {},
+        },
+        "price_interval_model": {
+            "enabled": interval_model.get("enabled"),
+            "selected_model_key": interval_model.get("selected_model_key") or interval_model.get("model_key"),
+            "selected_model_backend": interval_model.get("selected_model_backend"),
+            "selected_model_backend_label": interval_model.get("selected_model_backend_label") or interval_model.get("selected_model_backend"),
+            "metrics": interval_metrics,
+            "intervals": intervals,
+            "interval_count": len(intervals),
+            "feature_columns": interval_features,
+            "feature_count": len(interval_features),
+            "train_rows": interval_rows.get("train_rows"),
+            "valid_rows": interval_rows.get("valid_rows"),
+        },
+        "thermal_capacity_model": {
+            "enabled": thermal_model.get("enabled"),
+            "selected_model_key": thermal_model.get("selected_model_key"),
+            "selected_model_backend": thermal_model.get("selected_model_backend"),
+            "selected_model_backend_label": thermal_model.get("selected_model_backend_label") or thermal_model.get("selected_model_backend"),
+            "model_variants": thermal_model.get("model_variants") if isinstance(thermal_model.get("model_variants"), dict) else {},
+            "variant_metrics": thermal_model.get("variant_metrics") if isinstance(thermal_model.get("variant_metrics"), dict) else {},
+            "metrics": thermal_metrics,
+            "feature_columns": thermal_features,
+            "feature_count": len(thermal_features),
+            "train_rows": thermal_model.get("train_rows"),
+            "valid_rows": thermal_model.get("valid_rows"),
+        },
+    }
+
+
 def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
     current_dir, previous_dir, history_dir = ensure_model_dirs(model_root)
     current_metadata = read_model_metadata(current_dir)
@@ -3460,7 +5517,12 @@ def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
             continue
         quality_metrics = summarize_model_quality_metrics(metadata.get("metrics"))
         segment_config = metadata.get("segment_config") or metadata.get("segments") or []
+        segment_count = len(segment_config) if isinstance(segment_config, list) else None
         high_price_weighting = metadata.get("high_price_weighting") if isinstance(metadata.get("high_price_weighting"), dict) else {}
+        rolling_metrics = version_rolling_metrics(metadata)
+        algorithm_variants = version_algorithm_variants(metadata)
+        version_summary = build_version_summary(metadata, quality_metrics, rolling_metrics, segment_count)
+        version_detail = build_version_detail(metadata, algorithm_variants, segment_config if isinstance(segment_config, list) else [])
         rows.append(
             {
                 "version_key": run_dir.name,
@@ -3480,9 +5542,9 @@ def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
                 "selected_model_key": metadata.get("selected_model_key"),
                 "selected_model_backend": metadata.get("selected_model_backend"),
                 "selected_model_backend_label": metadata.get("selected_model_backend_label") or metadata.get("selected_model_backend"),
-                "algorithm_variants": version_algorithm_variants(metadata),
+                "algorithm_variants": algorithm_variants,
                 "segment_mode": metadata.get("segment_mode") or ("custom" if metadata.get("segment_config") else "default"),
-                "segment_count": len(segment_config) if isinstance(segment_config, list) else None,
+                "segment_count": segment_count,
                 "high_price_weight_enabled": high_price_weighting.get("enabled"),
                 "high_price_quantile": high_price_weighting.get("quantile"),
                 "high_price_weight_multiplier": high_price_weighting.get("multiplier"),
@@ -3491,7 +5553,9 @@ def list_model_versions(model_root: Path = DEFAULT_MODEL_ROOT) -> pd.DataFrame:
                 "baseline_rmse": quality_metrics.get("baseline_rmse"),
                 "final_mae": quality_metrics.get("final_mae"),
                 "final_rmse": quality_metrics.get("final_rmse"),
-                **version_rolling_metrics(metadata),
+                **rolling_metrics,
+                "version_summary": version_summary,
+                "version_detail": version_detail,
                 "path": str(run_dir),
             }
         )

@@ -11,13 +11,16 @@ import pandas as pd
 from dayahead_core import (
     DEFAULT_HISTORY_DIR,
     DEFAULT_MODEL_ROOT,
+    REALTIME_TARGET_SOURCE_COLUMN,
     TARGET_COLUMN,
     DayAheadDataBuilder,
     calculate_metrics,
     list_excel_files_for_date_window,
     load_holiday_calendar,
     parse_sheet_date,
+    resolve_column,
     summarize_prediction_errors,
+    to_numeric,
 )
 
 
@@ -61,16 +64,20 @@ def write_archive_index(archive_root: str | Path, index: dict) -> None:
     path.write_text(json.dumps(json_safe(index), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def rounded_prediction_prices(rows: list[dict[str, Any]]) -> list[float | None]:
+def rounded_prediction_column(rows: list[dict[str, Any]], column: str) -> list[float | None]:
     result: list[float | None] = []
     ordered_rows = sorted(rows or [], key=lambda row: int(row.get("period") or 0))
     for row in ordered_rows:
-        value = row.get("predicted_price")
+        value = row.get(column)
         try:
             result.append(round(float(value), 2))
         except (TypeError, ValueError):
             result.append(None)
     return result
+
+
+def rounded_prediction_prices(rows: list[dict[str, Any]]) -> list[float | None]:
+    return rounded_prediction_column(rows, "predicted_price")
 
 
 def prediction_fingerprint(record: dict[str, Any]) -> str:
@@ -79,6 +86,14 @@ def prediction_fingerprint(record: dict[str, Any]) -> str:
         key: {
             "reference_days_requested": value.get("reference_days_requested"),
             "rounded_predicted_price": rounded_prediction_prices(value.get("rows") or []),
+            "rounded_realtime_predicted_price": rounded_prediction_column(
+                value.get("rows") or [],
+                "realtime_predicted_price",
+            ),
+            "rounded_scenario_similarity_adjusted_price": rounded_prediction_column(
+                value.get("rows") or [],
+                "scenario_similarity_adjusted_price",
+            ),
         }
         for key, value in sorted(comparisons.items())
     }
@@ -91,6 +106,14 @@ def prediction_fingerprint(record: dict[str, Any]) -> str:
         "model_run_id": record.get("model_run_id"),
         "selected_segment_price_models": record.get("selected_segment_price_models") or {},
         "rounded_predicted_price": rounded_prediction_prices(record.get("rows") or []),
+        "rounded_realtime_predicted_price": rounded_prediction_column(
+            record.get("rows") or [],
+            "realtime_predicted_price",
+        ),
+        "rounded_scenario_similarity_adjusted_price": rounded_prediction_column(
+            record.get("rows") or [],
+            "scenario_similarity_adjusted_price",
+        ),
     }
     raw = json.dumps(json_safe(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -265,38 +288,63 @@ def load_actual_prices_for_date(
                     continue
                 if day_df.empty:
                     continue
-                return (
+                actual_df = (
                     day_df[["period", TARGET_COLUMN]]
                     .rename(columns={TARGET_COLUMN: "actual_price"})
                     .sort_values("period")
                     .reset_index(drop=True)
                 )
+                realtime_target_col = resolve_column(
+                    raw_df.columns,
+                    [REALTIME_TARGET_SOURCE_COLUMN, "实时-出清价格(元/MWh)", "实时出清价格"],
+                    required=False,
+                )
+                if realtime_target_col:
+                    realtime_values = to_numeric(raw_df.iloc[: len(actual_df)][realtime_target_col]).reset_index(drop=True)
+                    actual_df["realtime_actual_price"] = realtime_values
+                return actual_df
         finally:
             workbook.close()
     return pd.DataFrame()
 
 
-def compare_archive_with_actual(record: dict[str, Any], actual_df: pd.DataFrame) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+def archive_prediction_metrics(merged: pd.DataFrame, record: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    metric_columns = [
+        ("predicted_price", "actual_price"),
+        ("scenario_similarity_adjusted_price", "actual_price"),
+        ("net_load_only_similar_price", "actual_price"),
+        ("realtime_predicted_price", "realtime_actual_price"),
+    ]
+    for column, actual_column in metric_columns:
+        if column not in merged.columns or actual_column not in merged.columns:
+            continue
+        metric_df = pd.DataFrame(
+            {
+                "date": merged.get("date", record.get("forecast_date")),
+                "period": merged["period"],
+                "actual": pd.to_numeric(merged[actual_column], errors="coerce"),
+                "predicted": pd.to_numeric(merged[column], errors="coerce"),
+            }
+        ).dropna(subset=["actual", "predicted"])
+        if metric_df.empty:
+            continue
+        result[column] = summarize_prediction_errors(metric_df)
+    return result
+
+
+def compare_archive_with_actual(record: dict[str, Any], actual_df: pd.DataFrame) -> tuple[list[dict[str, Any]], dict[str, Any] | None, dict[str, Any]]:
     prediction_df = pd.DataFrame(record.get("rows") or [])
     if prediction_df.empty:
-        return [], None
+        return [], None, {}
     prediction_df["period"] = pd.to_numeric(prediction_df["period"], errors="coerce").astype("Int64")
     if actual_df.empty:
         rows = prediction_df.sort_values("period").to_dict(orient="records")
-        return json_safe(rows), None
+        return json_safe(rows), None, {}
     merged = prediction_df.merge(actual_df, on="period", how="left").sort_values("period")
-    metric_df = pd.DataFrame(
-        {
-            "date": merged.get("date", record.get("forecast_date")),
-            "period": merged["period"],
-            "actual": pd.to_numeric(merged["actual_price"], errors="coerce"),
-            "predicted": pd.to_numeric(merged["predicted_price"], errors="coerce"),
-        }
-    ).dropna(subset=["actual", "predicted"])
-    if metric_df.empty:
-        return json_safe(merged.to_dict(orient="records")), None
-    metrics = summarize_prediction_errors(metric_df)
-    return json_safe(merged.to_dict(orient="records")), metrics
+    prediction_metrics = archive_prediction_metrics(merged, record)
+    metrics = prediction_metrics.get("predicted_price")
+    return json_safe(merged.to_dict(orient="records")), metrics, prediction_metrics
 
 
 def load_prediction_archive_detail(
@@ -308,22 +356,24 @@ def load_prediction_archive_detail(
 ) -> dict[str, Any]:
     record = load_archive_record(archive_root, archive_id)
     actual_df = load_actual_prices_for_date(record["forecast_date"], history_dir, model_root, holiday_file)
-    rows, metrics = compare_archive_with_actual(record, actual_df)
+    rows, metrics, prediction_metrics = compare_archive_with_actual(record, actual_df)
     comparison_details: dict[str, Any] = {}
     comparisons = record.get("comparison_predictions") if isinstance(record.get("comparison_predictions"), dict) else {}
     for key, variant in comparisons.items():
         variant_record = {**record, **variant, "rows": variant.get("rows") or []}
-        variant_rows, variant_metrics = compare_archive_with_actual(variant_record, actual_df)
+        variant_rows, variant_metrics, variant_prediction_metrics = compare_archive_with_actual(variant_record, actual_df)
         comparison_details[key] = {
             **variant,
             "rows": variant_rows,
             "metrics": variant_metrics,
+            "prediction_metrics": variant_prediction_metrics,
         }
     actual_available = not actual_df.empty and metrics is not None
     return {
         "record": record,
         "rows": rows,
         "metrics": metrics,
+        "prediction_metrics": prediction_metrics,
         "comparison_predictions": comparison_details,
         "actual_available": bool(actual_available),
         "message": None if actual_available else "暂无实际价格数据",

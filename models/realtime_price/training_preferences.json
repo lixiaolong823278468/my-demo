@@ -1,0 +1,94 @@
+{
+  "segment_mode": "custom",
+  "segment_config": [
+    {
+      "name": "segment_1",
+      "start": 1,
+      "end": 20,
+      "start_time": "00:00",
+      "end_time": "05:00"
+    },
+    {
+      "name": "segment_2",
+      "start": 21,
+      "end": 34,
+      "start_time": "05:00",
+      "end_time": "08:30"
+    },
+    {
+      "name": "segment_3",
+      "start": 35,
+      "end": 66,
+      "start_time": "08:30",
+      "end_time": "16:30"
+    },
+    {
+      "name": "segment_4",
+      "start": 67,
+      "end": 72,
+      "start_time": "16:30",
+      "end_time": "18:00"
+    },
+    {
+      "name": "segment_5",
+      "start": 73,
+      "end": 88,
+      "start_time": "18:00",
+      "end_time": "22:00"
+    },
+    {
+      "name": "segment_6",
+      "start": 89,
+      "end": 96,
+      "start_time": "22:00",
+      "end_time": "24:00"
+    }
+  ],
+  "high_price_weighting": {
+    "enabled": false,
+    "quantile": 0.8,
+    "multiplier": 2.0
+  },
+  "price_intervals": [
+    {
+      "label": "0-250",
+      "min": 0.0,
+      "max": 250.0
+    },
+    {
+      "label": "250-300",
+      "min": 250.0,
+      "max": 300.0
+    },
+    {
+      "label": "300-400",
+      "min": 300.0,
+      "max": 400.0
+    },
+    {
+      "label": "400-600",
+      "min": 400.0,
+      "max": 600.0
+    },
+    {
+      "label": "600-1000",
+      "min": 600.0,
+      "max": 1000.0
+    },
+    {
+      "label": "1000-1500",
+      "min": 1000.0,
+      "max": 1500.0
+    }
+  ],
+  "prediction_reference": {
+    "recent_reference_days": 1,
+    "same_type_reference_days": 1,
+    "knn_similarity": {
+      "knn_k": 5,
+      "knn_max_distance": 3.0,
+      "weighted_knn_k": 5,
+      "weighted_knn_max_distance": 3.0
+    }
+  }
+}

@@ -17,6 +17,7 @@
         <nav class="tabs-bar" aria-label="主导航">
           <button class="tab-btn active" data-tab="train"><span>📈</span>训练中心</button>
           <button class="tab-btn" data-tab="predict"><span>⚡</span>预测中心</button>
+          <button class="tab-btn" data-tab="predict-multi-day"><span>📅</span>预测多天价格</button>
           <button class="tab-btn" data-tab="versions"><span>📦</span>模型版本</button>
           <button class="tab-btn" data-tab="logs"><span>📊</span>训练日志</button>
           <button class="tab-btn" data-tab="data-quality"><span>🧾</span>数据异常</button>
@@ -107,6 +108,40 @@
             <button class="cleanup-btn" id="cleanup-output-btn" type="button">一键清理垃圾</button>
           </div>
 
+          <section class="dual-training-control" id="dual-training-control">
+            <div class="dual-training-control-main">
+              <div class="train-card-accent">DUAL</div>
+              <div>
+                <div class="section-title">两套价格模型一键训练</div>
+                <div class="hint-text">按顺序执行日前模型和实时模型的自动寻优、训练与回测。某一套失败时会记录失败，并继续执行另一套。</div>
+              </div>
+            </div>
+            <div class="actions-row dual-training-actions">
+              <button class="primary-btn" id="dual-optimize-window-btn" type="button">一键训练两套价格模型</button>
+            </div>
+            <div class="embedded-progress-row">
+              <div class="progress-card progress-card-dual-optimize" id="dual-optimize-progress-card">
+                <div class="progress-header">
+                  <span class="progress-title">总控任务进度</span>
+                  <span class="progress-state-text" id="dual-optimize-progress-text">未开始</span>
+                </div>
+                <div class="progress-status-line" id="dual-optimize-progress-status">等待一键训练两套模型</div>
+                <div class="progress-track">
+                  <div class="progress-fill" id="dual-optimize-progress-fill"></div>
+                </div>
+              </div>
+              <button class="stop-btn hidden" id="stop-dual-optimize-btn" type="button">停止总控任务</button>
+            </div>
+          </section>
+
+          <section class="target-training-suite dayahead-suite" id="dayahead-training-suite">
+            <div class="target-suite-header">
+              <div>
+                <div class="section-title">日前价格模型训练</div>
+                <div class="hint-text">保留原有日前训练逻辑：时段参数、区间概率、自动寻优和手动训练都只作用于日前模型。</div>
+              </div>
+            </div>
+
           <div class="train-config-grid">
           <div class="train-workflow-card train-workflow-card-model">
             <div class="train-card-accent">MODEL</div>
@@ -133,7 +168,7 @@
               <label class="field">
                 <span>时段模式</span>
                 <select id="segment-mode">
-                  <option value="default">系统默认 5 段</option>
+                  <option value="default">系统默认 6 段</option>
                   <option value="custom">自定义时段</option>
                 </select>
               </label>
@@ -147,12 +182,12 @@
                   <option value="2">2 段</option>
                   <option value="3">3 段</option>
                   <option value="4">4 段</option>
-                  <option value="5" selected>5 段</option>
-                  <option value="6">6 段</option>
+                  <option value="5">5 段</option>
+                  <option value="6" selected>6 段</option>
                   <option value="8">8 段</option>
                 </select>
               </label>
-              <div class="field hint-text" id="segment-validation-text">使用系统默认 5 段</div>
+              <div class="field hint-text" id="segment-validation-text">使用系统默认 6 段</div>
             </div>
 
             <div class="table-shell table-frame table-frame-sm">
@@ -204,7 +239,7 @@
           </div>
 
           <div class="train-action-grid">
-          <div class="train-workflow-card train-workflow-card-auto">
+          <div class="train-workflow-card train-workflow-card-auto" id="dayahead-training-panel">
             <div class="train-card-accent">AUTO</div>
             <div class="section-header">
               <div>
@@ -240,7 +275,7 @@
             <div class="field segment-search-field">
               <span>参与时段数</span>
               <div class="segment-search-counts" id="segment-search-counts"></div>
-              <small>默认勾选 3 段和 6 段；每个勾选段数会独立寻优并保存一个候选模型版本，耗时会相应增加。</small>
+              <small>默认勾选 6 段；修改上方切分段数后会同步到这里，每个勾选段数会独立寻优并保存一个候选模型版本，耗时会相应增加。</small>
             </div>
 
             <div class="actions-row">
@@ -261,6 +296,31 @@
               </div>
               <button class="stop-btn hidden" id="stop-optimize-btn" type="button">停止寻优</button>
             </div>
+
+          </div>
+
+          <div class="train-workflow-card realtime-train-panel legacy-realtime-panel" id="legacy-realtime-training-panel">
+              <div class="train-card-accent">REALTIME</div>
+              <div>
+                <div class="mini-section-title">实时价格模型自动寻优</div>
+                <div class="hint-text">复用上方自动寻优参数，训练目标为实时出清价格；不训练开机容量模型，不影响当前日前模型。</div>
+              </div>
+              <div class="actions-row compact-actions">
+                <button class="ghost-btn" id="legacy-realtime-optimize-window-btn" type="button">训练实时价格模型</button>
+              </div>
+              <div class="embedded-progress-row">
+                <div class="progress-card progress-card-realtime-optimize" id="legacy-realtime-optimize-progress-card">
+                  <div class="progress-header">
+                    <span class="progress-title">实时模型进度</span>
+                    <span class="progress-state-text" id="legacy-realtime-optimize-progress-text">未开始</span>
+                  </div>
+                  <div class="progress-status-line" id="legacy-realtime-optimize-progress-status">等待手动点击训练实时价格模型</div>
+                  <div class="progress-track">
+                    <div class="progress-fill" id="legacy-realtime-optimize-progress-fill"></div>
+                  </div>
+                </div>
+                <button class="stop-btn hidden" id="legacy-stop-realtime-optimize-btn" type="button">停止实时模型训练</button>
+              </div>
           </div>
 
           <div class="train-workflow-card train-workflow-card-manual">
@@ -379,8 +439,8 @@
             </div>
 
             <div class="actions-row manual-actions-row">
-              <span class="hint-text">手动训练会在同一次任务里分别训练两套模型，各自使用上面的参数。</span>
-              <button class="primary-btn" id="train-btn">手动重训模型</button>
+              <span class="hint-text">手动训练使用本区域参数，只重训日前价格模型。</span>
+              <button class="primary-btn" id="train-btn">手动重训日前模型</button>
             </div>
 
             <div class="embedded-progress-row">
@@ -398,95 +458,228 @@
             </div>
           </div>
           </div>
+          </section>
 
-          <div class="train-metrics-section">
-          <div class="subsection-title">当前默认模型版本分时段指标</div>
-          <div class="table-shell table-frame table-frame-md">
-            <table class="data-table" id="metrics-table">
-              <thead>
-                <tr>
-                  <th>分时段</th>
-                  <th>净负荷相似法 MAE</th>
-                  <th>净负荷相似法 RMSE</th>
-                  <th>模型 MAE</th>
-                  <th>模型 RMSE</th>
-                  <th>训练样本数</th>
-                  <th>验证样本数</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-
-          <div class="subsection-title">模型算法对比</div>
-          <div class="table-shell table-frame table-frame-sm">
-            <table class="data-table" id="model-compare-table">
-              <thead>
-                <tr>
-                  <th>算法</th>
-                  <th>是否选中</th>
-                  <th>MAE</th>
-                  <th>RMSE</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-
-          <div class="subsection-title">最近 14/30 天滚动回测</div>
-          <div class="table-shell table-frame table-frame-sm">
-            <div class="table-scroll">
-              <table class="data-table" id="rolling-backtest-table">
-                <thead>
-                  <tr>
-                    <th>窗口</th>
-                    <th>模型 MAE</th>
-                    <th>模型 RMSE</th>
-                    <th>净负荷相似法 MAE</th>
-                    <th>较净负荷相似法提升</th>
-                    <th>方向准确率</th>
-                    <th>高价尖峰 MAE</th>
-                    <th>晚高峰 MAE</th>
-                    <th>最大误差</th>
-                    <th>样本数</th>
-                  </tr>
-                </thead>
-                <tbody></tbody>
-              </table>
+          <section class="target-training-suite realtime-suite" id="realtime-training-suite">
+            <div class="target-suite-header">
+              <div>
+                <div class="section-title">实时价格模型训练</div>
+                <div class="hint-text">实时模型独立维护自己的时段、区间、寻优和手动训练参数；训练实时价格，不训练开机容量模型。</div>
+              </div>
             </div>
-          </div>
 
-          <div class="subsection-title">模型直观诊断</div>
-          <div class="table-shell table-frame table-frame-sm">
-            <table class="data-table" id="model-health-table">
-              <thead>
-                <tr>
-                  <th>观察角度</th>
-                  <th>数值</th>
-                  <th>怎么理解</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
+            <div class="train-config-grid">
+              <div class="train-workflow-card train-workflow-card-model">
+                <div class="train-card-accent">MODEL</div>
+                <div class="section-header compact">
+                  <div>
+                    <div class="section-title">模型时段、参数配置</div>
+                    <div class="hint-text">仅作用于实时价格模型，默认从日前配置复制一份，后续可独立调整。</div>
+                  </div>
+                </div>
+                <div class="form-grid four-col">
+                  <label class="field">
+                    <span>启用高价样本加权</span>
+                    <input type="checkbox" id="realtime-high-price-weight-enabled" />
+                  </label>
+                  <label class="field">
+                    <span>高价阈值分位</span>
+                    <input type="number" id="realtime-high-price-quantile" min="0.5" max="0.99" step="0.01" value="0.8" />
+                  </label>
+                  <label class="field">
+                    <span>高价权重倍数</span>
+                    <input type="number" id="realtime-high-price-multiplier" min="1" max="10" step="0.1" value="2" />
+                  </label>
+                  <label class="field">
+                    <span>时段模式</span>
+                    <select id="realtime-segment-mode">
+                      <option value="default">系统默认 6 段</option>
+                      <option value="custom">自定义时段</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="form-grid four-col">
+                  <label class="field">
+                    <span>切分段数</span>
+                    <select id="realtime-segment-count">
+                      <option value="1">1 段</option>
+                      <option value="2">2 段</option>
+                      <option value="3">3 段</option>
+                      <option value="4">4 段</option>
+                      <option value="5">5 段</option>
+                      <option value="6" selected>6 段</option>
+                      <option value="8">8 段</option>
+                    </select>
+                  </label>
+                  <div class="field hint-text" id="realtime-segment-validation-text">使用系统默认 6 段</div>
+                </div>
+                <div class="table-shell table-frame table-frame-sm">
+                  <table class="data-table" id="realtime-segment-config-table">
+                    <thead>
+                      <tr>
+                        <th>时段名称</th>
+                        <th>开始时间</th>
+                        <th>结束时间</th>
+                        <th>说明</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
 
-          <div class="subsection-title">误差最大日期</div>
-          <div class="table-shell table-frame table-frame-sm">
-            <table class="data-table" id="daily-error-table">
-              <thead>
-                <tr>
-                  <th>日期</th>
-                  <th>MAE</th>
-                  <th>RMSE</th>
-                  <th>最大误差</th>
-                  <th>方向准确率</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          </div>
+              <div class="train-workflow-card train-workflow-card-interval">
+                <div class="train-card-accent">RANGE</div>
+                <div class="section-header compact">
+                  <div>
+                    <div class="section-title">价格区间概率模型训练配置</div>
+                    <div class="hint-text">实时模型独立训练价格区间概率模型，区间边界可与日前模型不同。</div>
+                  </div>
+                </div>
+                <div class="interval-config-note">
+                  <span>这里只配置实时模型价格区间边界；训练天数和轮数在本区域手动训练配置中维护。</span>
+                </div>
+                <div class="table-shell table-frame table-frame-sm">
+                  <table class="data-table" id="realtime-price-interval-table">
+                    <thead>
+                      <tr>
+                        <th>价格区间</th>
+                        <th>下限</th>
+                        <th>上限</th>
+                        <th>说明</th>
+                        <th>删除</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+                <div class="actions-row">
+                  <button class="ghost-btn" id="realtime-add-price-interval-btn" type="button">新增区间段</button>
+                  <button class="ghost-btn" id="realtime-reset-price-intervals-btn" type="button">恢复默认区间</button>
+                  <button class="ghost-btn" id="realtime-save-price-intervals-btn" type="button">保存区间配置</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="train-action-grid">
+              <div class="train-workflow-card train-workflow-card-auto" id="realtime-training-panel">
+                <div class="train-card-accent">AUTO</div>
+                <div class="section-header">
+                  <div>
+                    <div class="section-title">自动寻优</div>
+                    <div class="hint-text">只训练实时价格模型和实时区间概率模型，不影响日前模型版本。</div>
+                  </div>
+                </div>
+                <div class="form-grid four-col">
+                  <label class="field">
+                    <span>寻优最大历史天数</span>
+                    <input type="number" id="realtime-window-optimization-max-history-days" min="30" max="3650" value="100" />
+                  </label>
+                  <label class="field">
+                    <span>寻优验证集天数</span>
+                    <input type="number" id="realtime-window-optimization-valid-days" min="1" max="90" value="10" />
+                  </label>
+                  <label class="field">
+                    <span>滚动回测天数</span>
+                    <input type="text" id="realtime-window-optimization-rolling-horizons" value="14" placeholder="例如：14 或 14,30" />
+                  </label>
+                  <label class="field">
+                    <span>每个模型最大训练轮数</span>
+                    <input type="number" id="realtime-window-optimization-num-boost-round" min="50" max="3000" step="50" value="400" />
+                  </label>
+                  <label class="field">
+                    <span>局部细搜半径</span>
+                    <input type="number" id="realtime-window-optimization-fine-radius" min="0" max="60" value="15" />
+                  </label>
+                </div>
+                <div class="field segment-search-field">
+                  <span>参与时段数</span>
+                  <div class="segment-search-counts" id="realtime-segment-search-counts"></div>
+                  <small>实时模型独立保存参与寻优的时段数。</small>
+                </div>
+                <div class="actions-row">
+                  <button class="primary-btn" id="realtime-optimize-window-btn" type="button">自动寻优并训练实时模型</button>
+                </div>
+                <div class="embedded-progress-row">
+                  <div class="progress-card progress-card-realtime-optimize" id="realtime-optimize-progress-card">
+                    <div class="progress-header">
+                      <span class="progress-title">实时寻优进度</span>
+                      <span class="progress-state-text" id="realtime-optimize-progress-text">未开始</span>
+                    </div>
+                    <div class="progress-status-line" id="realtime-optimize-progress-status">等待手动点击实时模型寻优</div>
+                    <div class="progress-track">
+                      <div class="progress-fill" id="realtime-optimize-progress-fill"></div>
+                    </div>
+                  </div>
+                  <button class="stop-btn hidden" id="stop-realtime-optimize-btn" type="button">停止实时模型训练</button>
+                </div>
+              </div>
+
+              <div class="train-workflow-card train-workflow-card-manual">
+                <div class="train-card-accent">MANUAL</div>
+                <div class="section-header compact">
+                  <div>
+                    <div class="section-title">手动训练模型</div>
+                    <div class="hint-text">使用本区域参数，只重训实时价格模型和实时区间概率模型。</div>
+                  </div>
+                </div>
+                <div class="manual-model-grid">
+                  <div class="manual-model-panel price-panel">
+                    <div class="mini-section-title">具体价格模型训练配置</div>
+                    <div class="form-grid compact-form-grid">
+                      <label class="field">
+                        <span>训练模式</span>
+                        <select id="realtime-price-training-mode">
+                          <option value="rolling_window" selected>按最近 N 天训练</option>
+                          <option value="manual_date_range">手动起止日期</option>
+                        </select>
+                      </label>
+                      <label class="field"><span>使用天数</span><input type="number" id="realtime-price-training-window-days" min="7" max="730" value="60" /></label>
+                      <label class="field"><span>验证天数</span><input type="number" id="realtime-price-valid-days" min="1" max="90" value="14" /></label>
+                      <label class="field"><span>训练轮数</span><input type="number" id="realtime-price-num-boost-round" min="50" max="3000" step="50" value="400" /></label>
+                    </div>
+                    <div class="form-grid compact-form-grid date-config-grid">
+                      <label class="field"><span>起始日期</span><div class="date-picker" id="realtime-price-train-start-picker" data-input-id="realtime-price-train-start-date"><input class="date-display" id="realtime-price-train-start-date" type="text" readonly /><button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button><div class="date-panel"></div></div></label>
+                      <label class="field"><span>结束日期</span><div class="date-picker" id="realtime-price-train-end-picker" data-input-id="realtime-price-train-end-date"><input class="date-display" id="realtime-price-train-end-date" type="text" readonly /><button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button><div class="date-panel"></div></div></label>
+                    </div>
+                    <div class="toggle-row compact-toggle-row">
+                      <label class="switch-item"><input type="checkbox" id="realtime-price-enable-start" checked /><span>启用起始</span></label>
+                      <label class="switch-item"><input type="checkbox" id="realtime-price-enable-end" checked /><span>启用结束</span></label>
+                    </div>
+                  </div>
+
+                  <div class="manual-model-panel interval-panel">
+                    <div class="mini-section-title">价格区间概率模型训练配置</div>
+                    <div class="form-grid compact-form-grid">
+                      <label class="field">
+                        <span>训练模式</span>
+                        <select id="realtime-interval-training-mode">
+                          <option value="rolling_window" selected>按最近 N 天训练</option>
+                          <option value="manual_date_range">手动起止日期</option>
+                        </select>
+                      </label>
+                      <label class="field"><span>使用天数</span><input type="number" id="realtime-interval-training-window-days" min="7" max="730" value="60" /></label>
+                      <label class="field"><span>验证天数</span><input type="number" id="realtime-interval-valid-days" min="1" max="90" value="14" /></label>
+                      <label class="field"><span>训练轮数</span><input type="number" id="realtime-interval-num-boost-round" min="50" max="3000" step="50" value="400" /></label>
+                    </div>
+                    <div class="form-grid compact-form-grid date-config-grid">
+                      <label class="field"><span>起始日期</span><div class="date-picker" id="realtime-interval-train-start-picker" data-input-id="realtime-interval-train-start-date"><input class="date-display" id="realtime-interval-train-start-date" type="text" readonly /><button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button><div class="date-panel"></div></div></label>
+                      <label class="field"><span>结束日期</span><div class="date-picker" id="realtime-interval-train-end-picker" data-input-id="realtime-interval-train-end-date"><input class="date-display" id="realtime-interval-train-end-date" type="text" readonly /><button type="button" class="date-picker-icon" aria-label="选择日期">&#128197;</button><div class="date-panel"></div></div></label>
+                    </div>
+                    <div class="toggle-row compact-toggle-row">
+                      <label class="switch-item"><input type="checkbox" id="realtime-interval-enable-start" checked /><span>启用起始</span></label>
+                      <label class="switch-item"><input type="checkbox" id="realtime-interval-enable-end" checked /><span>启用结束</span></label>
+                    </div>
+                  </div>
+                </div>
+                <div class="actions-row manual-actions-row">
+                  <span class="hint-text">实时模型手动训练不会改动日前模型。</span>
+                  <button class="primary-btn" id="train-realtime-btn" type="button">手动重训实时模型</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
         </div>
 
         <div class="tab-panel" id="tab-predict">
@@ -499,12 +692,31 @@
 
           <div class="predict-control-card">
             <div class="predict-model-panel">
+              <div class="thermal-capacity-panel">
+                <label class="field predict-model-field">
+                  <span>火电开机容量(MW) <button class="help-trigger static-help" type="button" data-help-key="火电开机容量" aria-expanded="false">?</button></span>
+                  <input type="number" id="thermal-capacity-input" min="0" step="1" />
+                  <small id="thermal-capacity-file-hint">默认读取预测文件中的开机容量。</small>
+                </label>
+                <label class="thermal-capacity-check">
+                  <input type="checkbox" id="thermal-capacity-use-model" />
+                  <span>开机容量模型预测值 <button class="help-trigger static-help" type="button" data-help-key="开机容量模型预测值" aria-expanded="false">?</button></span>
+                </label>
+                <div class="thermal-capacity-model-value" id="thermal-capacity-model-value">模型预测值 <button class="help-trigger static-help" type="button" data-help-key="开机容量模型预测值展示" aria-expanded="false">?</button>：-</div>
+              </div>
               <label class="field predict-model-field">
-                <span>预测模型版本 <button class="help-trigger static-help" type="button" data-help-key="预测模型版本" aria-expanded="false">?</button></span>
+                <span>日前价格模型版本 <button class="help-trigger static-help" type="button" data-help-key="预测模型版本" aria-expanded="false">?</button></span>
                 <select id="predict-model-version">
-                  <option value="">使用当前默认</option>
+                  <option value="">使用当前默认日前模型</option>
                 </select>
                 <small>留空使用当前默认模型版本；选择历史版本仅作用于本次预测。</small>
+              </label>
+              <label class="field predict-model-field">
+                <span>实时价格模型版本 <button class="help-trigger static-help" type="button" data-help-key="预测模型版本" aria-expanded="false">?</button></span>
+                <select id="predict-realtime-model-version">
+                  <option value="">使用当前默认实时模型</option>
+                </select>
+                <small>留空使用当前默认实时模型；未训练时自动跳过实时价格预测。</small>
               </label>
             </div>
 
@@ -696,12 +908,133 @@
           </details>
         </div>
 
+        <div class="tab-panel" id="tab-predict-multi-day">
+          <div class="section-header">
+            <div>
+              <div class="section-title">预测多天价格</div>
+              <div class="hint-text">基于预测文件中识别到的基准日真实日前价格和开机容量，一次性预测后续多天的 96 点价格。</div>
+            </div>
+          </div>
+
+          <div class="predict-control-card multi-day-control-card">
+            <div class="predict-model-panel">
+              <label class="field predict-model-field">
+                <span>预测模型版本</span>
+                <select id="multi-day-model-version">
+                  <option value="">使用当前默认</option>
+                </select>
+                <small>留空使用当前默认模型版本；只影响本次多天预测。</small>
+              </label>
+            </div>
+
+            <div class="predict-run-panel">
+              <div class="progress-card progress-card-predict predict-progress-card" id="predict-multi-day-progress-card">
+                <div class="progress-header">
+                  <span class="progress-title">多天预测进度</span>
+                  <span class="progress-state-text" id="predict-multi-day-progress-text">未开始</span>
+                </div>
+                <div class="progress-status-line" id="predict-multi-day-progress-status">等待执行多天预测</div>
+                <div class="progress-track">
+                  <div class="progress-fill" id="predict-multi-day-progress-fill"></div>
+                </div>
+              </div>
+
+              <div class="predict-actions">
+                <div class="predict-action-row predict-action-row-primary">
+                  <button class="primary-btn predict-action-main" id="predict-multi-day-btn">执行多天预测</button>
+                  <button class="ghost-btn predict-action-side" id="reload-multi-day-template-btn">重新加载N天文件</button>
+                </div>
+                <div class="predict-action-row predict-action-row-secondary">
+                  <button class="ghost-btn" id="save-multi-day-template-btn">保存当前编辑</button>
+                  <button class="ghost-btn" id="export-multi-day-btn" type="button">导出多Sheet Excel</button>
+                </div>
+                <button class="stop-btn hidden predict-stop-action" id="stop-predict-multi-day-btn" type="button">停止多天预测</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="similarity-config-card multi-day-similarity-card">
+            <section class="similarity-config-panel similarity-config-panel-netload">
+              <div class="similarity-config-head">
+                <div class="similarity-config-title">净负荷相似法</div>
+                <div class="similarity-config-subtitle">后续每天使用对应新能源、用电负荷计算净负荷；基准价格使用文件中基准日的真实日前价格。</div>
+              </div>
+              <div class="similarity-config-inputs">
+                <label class="field predict-reference-field">
+                  <span>最近天数</span>
+                  <input type="number" id="multi-day-recent-reference-days" min="1" max="100" value="1" />
+                </label>
+              </div>
+            </section>
+
+            <section class="similarity-config-panel">
+              <div class="similarity-config-head">
+                <div class="similarity-config-title">KNN相似法</div>
+                <div class="similarity-config-subtitle">保留多因素相似度参数，不启用同类型日路径。</div>
+              </div>
+              <div class="similarity-config-inputs">
+                <label class="field predict-reference-field">
+                  <span>相似点数量 K</span>
+                  <input type="number" id="multi-day-knn-similar-k" min="1" max="20" value="5" />
+                </label>
+                <label class="field predict-reference-field">
+                  <span>最大距离阈值</span>
+                  <input type="number" id="multi-day-knn-similar-max-distance" min="0.1" max="20" step="0.1" value="3.0" />
+                </label>
+              </div>
+            </section>
+
+            <section class="similarity-config-panel">
+              <div class="similarity-config-head">
+                <div class="similarity-config-title">加权KNN回归</div>
+                <div class="similarity-config-subtitle">越相似的历史点权重越大，作为模型预测之外的参考曲线。</div>
+              </div>
+              <div class="similarity-config-inputs">
+                <label class="field predict-reference-field">
+                  <span>相似点数量 K</span>
+                  <input type="number" id="multi-day-weighted-knn-k" min="1" max="20" value="5" />
+                </label>
+                <label class="field predict-reference-field">
+                  <span>最大距离阈值</span>
+                  <input type="number" id="multi-day-weighted-knn-max-distance" min="0.1" max="20" step="0.1" value="3.0" />
+                </label>
+              </div>
+            </section>
+          </div>
+
+          <div class="chart-card multi-day-result-card">
+            <div class="table-toolbar">
+              <div class="toolbar-title">多天预测曲线</div>
+              <div class="toolbar-meta" id="multi-day-prediction-meta">尚未执行多天预测</div>
+            </div>
+            <div class="multi-day-results-grid" id="multi-day-results"></div>
+          </div>
+
+          <details class="advanced-panel">
+            <summary>查看和编辑N天预测文件</summary>
+            <div class="table-toolbar">
+              <div class="toolbar-title">预测文件-N天 预览</div>
+              <div class="toolbar-meta" id="multi-day-template-meta">-</div>
+            </div>
+            <div class="table-shell table-frame table-frame-xl">
+              <div class="table-scroll">
+                <table class="data-table editable-table" id="multi-day-template-table"></table>
+              </div>
+            </div>
+          </details>
+        </div>
+
         <div class="tab-panel" id="tab-versions">
           <div class="section-header">
             <div>
               <div class="section-title">模型版本</div>
               <div class="hint-text">选择历史训练版本作为默认模型版本，或清理不需要的版本。</div>
             </div>
+          </div>
+
+          <div class="segmented-control model-version-target" id="model-version-target" aria-label="模型版本类型">
+            <button type="button" class="segment segmented-option active" data-target="dayahead">日前价格模型</button>
+            <button type="button" class="segment segmented-option" data-target="realtime">实时价格模型</button>
           </div>
 
           <div class="form-grid version-grid">
@@ -729,37 +1062,115 @@
             </div>
           </div>
 
+          <section class="version-current-overview" id="current-version-overview"></section>
+          <section class="version-module-grid" id="current-model-module-grid"></section>
+
+          <section class="train-metrics-section version-diagnostics-panel" id="version-diagnostics-panel">
+          <div class="subsection-title">当前默认模型版本分时段指标</div>
+          <div class="table-shell table-frame table-frame-md">
+            <table class="data-table" id="metrics-table">
+              <thead>
+                <tr>
+                  <th>分时段</th>
+                  <th>净负荷相似法 MAE</th>
+                  <th>净负荷相似法 RMSE</th>
+                  <th>模型 MAE</th>
+                  <th>模型 RMSE</th>
+                  <th>训练样本数</th>
+                  <th>验证样本数</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="subsection-title">模型算法对比</div>
+          <div class="table-shell table-frame table-frame-sm">
+            <table class="data-table" id="model-compare-table">
+              <thead>
+                <tr>
+                  <th>算法</th>
+                  <th>是否选中</th>
+                  <th>MAE</th>
+                  <th>RMSE</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="subsection-title">最近 14/30 天滚动回测</div>
+          <div class="table-shell table-frame table-frame-sm">
+            <div class="table-scroll">
+              <table class="data-table" id="rolling-backtest-table">
+                <thead>
+                  <tr>
+                    <th>窗口</th>
+                    <th>模型 MAE</th>
+                    <th>模型 RMSE</th>
+                    <th>净负荷相似法 MAE</th>
+                    <th>较净负荷相似法提升</th>
+                    <th>方向准确率</th>
+                    <th>高价尖峰 MAE</th>
+                    <th>晚高峰 MAE</th>
+                    <th>最大误差</th>
+                    <th>样本数</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="subsection-title">模型直观诊断</div>
+          <div class="table-shell table-frame table-frame-sm">
+            <table class="data-table" id="model-health-table">
+              <thead>
+                <tr>
+                  <th>观察角度</th>
+                  <th>数值</th>
+                  <th>怎么理解</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="subsection-title">误差最大日期</div>
+          <div class="table-shell table-frame table-frame-sm">
+            <table class="data-table" id="daily-error-table">
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>MAE</th>
+                  <th>RMSE</th>
+                  <th>最大误差</th>
+                  <th>方向准确率</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          </section>
+
           <div class="table-shell table-frame table-frame-lg">
             <div class="table-scroll">
               <table class="data-table" id="versions-table">
                 <thead>
                   <tr>
                     <th><input type="checkbox" id="select-all-versions" /></th>
-                    <th>版本号</th>
+                    <th>版本摘要</th>
                     <th class="version-sort-head" data-version-sort="created_at_desc">创建时间</th>
-                    <th>算法</th>
-                    <th>训练使用天数</th>
-                    <th>最大轮数</th>
-                    <th>最佳轮数</th>
                     <th>训练范围</th>
-                    <th>分段</th>
-                    <th>高价加权</th>
-                    <th>样本数</th>
                     <th class="version-sort-head" data-version-sort="final_mae_asc">模型 MAE</th>
                     <th class="version-sort-head" data-version-sort="final_rmse_asc">模型 RMSE</th>
-                    <th class="version-sort-head" data-version-sort="rolling_14_mae_asc">14天模型 MAE</th>
-                    <th>14天模型 RMSE</th>
-                    <th>14天净负荷相似法 MAE</th>
                     <th class="version-sort-head" data-version-sort="rolling_30_mae_asc">30天模型 MAE</th>
-                    <th>30天模型 RMSE</th>
-                    <th class="version-sort-head" data-version-sort="rolling_30_thermal_space_similarity_mae_asc">30天净负荷相似法 MAE</th>
-                    <th>较净负荷相似法提升</th>
+                    <th>价格区间模型</th>
+                    <th>开机容量模型</th>
                     <th class="version-sort-head" data-version-sort="rolling_30_high_price_mae_asc">高价尖峰 MAE</th>
-                    <th>尖峰净负荷相似法 MAE</th>
-                    <th class="version-sort-head" data-version-sort="rolling_30_evening_peak_mae_asc">晚高峰 MAE</th>
-                    <th>方向准确率</th>
-                    <th>最大误差</th>
                     <th>状态</th>
+                    <th>详情</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -869,6 +1280,8 @@
     <div class="toast-stack" id="toast-stack"></div>
 
     <script src="/assets/vendor/echarts.min.js"></script>
-    <script src="/assets/app.js"></script>
+    <script src="/assets/archive_review.js"></script>
+    <script src="/assets/progress_state.js?v=20260522-progress-fix"></script>
+    <script src="/assets/app.js?v=20260531-segment-default"></script>
   </body>
   </html>
